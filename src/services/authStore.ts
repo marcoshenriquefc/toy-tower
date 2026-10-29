@@ -105,6 +105,23 @@ export function hasRealGoogleClientId(): boolean {
   )
 }
 
+async function parseApiJsonResponse<T>(res: Response): Promise<T> {
+  const rawText = await res.text()
+  if (!rawText || !rawText.trim()) {
+    throw new Error(
+      `Servidor retornou resposta vazia (HTTP ${res.status}). Verifique o deploy da API.`
+    )
+  }
+  try {
+    return JSON.parse(rawText) as T
+  } catch {
+    const preview = rawText.trim().slice(0, 120)
+    throw new Error(
+      `Erro no servidor da API (HTTP ${res.status}): ${preview}`
+    )
+  }
+}
+
 async function resolveGoogleClientId(): Promise<string> {
   if (isRealClientId(state.googleClientId)) {
     return state.googleClientId.trim()
@@ -120,10 +137,10 @@ async function resolveGoogleClientId(): Promise<string> {
       credentials: 'include',
     })
     if (res.ok) {
-      const data = (await res.json()) as {
+      const data = await parseApiJsonResponse<{
         ok?: boolean
         googleClientId?: string
-      }
+      }>(res)
       if (data.googleClientId && isRealClientId(data.googleClientId)) {
         state.googleClientId = data.googleClientId.trim()
         return state.googleClientId
@@ -133,7 +150,7 @@ async function resolveGoogleClientId(): Promise<string> {
     // Ignore config fetch error
   }
   throw new Error(
-    'GOOGLE_CLIENT_ID não encontrado. Verifique o arquivo .env na raiz do projeto.'
+    'GOOGLE_CLIENT_ID não encontrado. Configure VITE_GOOGLE_CLIENT_ID / GOOGLE_CLIENT_ID nas variáveis de ambiente.'
   )
 }
 
@@ -186,12 +203,12 @@ async function restoreSession(): Promise<UserAccount | null> {
           }),
         })
         if (redirectRes.ok) {
-          const redirectData = (await redirectRes.json()) as {
+          const redirectData = await parseApiJsonResponse<{
             ok?: boolean
             user?: UserAccount
             token?: string
             dbMode?: 'mongodb' | 'local-fallback'
-          }
+          }>(redirectRes)
           if (redirectData.ok && redirectData.user) {
             applyUserSession(
               redirectData.user,
@@ -214,13 +231,13 @@ async function restoreSession(): Promise<UserAccount | null> {
       headers,
     })
     if (!res.ok) return null
-    const data = (await res.json()) as {
+    const data = await parseApiJsonResponse<{
       ok?: boolean
       user?: UserAccount | null
       token?: string | null
       dbMode?: 'mongodb' | 'local-fallback'
       googleClientId?: string
-    }
+    }>(res)
     if (data.googleClientId && isRealClientId(data.googleClientId)) {
       state.googleClientId = data.googleClientId.trim()
     }
@@ -325,17 +342,16 @@ async function loginWithGoogle(): Promise<{
       )
     }
 
-    const authCode = await new Promise<string>((resolve, reject) => {
+    const accessToken = await new Promise<string>((resolve, reject) => {
       let settled = false
-      const codeClient = oauth2.initCodeClient({
+      const tokenClient = oauth2.initTokenClient({
         client_id: clientId,
         scope: 'openid email profile',
-        ux_mode: 'popup',
-        select_account: true,
+        prompt: 'select_account',
         callback: (resp) => {
           if (settled) return
           settled = true
-          if (resp.error || !resp.code) {
+          if (resp.error || !resp.access_token) {
             reject(
               new Error(
                 resp.error === 'access_denied'
@@ -345,7 +361,7 @@ async function loginWithGoogle(): Promise<{
             )
             return
           }
-          resolve(resp.code)
+          resolve(resp.access_token)
         },
         error_callback: (err) => {
           if (settled) return
@@ -357,7 +373,7 @@ async function loginWithGoogle(): Promise<{
           if (err?.type === 'popup_failed_to_open') {
             reject(
               new Error(
-                'O navegador bloqueou o popup do Google. Permita popups para localhost.'
+                'O navegador bloqueou o popup do Google. Permita popups para este site.'
               )
             )
             return
@@ -370,7 +386,7 @@ async function loginWithGoogle(): Promise<{
         },
       })
 
-      codeClient.requestCode()
+      tokenClient.requestAccessToken({ prompt: 'select_account' })
     })
 
     const res = await fetch('/api/auth/google', {
@@ -380,19 +396,18 @@ async function loginWithGoogle(): Promise<{
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        code: authCode,
-        redirectUri: 'postmessage',
+        accessToken,
       }),
     })
 
-    const data = (await res.json()) as {
+    const data = await parseApiJsonResponse<{
       ok?: boolean
       error?: string
       user?: UserAccount
       token?: string
       isNewUser?: boolean
       dbMode?: 'mongodb' | 'local-fallback'
-    }
+    }>(res)
 
     if (!res.ok || !data.ok || !data.user) {
       throw new Error(data.error || 'Não foi possível autenticar com o Google.')
@@ -437,7 +452,10 @@ async function syncEquippedSkinBySpriteId(spriteId: string): Promise<void> {
       body: JSON.stringify({ equippedSkin: dbSkin }),
     })
     if (res.ok) {
-      const data = (await res.json()) as { ok?: boolean; user?: UserAccount }
+      const data = await parseApiJsonResponse<{
+        ok?: boolean
+        user?: UserAccount
+      }>(res)
       if (data.ok && data.user) {
         state.user = data.user
       }
@@ -460,17 +478,19 @@ async function addFriend(query: string): Promise<FriendEntry> {
     headers,
     body: JSON.stringify({ query }),
   })
-  const data = (await res.json()) as {
+  const data = await parseApiJsonResponse<{
     ok?: boolean
     error?: string
     user?: UserAccount
     addedFriend?: FriendEntry
-  }
-  if (!res.ok || !data.ok || !data.user || !data.addedFriend) {
+    targetProfile?: FriendEntry
+  }>(res)
+  const friend = data.addedFriend || data.targetProfile
+  if (!res.ok || !data.ok || !data.user || !friend) {
     throw new Error(data.error || 'Não foi possível adicionar amigo.')
   }
   state.user = data.user
-  return data.addedFriend
+  return friend
 }
 
 async function updateCustomNick(customNick: string): Promise<UserAccount> {
@@ -486,11 +506,11 @@ async function updateCustomNick(customNick: string): Promise<UserAccount> {
     headers,
     body: JSON.stringify({ customNick }),
   })
-  const data = (await res.json()) as {
+  const data = await parseApiJsonResponse<{
     ok?: boolean
     error?: string
     user?: UserAccount
-  }
+  }>(res)
   if (!res.ok || !data.ok || !data.user) {
     throw new Error(data.error || 'Não foi possível atualizar o apelido.')
   }
@@ -514,19 +534,21 @@ async function sendFriendRequest(query: string): Promise<{
     headers,
     body: JSON.stringify({ query }),
   })
-  const data = (await res.json()) as {
+  const data = await parseApiJsonResponse<{
     ok?: boolean
     error?: string
     user?: UserAccount
     target?: FriendEntry
+    targetProfile?: FriendEntry
     autoAccepted?: boolean
-  }
-  if (!res.ok || !data.ok || !data.user || !data.target) {
+  }>(res)
+  const target = data.target || data.targetProfile
+  if (!res.ok || !data.ok || !data.user || !target) {
     throw new Error(data.error || 'Jogador não encontrado')
   }
   state.user = data.user
   return {
-    target: data.target,
+    target,
     autoAccepted: Boolean(data.autoAccepted),
   }
 }
@@ -547,12 +569,12 @@ async function respondFriendRequest(
     headers,
     body: JSON.stringify({ senderHandle, accept }),
   })
-  const data = (await res.json()) as {
+  const data = await parseApiJsonResponse<{
     ok?: boolean
     error?: string
     user?: UserAccount
     acceptedFriend?: FriendEntry
-  }
+  }>(res)
   if (!res.ok || !data.ok || !data.user) {
     throw new Error(data.error || 'Não foi possível responder ao pedido.')
   }

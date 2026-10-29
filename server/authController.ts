@@ -1,8 +1,9 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { connectMongoDB, ensureEnvLoaded } from './db'
+import { connectMongoDB, ensureEnvLoaded } from './db.js'
 import {
   DEFAULT_INITIAL_FRIENDS,
   DEFAULT_UNLOCKED_SKINS,
@@ -10,7 +11,7 @@ import {
   IFriendRequestEntry,
   IUser,
   UserModel,
-} from './models/User'
+} from './models/User.js'
 
 export { connectMongoDB }
 
@@ -47,7 +48,9 @@ function deriveDefaultCustomNick(displayName: string): string {
 }
 
 const SESSION_COOKIE_NAME = 'toy_tower_session'
-const LOCAL_DB_FILE = path.resolve(process.cwd(), 'server', '.data', 'users.json')
+const LOCAL_DB_FILE = process.env.VERCEL
+  ? path.join(os.tmpdir(), 'toy-tower-users.json')
+  : path.resolve(process.cwd(), 'server', '.data', 'users.json')
 
 export function getConfiguredGoogleClientId(): string {
   ensureEnvLoaded()
@@ -1162,6 +1165,34 @@ function parseCookies(cookieHeader?: string): Record<string, string> {
 }
 
 function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const vercelReq = req as IncomingMessage & {
+    body?: unknown
+  }
+
+  // Vercel Serverless Functions pre-parse `req.body` before invoking the handler.
+  if (vercelReq.body !== undefined && vercelReq.body !== null) {
+    if (Buffer.isBuffer(vercelReq.body)) {
+      const str = vercelReq.body.toString('utf-8').trim()
+      return Promise.resolve(
+        str ? (JSON.parse(str) as Record<string, unknown>) : {}
+      )
+    }
+    if (typeof vercelReq.body === 'string') {
+      const str = vercelReq.body.trim()
+      return Promise.resolve(
+        str ? (JSON.parse(str) as Record<string, unknown>) : {}
+      )
+    }
+    if (typeof vercelReq.body === 'object') {
+      return Promise.resolve(vercelReq.body as Record<string, unknown>)
+    }
+  }
+
+  // If the stream already ended (e.g. empty body on serverless), resolve immediately
+  if (req.readableEnded) {
+    return Promise.resolve({})
+  }
+
   return new Promise((resolve, reject) => {
     let raw = ''
     req.on('data', (chunk) => {
@@ -1208,14 +1239,49 @@ export function extractRequestToken(req: IncomingMessage): string | null {
 }
 
 /**
+ * Resolves the canonical `/api/auth/<subpath>` route across both Vite local dev
+ * and Vercel Serverless rewrites (`?route=...`, `?path=...`, or `req.query.route`).
+ */
+function resolveCanonicalAuthUrl(req: IncomingMessage): string {
+  const rawUrl = req.url || ''
+  const [pathname, search = ''] = rawUrl.split('?')
+
+  const vercelReq = req as IncomingMessage & {
+    query?: Record<string, string | string[] | undefined>
+  }
+
+  const params = new URLSearchParams(search)
+  const queryRoute =
+    vercelReq.query?.route ??
+    vercelReq.query?.path ??
+    params.get('route') ??
+    params.get('path')
+
+  const normalizedQueryRoute = Array.isArray(queryRoute)
+    ? queryRoute.join('/')
+    : (queryRoute || '').trim().replace(/^\/+/, '')
+
+  if (
+    normalizedQueryRoute &&
+    (pathname === '/api/auth' ||
+      pathname === '/api/auth/' ||
+      pathname.includes('[...route]'))
+  ) {
+    return `/api/auth/${normalizedQueryRoute}`.replace(/\/+$/, '')
+  }
+
+  return pathname.replace(/\/+$/, '')
+}
+
+/**
  * Unified HTTP request handler for `/api/auth/*` routes.
- * Used both by the Vite dev/preview server middleware and standalone Node server.
+ * Used by Vercel Serverless Functions, Vite dev/preview server middleware, and Node HTTP server.
  */
 export async function handleAuthApiRequest(
   req: IncomingMessage,
   res: ServerResponse
 ): Promise<boolean> {
-  const url = (req.url || '').split('?')[0]
+  const url = resolveCanonicalAuthUrl(req)
   if (!url.startsWith('/api/auth')) {
     return false
   }

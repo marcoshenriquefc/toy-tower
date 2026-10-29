@@ -2,10 +2,15 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
+  "functions": {
+    "api/**/*.ts": {
+      "includeFiles": "server/**"
+    }
+  },
   "rewrites": [
     {
-      "source": "/api/auth/:path*",
-      "destination": "/api/auth/[...route]"
+      "source": "/api/auth/:route*",
+      "destination": "/api/auth?route=:route*"
     },
     {
       "source": "/((?!api/|assets/).*)",
