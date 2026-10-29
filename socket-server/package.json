@@ -1,0 +1,23 @@
+{
+  "name": "toy-tower-socket-server",
+  "version": "1.0.0",
+  "description": "Dedicated Real-Time Socket.io Server for Toy Tower (Render Web Service)",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "mongoose": "^8.10.1",
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
