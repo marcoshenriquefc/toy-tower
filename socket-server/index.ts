@@ -611,7 +611,8 @@ async function concludeMultiplayerRound(
   room: InternalRoom,
   winnerHandle: string,
   elapsedTimeMs: number,
-  clientEliminationOrders?: Record<string, number>
+  clientEliminationOrders?: Record<string, number>,
+  soloEliminated = false
 ): Promise<void> {
   if (room.status === 'FINISHED') return
   clearSurvivalClimaxTimer(room)
@@ -663,9 +664,16 @@ async function concludeMultiplayerRound(
   const cupTargetPoints = getCupTargetPoints(room.victoryCondition)
   room.cupTargetPoints = cupTargetPoints
 
+  const winnerState = room.matchStateByHandle.get(winnerPlayer.handle)
+  const isSoloEliminated =
+    soloEliminated ||
+    (presentPlayers.length === 1 &&
+      ((winnerState?.lives ?? 3) <= 0 || Boolean(winnerState?.isEliminated)))
+
   const podium = sorted.map((p, idx) => {
     const st = room.matchStateByHandle.get(p.handle)
-    const pointsEarned = CUP_RANK_POINTS[idx] ?? 0
+    const rank = isSoloEliminated ? 4 : idx + 1
+    const pointsEarned = isSoloEliminated ? 0 : (CUP_RANK_POINTS[idx] ?? 0)
     const previousCupPoints = p.cupPoints ?? 0
     const nextCupPoints = Math.min(
       cupTargetPoints,
@@ -675,7 +683,7 @@ async function concludeMultiplayerRound(
     p.cupPoints = nextCupPoints
 
     return {
-      rank: idx + 1,
+      rank,
       userId: p.handle,
       handle: p.handle,
       customNick: p.customNick,
@@ -689,14 +697,15 @@ async function concludeMultiplayerRound(
       cupPoints: nextCupPoints,
       cupTargetPoints,
       isEliminated: st?.isEliminated ?? false,
-      isWinner: p.handle === winnerPlayer.handle,
-      isCupWinner: nextCupPoints >= cupTargetPoints,
+      isWinner: !isSoloEliminated && p.handle === winnerPlayer.handle,
+      isCupWinner: !isSoloEliminated && nextCupPoints >= cupTargetPoints,
     }
   })
 
   const isSingleWin = room.victoryCondition === 'SINGLE_WIN'
   const cupChampions = podium.filter((p) => (p.cupPoints ?? 0) >= cupTargetPoints)
-  const isCupFinished = isSingleWin || cupChampions.length > 0
+  const isCupFinished =
+    !isSoloEliminated && (isSingleWin || cupChampions.length > 0)
 
   let cupWinnerEntry = podium[0]
   if (isCupFinished && !isSingleWin && cupChampions.length > 0) {
@@ -759,19 +768,37 @@ function checkSurvivalLastPlayerStanding(
   io: SocketIOServer,
   room: InternalRoom
 ): void {
-  if (room.status !== 'PLAYING' || room.activeGameMode !== 'SURVIVAL') {
+  if (room.status !== 'PLAYING') {
     return
   }
 
   const presentPlayers = room.slots.filter(
     (s): s is RoomSlotPlayerDTO => s !== null
   )
-  if (presentPlayers.length < 2) return
+  if (presentPlayers.length === 0) return
 
   const alive = presentPlayers.filter((p) => {
     const st = room.matchStateByHandle.get(p.handle)
     return (st?.lives ?? 3) > 0 && !st?.isEliminated
   })
+
+  if (presentPlayers.length === 1) {
+    if (alive.length === 0 && presentPlayers[0]) {
+      void concludeMultiplayerRound(
+        io,
+        room,
+        presentPlayers[0].handle,
+        0,
+        undefined,
+        true
+      )
+    }
+    return
+  }
+
+  if (room.activeGameMode !== 'SURVIVAL') {
+    return
+  }
 
   if (alive.length > 1) return
 
@@ -995,7 +1022,7 @@ io.on('connection', async (socket) => {
   setForHandle.add(socket.id)
 
   socket.emit('auth:user_updated', user)
-  await notifyFriendsPresence(io, user)
+  void notifyFriendsPresence(io, user)
 
   // --------------------------------------------------------------------------
   // PARTE 1: AMIGOS E PERFIL EM TEMPO REAL
@@ -1312,10 +1339,22 @@ io.on('connection', async (socket) => {
       if (session.roomId) {
         const existing = roomsById.get(session.roomId)
         if (existing) {
-          if (
-            existing.status === 'LOBBY' &&
-            existing.hostHandle.toLowerCase() === session.handle.toLowerCase()
-          ) {
+          const occupiedCount = existing.slots.filter((s) => s !== null).length
+          const isHostOrSolo =
+            existing.hostHandle.toLowerCase() ===
+              session.handle.toLowerCase() || occupiedCount <= 1
+
+          const mySlot = existing.slots.find(
+            (s) => s?.handle.toLowerCase() === session.handle.toLowerCase()
+          )
+          if (mySlot) {
+            mySlot.isReady = false
+          }
+
+          if (isHostOrSolo) {
+            abortRoomCountdown(io, existing)
+            clearSurvivalClimaxTimer(existing)
+            existing.status = 'LOBBY'
             if (reqOpts?.selectedGameMode) {
               existing.selectedGameMode = initialMode
               if (initialMode !== 'RANDOM') {
@@ -1328,7 +1367,7 @@ io.on('connection', async (socket) => {
             }
           }
           const dto = serializeRoom(existing)
-          socket.emit('room:state_updated', dto)
+          broadcastRoomState(io, existing)
           safeAck(payloadOrAck, maybeAck, { ok: true, room: dto })
           return
         }
@@ -1397,12 +1436,17 @@ io.on('connection', async (socket) => {
         safeAck(payload, ack, { ok: false, error: 'Sala não encontrada.' })
         return
       }
-      if (room.status === 'PLAYING') {
+      const occupiedCount = room.slots.filter((s) => s !== null).length
+      if (room.status === 'PLAYING' && occupiedCount > 1) {
         safeAck(payload, ack, {
           ok: false,
           error: 'Não é possível mudar o modo com a partida em andamento.',
         })
         return
+      }
+      if (room.status === 'PLAYING' && occupiedCount <= 1) {
+        clearSurvivalClimaxTimer(room)
+        room.status = 'LOBBY'
       }
       const requested = payload?.gameMode
       const nextMode: RoomSelectableGameMode =
@@ -1431,12 +1475,17 @@ io.on('connection', async (socket) => {
         safeAck(payload, ack, { ok: false, error: 'Sala não encontrada.' })
         return
       }
-      if (room.status === 'PLAYING') {
+      const occupiedCount = room.slots.filter((s) => s !== null).length
+      if (room.status === 'PLAYING' && occupiedCount > 1) {
         safeAck(payload, ack, {
           ok: false,
           error: 'Não é possível mudar a condição de vitória durante a partida.',
         })
         return
+      }
+      if (room.status === 'PLAYING' && occupiedCount <= 1) {
+        clearSurvivalClimaxTimer(room)
+        room.status = 'LOBBY'
       }
       const requested = payload?.victoryCondition
       const nextCondition: RoomVictoryCondition =
@@ -1560,24 +1609,59 @@ io.on('connection', async (socket) => {
   socket.on(
     'room:toggle_ready',
     (
-      payload: { isReady?: boolean },
+      payload: {
+        isReady?: boolean
+        selectedGameMode?: RoomSelectableGameMode
+        victoryCondition?: RoomVictoryCondition
+      },
       ack?: (res: { ok: boolean; room?: RoomStateDTO; error?: string }) => void
     ) => {
       if (!session.roomId) {
-        ack?.({ ok: false, error: 'Você não está em uma sala.' })
+        safeAck(payload, ack, { ok: false, error: 'Você não está em uma sala.' })
         return
       }
       const room = roomsById.get(session.roomId)
       if (!room) {
-        ack?.({ ok: false, error: 'Sala não encontrada.' })
+        safeAck(payload, ack, { ok: false, error: 'Sala não encontrada.' })
         return
       }
 
       // Only the player themselves can toggle their own Ready status
       const mySlot = room.slots.find((s) => s?.handle === session.handle)
       if (!mySlot) {
-        ack?.({ ok: false, error: 'Slot não encontrado na sala.' })
+        safeAck(payload, ack, { ok: false, error: 'Slot não encontrado na sala.' })
         return
+      }
+
+      const occupiedCount = room.slots.filter((s) => s !== null).length
+      const isHostOrSolo =
+        room.hostHandle.toLowerCase() === session.handle.toLowerCase() ||
+        occupiedCount <= 1
+
+      if (payload && typeof payload === 'object' && isHostOrSolo) {
+        if (
+          payload.selectedGameMode === 'RACE' ||
+          payload.selectedGameMode === 'SURVIVAL' ||
+          payload.selectedGameMode === 'RANDOM'
+        ) {
+          room.selectedGameMode = payload.selectedGameMode
+          if (payload.selectedGameMode !== 'RANDOM') {
+            room.activeGameMode = payload.selectedGameMode
+          }
+        }
+        if (
+          payload.victoryCondition === 'SINGLE_WIN' ||
+          payload.victoryCondition === 'CUP_6' ||
+          payload.victoryCondition === 'CUP_12'
+        ) {
+          room.victoryCondition = payload.victoryCondition
+          room.cupTargetPoints = getCupTargetPoints(payload.victoryCondition)
+        }
+      }
+
+      if (room.status === 'PLAYING' && occupiedCount <= 1) {
+        clearSurvivalClimaxTimer(room)
+        room.status = 'LOBBY'
       }
 
       mySlot.isReady =
@@ -1586,7 +1670,7 @@ io.on('connection', async (socket) => {
           : !mySlot.isReady
 
       checkAndStartRoomCountdown(io, room)
-      ack?.({ ok: true, room: serializeRoom(room) })
+      safeAck(payload, ack, { ok: true, room: serializeRoom(room) })
     }
   )
 
@@ -1767,15 +1851,16 @@ io.on('connection', async (socket) => {
   socket.on('match:next_cup_round', () => {
     if (!session.roomId) return
     const room = roomsById.get(session.roomId)
-    if (!room || room.status !== 'FINISHED') return
-
-    const cupTargetPoints = getCupTargetPoints(room.victoryCondition)
+    if (!room) return
     const presentPlayers = room.slots.filter(
       (s): s is RoomSlotPlayerDTO => s !== null
     )
-    const hasCupWinner =
-      room.victoryCondition === 'SINGLE_WIN' ||
-      presentPlayers.some((s) => (s.cupPoints ?? 0) >= cupTargetPoints)
+    if (room.status !== 'FINISHED' && presentPlayers.length > 1) return
+
+    const cupTargetPoints = getCupTargetPoints(room.victoryCondition)
+    const hasCupWinner = presentPlayers.some(
+      (s) => (s.cupPoints ?? 0) >= cupTargetPoints
+    )
     if (hasCupWinner) return
 
     clearSurvivalClimaxTimer(room)

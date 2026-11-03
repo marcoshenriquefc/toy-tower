@@ -948,7 +948,13 @@ function leaveRoom(): void {
   state.gameOverResult = null
 }
 
-function toggleReady(forceReady?: boolean): Promise<RoomStateDTO> {
+function toggleReady(
+  forceReady?: boolean,
+  options?: {
+    selectedGameMode?: SelectableGameMode
+    victoryCondition?: VictoryCondition
+  }
+): Promise<RoomStateDTO> {
   connect()
   return new Promise((resolve, reject) => {
     if (!socket) {
@@ -966,9 +972,18 @@ function toggleReady(forceReady?: boolean): Promise<RoomStateDTO> {
       }
     }, 3500)
 
+    const selectedGameMode =
+      options?.selectedGameMode || state.room?.selectedGameMode
+    const victoryCondition =
+      options?.victoryCondition || state.room?.victoryCondition
+
     socket.emit(
       'room:toggle_ready',
-      { isReady: forceReady },
+      {
+        isReady: forceReady,
+        selectedGameMode,
+        victoryCondition,
+      },
       (res: { ok?: boolean; room?: RoomStateDTO; error?: string }) => {
         if (settled) return
         settled = true

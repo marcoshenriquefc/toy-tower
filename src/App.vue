@@ -82,7 +82,7 @@ const isOnlineMultiplayerMatch = ref<boolean>(false)
 const localPlayerLives = ref<number>(3)
 
 /** Selected game mode in Local / Multiplayer lobby ('RACE' | 'SURVIVAL' | 'RANDOM') */
-const selectedGameMode = ref<SelectableGameMode>('RANDOM')
+const selectedGameMode = ref<SelectableGameMode>('RACE')
 /** Resolved active game mode for the current match ('RACE' | 'SURVIVAL') */
 const activeMatchGameMode = ref<GameMode>('RACE')
 /** Selected Victory Condition (valid only for Multiplayer mode: 'SINGLE_WIN' | 'CUP_6' | 'CUP_12') */
@@ -424,10 +424,28 @@ const VICTORY_CONDITION_OPTIONS: VictoryConditionOptionCard[] = [
   },
 ]
 
+const isRoomHostOrSolo = computed<boolean>(() => {
+  const room = multiplayerClient.state.room
+  if (!room) return true
+  const occupiedCount = room.slots.filter((s) => Boolean(s && s.handle)).length
+  if (occupiedCount <= 1) return true
+  const myHandle = normalizePlayerHandle(authStore.state.user?.handle)
+  const hostHandle = normalizePlayerHandle(room.hostHandle)
+  return Boolean(myHandle && hostHandle && myHandle === hostHandle)
+})
+
+const hasAliveRemoteOpponents = computed<boolean>(() => {
+  if (!isOnlineMultiplayerMatch.value) return false
+  const remotes = Object.values(multiplayerClient.state.remoteLanes)
+  if (remotes.length === 0) return false
+  return remotes.some((r) => r.lives > 0 && !r.isEliminated)
+})
+
 const currentLobbySelectableMode = computed<SelectableGameMode>(() => {
   if (
     screenFlow.value === 'MULTIPLAYER_LOBBY' &&
-    multiplayerClient.state.room?.selectedGameMode
+    multiplayerClient.state.room?.selectedGameMode &&
+    !isRoomHostOrSolo.value
   ) {
     return multiplayerClient.state.room.selectedGameMode
   }
@@ -444,7 +462,8 @@ const currentLobbyModeInfo = computed<GameModeOptionCard>(() => {
 const currentLobbyVictoryCondition = computed<VictoryCondition>(() => {
   if (
     screenFlow.value === 'MULTIPLAYER_LOBBY' &&
-    multiplayerClient.state.room?.victoryCondition
+    multiplayerClient.state.room?.victoryCondition &&
+    !isRoomHostOrSolo.value
   ) {
     return multiplayerClient.state.room.victoryCondition
   }
@@ -466,6 +485,16 @@ function openGameModeModal() {
 
 function closeGameModeModal() {
   isGameModeModalOpen.value = false
+  if (
+    screenFlow.value === 'MULTIPLAYER_LOBBY' &&
+    multiplayerClient.state.room &&
+    isRoomHostOrSolo.value
+  ) {
+    void multiplayerClient.setRoomGameMode(selectedGameMode.value)
+    void multiplayerClient.setRoomVictoryCondition(
+      selectedVictoryCondition.value
+    )
+  }
 }
 
 async function selectGameModeOption(mode: SelectableGameMode) {
@@ -665,7 +694,12 @@ function resetLocalCupState() {
 }
 
 function recordLocalRoundResult(snap: TowerSnapshot) {
-  if (isOnlineMultiplayerMatch.value) return
+  if (
+    isOnlineMultiplayerMatch.value &&
+    Object.keys(multiplayerClient.state.remoteLanes).length > 0
+  ) {
+    return
+  }
   if (
     localCupState.value.participants.length === 0 ||
     localCupState.value.isCupFinished
@@ -790,7 +824,11 @@ const grandeCopaScoreboard = computed<{
   rows: GrandeCopaScoreboardRow[]
 }>(() => {
   const mpResult = multiplayerClient.state.gameOverResult
-  if (mpResult) {
+  const hasRealOpponents =
+    Object.keys(multiplayerClient.state.remoteLanes).length > 0 ||
+    (mpResult?.podium?.length ?? 0) > 1
+
+  if (mpResult && hasRealOpponents) {
     const vc = mpResult.victoryCondition || currentLobbyVictoryCondition.value
     const targetPts =
       mpResult.cupTargetPoints ||
@@ -919,7 +957,15 @@ const grandeCopaScoreboard = computed<{
     }
   }
 
-  // Local Cup Scoreboard
+  // Local / Solo Cup Scoreboard
+  if (
+    snapshot.value.state === 'VICTORY' ||
+    snapshot.value.state === 'GAME_OVER' ||
+    mpResult !== null
+  ) {
+    recordLocalRoundResult(snapshot.value)
+  }
+
   const vc = currentLobbyVictoryCondition.value
   const targetPts = currentLobbyVictoryInfo.value.targetPoints || 6
   const participants =
@@ -948,7 +994,7 @@ const grandeCopaScoreboard = computed<{
   }))
 
   return {
-    isOnline: false,
+    isOnline: isOnlineMultiplayerMatch.value,
     roundNumber: localCupState.value.roundNumber || 1,
     isCupFinished: localCupState.value.isCupFinished,
     victoryCondition: vc,
@@ -971,15 +1017,23 @@ function handleNextCupRound() {
 }
 
 function handleGrandeCopaContinue() {
-  if (
-    isOnlineMultiplayerMatch.value ||
-    multiplayerClient.state.gameOverResult
-  ) {
+  const hasRealOpponents =
+    Object.keys(multiplayerClient.state.remoteLanes).length > 0 ||
+    (multiplayerClient.state.gameOverResult?.podium?.length ?? 0) > 1
+
+  if (isOnlineMultiplayerMatch.value && hasRealOpponents) {
     if (!grandeCopaScoreboard.value.isCupFinished) {
       handleNextCupRound()
     } else {
       handleReturnToLobbyFromMatch()
     }
+    return
+  }
+
+  multiplayerClient.state.gameOverResult = null
+  if (grandeCopaScoreboard.value.isCupFinished && isOnlineMultiplayerMatch.value) {
+    resetLocalCupState()
+    handleReturnToLobbyFromMatch()
     return
   }
   handleLocalNextCupRound()
@@ -1234,7 +1288,10 @@ async function toggleLobbySlotReady(slotIndex: number) {
   if (multiplayerClient.state.room) {
     try {
       const nextReady = slot.state !== 'READY'
-      const updatedRoom = await multiplayerClient.toggleReady(nextReady)
+      const updatedRoom = await multiplayerClient.toggleReady(nextReady, {
+        selectedGameMode: selectedGameMode.value,
+        victoryCondition: selectedVictoryCondition.value,
+      })
       const occupied = updatedRoom.slots.filter((s) =>
         Boolean(s && s.handle && s.handle.trim())
       )
@@ -1520,18 +1577,25 @@ function startGame(
   lobbyCountdownMs.value = null
   isOnlineMultiplayerMatch.value = isOnlineMatch
   localPlayerLives.value = GAME_CONSTANTS.SURVIVAL_INITIAL_LIVES
-  if (!isOnlineMatch) {
+  if (
+    !isOnlineMatch ||
+    (multiplayerClient.state.activeMatch?.roundNumber || 1) <= 1
+  ) {
     resetLocalCupState()
   }
 
   const selectableMode: SelectableGameMode = isOnlineMatch
-    ? onlineSelectedMode ||
-      multiplayerClient.state.room?.selectedGameMode ||
-      selectedGameMode.value
+    ? isRoomHostOrSolo.value
+      ? selectedGameMode.value
+      : onlineSelectedMode ||
+        multiplayerClient.state.room?.selectedGameMode ||
+        selectedGameMode.value
     : selectedGameMode.value
 
   const resolvedMode: GameMode =
-    isOnlineMatch && onlineResolvedMode
+    isOnlineMatch &&
+    onlineResolvedMode &&
+    (!isRoomHostOrSolo.value || selectableMode === 'RANDOM')
       ? onlineResolvedMode
       : resolveEffectiveGameMode(selectableMode)
 
@@ -1659,7 +1723,11 @@ async function handleLogout() {
 }
 
 function returnToMainMenu() {
-  if (screenFlow.value === 'MULTIPLAYER_LOBBY') {
+  if (
+    screenFlow.value === 'MULTIPLAYER_LOBBY' ||
+    isOnlineMultiplayerMatch.value ||
+    Boolean(multiplayerClient.state.room)
+  ) {
     multiplayerClient.leaveRoom()
   }
   isOnlineMultiplayerMatch.value = false
@@ -2155,7 +2223,8 @@ function handleKeyDown(e: KeyboardEvent) {
   if (
     multiplayerClient.state.gameOverResult !== null ||
     snapshot.value.state === 'VICTORY' ||
-    (snapshot.value.state === 'GAME_OVER' && !isOnlineMultiplayerMatch.value)
+    (snapshot.value.state === 'GAME_OVER' &&
+      (!isOnlineMultiplayerMatch.value || !hasAliveRemoteOpponents.value))
   ) {
     if (
       e.code === 'Enter' ||
@@ -2171,7 +2240,10 @@ function handleKeyDown(e: KeyboardEvent) {
 
   if (e.code === 'KeyR') {
     e.preventDefault()
-    if (!isOnlineMultiplayerMatch.value) {
+    if (
+      !isOnlineMultiplayerMatch.value ||
+      Object.keys(multiplayerClient.state.remoteLanes).length === 0
+    ) {
       restartMatch(true)
     }
     return
@@ -2236,9 +2308,13 @@ function restartMatch(
   reRollRandomMode: boolean = true
 ) {
   if (!towerInstance) return
+  const isSoloOrOffline =
+    !isOnlineMultiplayerMatch.value ||
+    Object.keys(multiplayerClient.state.remoteLanes).length === 0
+
   if (
     reRollRandomMode &&
-    !isOnlineMultiplayerMatch.value &&
+    isSoloOrOffline &&
     selectedGameMode.value === 'RANDOM'
   ) {
     const nextMode = resolveEffectiveGameMode('RANDOM')
@@ -2252,7 +2328,7 @@ function restartMatch(
       }!`,
       'info'
     )
-  } else if (!isOnlineMultiplayerMatch.value && selectedGameMode.value !== 'RANDOM') {
+  } else if (isSoloOrOffline && selectedGameMode.value !== 'RANDOM') {
     activeMatchGameMode.value = selectedGameMode.value
     towerInstance.setGameMode(selectedGameMode.value)
   }
@@ -2434,7 +2510,7 @@ onMounted(() => {
         payload.selectedGameMode
       )
       const modeTitle =
-        payload.gameMode === 'SURVIVAL'
+        activeMatchGameMode.value === 'SURVIVAL'
           ? '❤️ Modo Sobrevivência (3 Vidas)'
           : '🏁 Modo Corrida (30m)'
       triggerBanner(
@@ -2498,7 +2574,8 @@ onMounted(() => {
     onSnapshot: (snap) => {
       snapshot.value = snap
       if (
-        !isOnlineMultiplayerMatch.value &&
+        (!isOnlineMultiplayerMatch.value ||
+          Object.keys(multiplayerClient.state.remoteLanes).length === 0) &&
         (snap.state === 'VICTORY' || snap.state === 'GAME_OVER')
       ) {
         recordLocalRoundResult(snap)
@@ -3201,7 +3278,7 @@ onUnmounted(() => {
                 'selecione-modo-brick-box--active':
                   selectedModeScreenColumn === 'MODE',
               }"
-              @click="cycleGameModeOption(1)"
+              @click="selectedModeScreenColumn = 'MODE'"
             >
               <!-- 8 Pinos Superiores Escuros -->
               <div class="selecione-modo-box-studs" aria-hidden="true">
@@ -3493,7 +3570,7 @@ onUnmounted(() => {
                 'selecione-modo-brick-box--active':
                   selectedModeScreenColumn === 'CUP',
               }"
-              @click="cycleVictoryConditionOption(1)"
+              @click="selectedModeScreenColumn = 'CUP'"
             >
               <!-- 8 Pinos Superiores Escuros -->
               <div class="selecione-modo-box-studs" aria-hidden="true">
@@ -5111,6 +5188,7 @@ onUnmounted(() => {
         v-if="
           snapshot.state === 'GAME_OVER' &&
           isOnlineMultiplayerMatch &&
+          hasAliveRemoteOpponents &&
           multiplayerClient.state.gameOverResult === null
         "
         class="goal-countdown-banner goal-countdown-banner--eliminated"
@@ -5130,7 +5208,8 @@ onUnmounted(() => {
         v-if="
           multiplayerClient.state.gameOverResult !== null ||
           snapshot.state === 'VICTORY' ||
-          (snapshot.state === 'GAME_OVER' && !isOnlineMultiplayerMatch)
+          (snapshot.state === 'GAME_OVER' &&
+            (!isOnlineMultiplayerMatch || !hasAliveRemoteOpponents))
         "
         class="grande-copa-overlay"
         @click="handleGrandeCopaContinue"
