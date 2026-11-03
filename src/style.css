@@ -2091,17 +2091,21 @@ kbd {
   top: -4px;
   left: 50%;
   transform: translateX(-50%);
-  width: min(520px, 56vw);
-  z-index: 90;
+  width: min(920px, 94vw);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  z-index: 92;
   pointer-events: none;
   filter: drop-shadow(0 8px 18px rgba(15, 23, 42, 0.32));
 }
 
 .mp-lobby-banner-img {
-  width: 100%;
+  width: min(470px, 50vw);
   height: auto;
   display: block;
   object-fit: contain;
+  pointer-events: none;
 }
 
 /* 2. Grid Central de 4 Slots Horizontais */
@@ -2112,7 +2116,7 @@ kbd {
   width: min(1080px, 92vw);
   justify-content: center;
   align-items: start;
-  margin-top: 22px;
+  margin-top: 72px;
 }
 
 .mp-slot-column {
@@ -2389,12 +2393,12 @@ kbd {
 }
 
 .mp-clean-brick-btn--starting {
-  width: 122px;
+  width: 172px;
   cursor: default;
 }
 
 .mp-clean-brick-btn--starting .mp-clean-brick-btn-label {
-  font-size: 13.5px;
+  font-size: 18px;
 }
 
 /* ========================================================================= */
@@ -2402,25 +2406,25 @@ kbd {
 /* ========================================================================= */
 .mp-lobby-countdown-footer {
   position: fixed;
-  bottom: 6px;
+  bottom: 14px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 92;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
+  gap: 6px;
 }
 
 .mp-countdown-heading {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
   font-weight: 900;
-  font-size: clamp(14px, 1.35vw, 18px);
-  letter-spacing: 0.04em;
-  color: #fb923c;
-  -webkit-text-stroke: 3.5px #181425;
+  font-size: clamp(16px, 1.55vw, 21px);
+  letter-spacing: 0.03em;
+  color: #ffffff;
+  -webkit-text-stroke: 4px #181425;
   paint-order: stroke fill;
-  text-shadow: 0 2px 0 #181425;
+  text-shadow: 0 2.5px 0 #181425;
 }
 
 .mp-countdown-digit {
@@ -3229,20 +3233,32 @@ kbd {
   color: #181425;
 }
 
-/* Barra de Modo de Jogo no Cabeçalho do Lobby Multiplayer */
+/* Barra de Modo de Jogo e Condição de Vitória no Cabeçalho do Lobby Multiplayer */
+.mp-lobby-settings-row {
+  margin-top: -6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  pointer-events: auto;
+  position: relative;
+  z-index: 95;
+}
+
 .mp-lobby-mode-bar {
-  margin-top: 10px;
   display: inline-flex;
   align-items: center;
   gap: 12px;
   padding: 6px 10px 6px 16px;
-  background: rgba(15, 23, 42, 0.86);
+  background: rgba(15, 23, 42, 0.88);
   border: 3.5px solid #181425;
   border-radius: 16px;
   box-shadow:
     0 5px 0 #181425,
     0 10px 24px rgba(15, 23, 42, 0.45);
   backdrop-filter: blur(8px);
+  pointer-events: auto;
 }
 
 .mp-lobby-mode-status {
@@ -4470,3 +4486,1856 @@ kbd {
   box-shadow: 0 3px 8px rgba(15, 23, 42, 0.55);
   white-space: nowrap;
 }
+
+/* ========================================================================= */
+/* BOTÃO LEGO AMARELO "MODO E COPA" NA SALA MULTIPLAYER                      */
+/* ========================================================================= */
+.lego-modo-copa-btn {
+  position: relative;
+  margin-top: 14px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  pointer-events: auto;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  filter: drop-shadow(0 6px 12px rgba(15, 23, 42, 0.35));
+  transition: transform 0.14s ease, filter 0.14s ease;
+}
+
+.lego-modo-copa-btn:hover {
+  transform: translateY(-2px) scale(1.04);
+  filter: brightness(1.05) drop-shadow(0 8px 16px rgba(15, 23, 42, 0.42));
+}
+
+.lego-modo-copa-btn:active {
+  transform: translateY(2px) scale(0.98);
+}
+
+.lego-modo-copa-studs {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 16px;
+  margin-bottom: -3px;
+  z-index: 1;
+}
+
+.lego-modo-copa-stud {
+  width: 24px;
+  height: 9px;
+  background: linear-gradient(180deg, #ffe066 0%, #f59f00 100%);
+  border: 3px solid #181425;
+  border-bottom: none;
+  border-radius: 5px 5px 0 0;
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.65);
+}
+
+.lego-modo-copa-body {
+  position: relative;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-width: 226px;
+  padding: 9px 22px 11px 16px;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #ffd43b 0%, #fcc419 52%, #f08c00 100%);
+  border: 3.5px solid #181425;
+  box-shadow:
+    inset 0 3px 0 rgba(255, 255, 255, 0.65),
+    inset 0 -4px 0 rgba(180, 83, 9, 0.55),
+    0 4px 0 #181425;
+}
+
+.lego-modo-copa-gears {
+  width: 34px;
+  height: 28px;
+  flex-shrink: 0;
+  filter: drop-shadow(0 1.5px 0 rgba(24, 20, 37, 0.5));
+}
+
+.lego-modo-copa-label {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-weight: 900;
+  font-size: clamp(16px, 1.5vw, 20px);
+  letter-spacing: 0.03em;
+  color: #ffffff;
+  text-transform: uppercase;
+  -webkit-text-stroke: 3.5px #181425;
+  paint-order: stroke fill;
+  text-shadow: 0 2px 0 #181425;
+  white-space: nowrap;
+}
+
+/* ========================================================================= */
+/* POPUP LEGO "MODO E COPA" (FIEL À SEGUNDA IMAGEM DE REFERÊNCIA)            */
+/* ========================================================================= */
+.modo-copa-popup {
+  position: relative;
+  width: min(860px, 95vw);
+  display: flex;
+  flex-direction: column;
+  user-select: none;
+  filter: drop-shadow(0 22px 44px rgba(0, 0, 0, 0.68));
+}
+
+/* MOLDURA SUPERIOR DE 4 BLOCOS LEGO */
+.modo-copa-frame-top {
+  display: grid;
+  grid-template-columns: 1.15fr 1.1fr 0.75fr 1.25fr;
+  height: 36px;
+  margin: 0 4px;
+}
+
+.modo-copa-top-brick {
+  position: relative;
+  border: 3.5px solid #181425;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  box-shadow:
+    inset 0 3px 0 rgba(255, 255, 255, 0.42),
+    inset 0 -3px 0 rgba(0, 0, 0, 0.22);
+}
+
+.modo-copa-top-brick + .modo-copa-top-brick {
+  margin-left: -3.5px;
+}
+
+.modo-copa-top-brick--blue {
+  background: linear-gradient(180deg, #228be6 0%, #1971c2 100%);
+}
+
+.modo-copa-top-brick--yellow {
+  background: linear-gradient(180deg, #ffd43b 0%, #f59f00 100%);
+}
+
+.modo-copa-top-brick--orange {
+  background: linear-gradient(180deg, #fd7e14 0%, #e8590c 100%);
+}
+
+.modo-copa-brick-studs {
+  position: absolute;
+  top: -11px;
+  left: 8px;
+  right: 8px;
+  display: flex;
+  justify-content: space-around;
+  pointer-events: none;
+}
+
+.modo-copa-brick-studs span {
+  width: 22px;
+  height: 9px;
+  border: 3px solid #181425;
+  border-bottom: none;
+  border-radius: 4px 4px 0 0;
+  background: inherit;
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.45);
+}
+
+.modo-copa-top-brick--blue .modo-copa-brick-studs span {
+  background: #339af0;
+}
+
+.modo-copa-top-brick--yellow .modo-copa-brick-studs span {
+  background: #ffe066;
+}
+
+.modo-copa-top-brick--orange .modo-copa-brick-studs span {
+  background: #ff922b;
+}
+
+/* BOTÃO FECHAR (X) NO CANTO SUPERIOR DIREITO */
+.modo-copa-close-x {
+  position: absolute;
+  top: -10px;
+  right: -8px;
+  z-index: 15;
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.45));
+  transition: transform 0.14s ease;
+}
+
+.modo-copa-close-x:hover {
+  transform: scale(1.08);
+}
+
+.modo-copa-close-x:active {
+  transform: scale(0.95);
+}
+
+.modo-copa-close-x img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+/* CORPO DO MEIO: COLUNAS LATERAIS DE BLOCOS + TABULEIRO INTERNO */
+.modo-copa-frame-middle {
+  display: grid;
+  grid-template-columns: 36px 1fr 36px;
+  align-items: stretch;
+}
+
+.modo-copa-side-col {
+  display: flex;
+  flex-direction: column;
+}
+
+.modo-copa-side-brick {
+  flex: 1;
+  border: 3.5px solid #181425;
+  box-shadow:
+    inset 0 3px 0 rgba(255, 255, 255, 0.35),
+    inset 0 -4px 0 rgba(0, 0, 0, 0.25);
+}
+
+.modo-copa-side-brick + .modo-copa-side-brick {
+  margin-top: -3.5px;
+}
+
+.modo-copa-side-brick--red {
+  background: linear-gradient(180deg, #fa5252 0%, #c92a2a 100%);
+}
+
+.modo-copa-side-brick--blue {
+  background: linear-gradient(180deg, #228be6 0%, #1864ab 100%);
+}
+
+.modo-copa-side-brick--orange {
+  background: linear-gradient(180deg, #fd7e14 0%, #d9480f 100%);
+}
+
+/* TABULEIRO INTERNO AZUL ESCURO */
+.modo-copa-board {
+  background: linear-gradient(180deg, #213251 0%, #1a2842 100%);
+  border-top: 3.5px solid #181425;
+  border-bottom: 3.5px solid #181425;
+  padding: 12px 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  box-shadow: inset 0 6px 16px rgba(9, 14, 26, 0.65);
+}
+
+/* FAIXAS DE TÍTULO DE SEÇÃO ("SELECIONE O MODO DE JOGO" / "CONDIÇÃO DE VITÓRIA") */
+.modo-copa-section-banner-row {
+  display: grid;
+  grid-template-columns: 110px 1fr 110px;
+  align-items: stretch;
+  height: 52px;
+  margin: 0 -18px;
+}
+
+.modo-copa-section-banner-row--victory {
+  margin-top: 4px;
+  height: 48px;
+}
+
+.modo-copa-wing-brick {
+  position: relative;
+  background: linear-gradient(180deg, #ffd43b 0%, #f59f00 100%);
+  border-top: 3.5px solid #181425;
+  border-bottom: 3.5px solid #181425;
+  box-shadow:
+    inset 0 3px 0 rgba(255, 255, 255, 0.55),
+    inset 0 -4px 0 rgba(180, 83, 9, 0.45);
+}
+
+.modo-copa-wing-studs {
+  position: absolute;
+  top: -10px;
+  left: 10px;
+  right: 10px;
+  display: flex;
+  justify-content: space-around;
+}
+
+.modo-copa-wing-studs span {
+  width: 20px;
+  height: 8px;
+  background: #ffe066;
+  border: 3px solid #181425;
+  border-bottom: none;
+  border-radius: 4px 4px 0 0;
+}
+
+.modo-copa-title-brick {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 3.5px solid #181425;
+  border-radius: 8px;
+  margin: -3px -4px;
+  z-index: 2;
+  box-shadow:
+    inset 0 3px 0 rgba(255, 255, 255, 0.45),
+    inset 0 -4px 0 rgba(0, 0, 0, 0.28),
+    0 4px 10px rgba(0, 0, 0, 0.35);
+}
+
+.modo-copa-title-brick--blue {
+  background: linear-gradient(180deg, #228be6 0%, #1864ab 100%);
+}
+
+.modo-copa-title-brick--orange {
+  background: linear-gradient(180deg, #fd7e14 0%, #d9480f 100%);
+}
+
+.modo-copa-title-studs {
+  position: absolute;
+  top: -10px;
+  left: 18px;
+  right: 18px;
+  display: flex;
+  justify-content: space-around;
+  pointer-events: none;
+}
+
+.modo-copa-title-studs span {
+  width: 24px;
+  height: 8px;
+  border: 3px solid #181425;
+  border-bottom: none;
+  border-radius: 4px 4px 0 0;
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.45);
+}
+
+.modo-copa-title-brick--blue .modo-copa-title-studs span {
+  background: #339af0;
+}
+
+.modo-copa-title-brick--orange .modo-copa-title-studs span {
+  background: #ff922b;
+}
+
+.modo-copa-title-text {
+  margin: 0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-weight: 900;
+  font-size: clamp(17px, 2.1vw, 25px);
+  letter-spacing: 0.03em;
+  color: #ffffff;
+  text-transform: uppercase;
+  -webkit-text-stroke: 3.8px #181425;
+  paint-order: stroke fill;
+  text-shadow: 0 2px 0 #181425;
+}
+
+/* GRID DOS 3 CARTÕES DE MODO DE JOGO */
+.modo-copa-modes-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 18px;
+  padding: 10px 6px 4px;
+}
+
+.modo-brick-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 12px 10px;
+  min-height: 210px;
+  border-radius: 10px;
+  border: 4px solid #181425;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, filter 0.15s ease;
+  /* Textura sutil de tijolos LEGO ao fundo */
+  background-image:
+    linear-gradient(rgba(24, 20, 37, 0.18) 2px, transparent 2px),
+    linear-gradient(90deg, rgba(24, 20, 37, 0.16) 2px, transparent 2px);
+  background-size: 100% 34px, 52px 68px;
+  box-shadow:
+    inset 0 3px 0 rgba(255, 255, 255, 0.38),
+    inset 0 -5px 0 rgba(0, 0, 0, 0.28),
+    0 6px 0 #181425;
+}
+
+.modo-brick-card:hover {
+  transform: translateY(-3px);
+  filter: brightness(1.05);
+}
+
+.modo-brick-card--race {
+  background-color: #d99b1e;
+  background-image:
+    linear-gradient(rgba(24, 20, 37, 0.16) 2px, transparent 2px),
+    linear-gradient(90deg, rgba(24, 20, 37, 0.14) 2px, transparent 2px),
+    linear-gradient(180deg, #f59f00 0%, #c0c42b 58%, #67b231 100%);
+  background-size: 100% 34px, 54px 34px, 100% 100%;
+}
+
+.modo-brick-card--survival {
+  background-color: #5c59ac;
+  background-image:
+    linear-gradient(rgba(24, 20, 37, 0.22) 2px, transparent 2px),
+    linear-gradient(90deg, rgba(24, 20, 37, 0.18) 2px, transparent 2px),
+    linear-gradient(180deg, #6e6bc4 0%, #524fa1 100%);
+  background-size: 100% 34px, 54px 34px, 100% 100%;
+}
+
+.modo-brick-card--random {
+  background-color: #6c8094;
+  background-image:
+    linear-gradient(rgba(24, 20, 37, 0.22) 2px, transparent 2px),
+    linear-gradient(90deg, rgba(24, 20, 37, 0.18) 2px, transparent 2px),
+    linear-gradient(180deg, #7f94a8 0%, #5c6f82 100%);
+  background-size: 100% 34px, 54px 34px, 100% 100%;
+}
+
+/* Pinos superiores de cada cartão de modo */
+.modo-brick-card-studs {
+  position: absolute;
+  top: -12px;
+  left: 12px;
+  right: 12px;
+  display: flex;
+  justify-content: space-between;
+  pointer-events: none;
+}
+
+.modo-brick-card-studs span {
+  width: 24px;
+  height: 9px;
+  border: 3px solid #181425;
+  border-bottom: none;
+  border-radius: 4px 4px 0 0;
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.5);
+}
+
+.modo-brick-card--race .modo-brick-card-studs span {
+  background: #fcc419;
+}
+
+.modo-brick-card--survival .modo-brick-card-studs span {
+  background: #7976d2;
+}
+
+.modo-brick-card--random .modo-brick-card-studs span {
+  background: #8ca1b5;
+}
+
+/* Destaque Brilhante do Cartão Selecionado */
+.modo-brick-card--selected {
+  border-color: #d8f5a2;
+  box-shadow:
+    0 0 0 3px #a9e34b,
+    0 0 22px rgba(169, 227, 75, 0.85),
+    inset 0 3px 0 rgba(255, 255, 255, 0.65),
+    0 6px 0 #181425;
+}
+
+/* Selo Hexagonal Verde de Check no canto superior direito */
+.modo-brick-check-badge {
+  position: absolute;
+  top: -15px;
+  right: -13px;
+  width: 38px;
+  height: 38px;
+  z-index: 5;
+  filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.45));
+}
+
+.modo-brick-check-badge svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.modo-brick-card-title {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-weight: 900;
+  font-size: clamp(18px, 2vw, 25px);
+  letter-spacing: 0.02em;
+  color: #ffffff;
+  text-transform: uppercase;
+  -webkit-text-stroke: 4px #181425;
+  paint-order: stroke fill;
+  text-shadow: 0 2.5px 0 #181425;
+  line-height: 1.05;
+  text-align: center;
+}
+
+.modo-brick-card-title--fit {
+  font-size: clamp(15px, 1.65vw, 21px);
+}
+
+.modo-brick-card-art {
+  width: 100%;
+  max-width: 175px;
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modo-art-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+  filter: drop-shadow(0 4px 6px rgba(15, 23, 42, 0.35));
+}
+
+/* GRID DOS 3 BOTÕES DE CONDIÇÃO DE VITÓRIA (COPA 1, COPA 6 PONTOS, COPA 12 PONTOS) */
+.modo-copa-cups-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  padding: 6px 6px 2px;
+}
+
+.copa-plaque-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  min-height: 76px;
+  border-radius: 10px;
+  border: 3.5px solid #181425;
+  cursor: pointer;
+  text-align: left;
+  transition: transform 0.14s ease, box-shadow 0.14s ease, filter 0.14s ease;
+  box-shadow:
+    inset 0 2.5px 0 rgba(255, 255, 255, 0.4),
+    inset 0 -4px 0 rgba(0, 0, 0, 0.25),
+    0 5px 0 #181425;
+}
+
+.copa-plaque-btn:hover {
+  transform: translateY(-2px);
+  filter: brightness(1.06);
+}
+
+.copa-plaque-btn--silver {
+  background: linear-gradient(180deg, #b8ad90 0%, #9c9175 100%);
+}
+
+.copa-plaque-btn--orange {
+  background: linear-gradient(180deg, #f76707 0%, #d9480f 100%);
+}
+
+.copa-plaque-btn--slate {
+  background: linear-gradient(180deg, #909aa3 0%, #747e87 100%);
+}
+
+.copa-plaque-btn--selected {
+  border-color: #ffe066;
+  box-shadow:
+    0 0 0 3px #fcc419,
+    0 0 18px rgba(252, 196, 25, 0.8),
+    inset 0 2.5px 0 rgba(255, 255, 255, 0.55),
+    0 5px 0 #181425;
+}
+
+.copa-trophy-svg {
+  width: 46px;
+  height: 46px;
+  flex-shrink: 0;
+  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.35));
+}
+
+.copa-plaque-content {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  min-width: 0;
+  flex: 1;
+}
+
+.copa-plaque-title {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-weight: 900;
+  font-size: clamp(13px, 1.3vw, 16.5px);
+  color: #ffffff;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  -webkit-text-stroke: 3.2px #181425;
+  paint-order: stroke fill;
+  text-shadow: 0 2px 0 #181425;
+  white-space: nowrap;
+}
+
+.copa-plaque-subicons {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.copa-mini-trophy {
+  font-size: 13px;
+  line-height: 1;
+  filter: drop-shadow(0 1.5px 0 #181425);
+}
+
+.copa-dot {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 2.2px solid #181425;
+  display: inline-block;
+}
+
+.copa-dot--filled {
+  background: radial-gradient(circle at 35% 35%, #fff3bf 0%, #fcc419 65%, #e67700 100%);
+}
+
+.copa-dot--empty {
+  background: rgba(24, 20, 37, 0.55);
+}
+
+/* MOLDURA INFERIOR DE BLOCOS LEGO + BOTÃO VERDE "CONFIRMAR" */
+.modo-copa-frame-bottom {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr auto 1fr 1fr;
+  align-items: center;
+  height: 42px;
+  margin: 0 4px;
+}
+
+.modo-copa-bottom-brick {
+  height: 100%;
+  border: 3.5px solid #181425;
+  border-top: none;
+  box-shadow:
+    inset 0 2px 0 rgba(255, 255, 255, 0.3),
+    inset 0 -4px 0 rgba(0, 0, 0, 0.28),
+    0 6px 0 #181425;
+}
+
+.modo-copa-bottom-brick + .modo-copa-bottom-brick {
+  margin-left: -3.5px;
+}
+
+.modo-copa-bottom-brick--blue {
+  background: linear-gradient(180deg, #228be6 0%, #1864ab 100%);
+}
+
+.modo-copa-bottom-brick--red {
+  background: linear-gradient(180deg, #fa5252 0%, #c92a2a 100%);
+}
+
+/* BOTÃO VERDE LEGO "CONFIRMAR" */
+.modo-copa-confirm-btn {
+  position: relative;
+  z-index: 8;
+  margin: -18px -6px -10px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  transition: transform 0.14s ease, filter 0.14s ease;
+}
+
+.modo-copa-confirm-btn:hover {
+  transform: translateY(-2px) scale(1.04);
+  filter: brightness(1.06);
+}
+
+.modo-copa-confirm-btn:active {
+  transform: translateY(2px) scale(0.98);
+}
+
+.modo-copa-confirm-studs {
+  display: flex;
+  justify-content: space-around;
+  width: 84%;
+  margin-bottom: -3px;
+  z-index: 1;
+}
+
+.modo-copa-confirm-studs span {
+  width: 24px;
+  height: 9px;
+  background: linear-gradient(180deg, #69db7c 0%, #37b24d 100%);
+  border: 3px solid #181425;
+  border-bottom: none;
+  border-radius: 4px 4px 0 0;
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.55);
+}
+
+.modo-copa-confirm-body {
+  position: relative;
+  z-index: 2;
+  min-width: 235px;
+  padding: 12px 32px 14px;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #51cf66 0%, #37b24d 55%, #2b8a3e 100%);
+  border: 4px solid #181425;
+  box-shadow:
+    inset 0 3px 0 rgba(255, 255, 255, 0.55),
+    inset 0 -5px 0 rgba(20, 83, 45, 0.65),
+    0 6px 0 #181425;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modo-copa-confirm-label {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-weight: 900;
+  font-size: clamp(20px, 2.2vw, 26px);
+  letter-spacing: 0.03em;
+  color: #ffffff;
+  text-transform: uppercase;
+  -webkit-text-stroke: 4px #181425;
+  paint-order: stroke fill;
+  text-shadow: 0 2.5px 0 #181425;
+}
+
+.modo-copa-sparkle {
+  position: absolute;
+  color: #ffe066;
+  font-size: 16px;
+  line-height: 1;
+  text-shadow: 0 1.5px 0 #181425;
+  pointer-events: none;
+}
+
+.modo-copa-sparkle--tl {
+  top: 6px;
+  left: 10px;
+}
+
+.modo-copa-sparkle--br {
+  bottom: 6px;
+  right: 10px;
+}
+
+@media (max-width: 720px) {
+  .modo-copa-modes-grid,
+  .modo-copa-cups-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .modo-copa-section-banner-row {
+    grid-template-columns: 36px 1fr 36px;
+  }
+}
+
+/* ========================================================================= */
+/* TELA "SELECIONE O MODO" (LOCAL_LOBBY — FIEL À IMAGEM DE REFERÊNCIA)       */
+/* ========================================================================= */
+.selecione-modo-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 88;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  user-select: none;
+}
+
+.selecione-modo-screen--in-game {
+  z-index: 135;
+  background: linear-gradient(
+    180deg,
+    rgba(24, 144, 240, 0.92) 0%,
+    rgba(116, 192, 252, 0.92) 72%,
+    rgba(28, 126, 214, 0.95) 72.1%,
+    rgba(24, 100, 171, 0.97) 100%
+  );
+  backdrop-filter: blur(6px);
+}
+
+/* 1. Topo em Pedra: "SELECIONE O MODO" */
+.selecione-modo-top-banner {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 92;
+  pointer-events: none;
+  filter: drop-shadow(0 8px 18px rgba(15, 23, 42, 0.35));
+}
+
+.selecione-modo-stone-header {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  min-width: min(520px, 78vw);
+  height: 68px;
+}
+
+.selecione-modo-stone-wing {
+  width: 34px;
+  background: linear-gradient(180deg, #64b5f6 0%, #3b82f6 100%);
+  border: 3.5px solid #181425;
+  border-top: none;
+}
+
+.selecione-modo-stone-wing--left {
+  transform: skewX(24deg);
+  margin-right: -12px;
+  border-radius: 0 0 0 8px;
+}
+
+.selecione-modo-stone-wing--right {
+  transform: skewX(-24deg);
+  margin-left: -12px;
+  border-radius: 0 0 8px 0;
+}
+
+.selecione-modo-stone-pillar {
+  width: 24px;
+  background: linear-gradient(180deg, #b8c4d4 0%, #8e9eb2 100%);
+  border: 3.5px solid #181425;
+  border-top: none;
+  z-index: 2;
+  box-shadow: inset 0 -6px 0 rgba(0, 0, 0, 0.18);
+}
+
+.selecione-modo-stone-center {
+  flex: 1;
+  background:
+    linear-gradient(90deg, rgba(24, 20, 37, 0.12) 2px, transparent 2px),
+    linear-gradient(180deg, #e2e8f0 0%, #cbd5e1 100%);
+  background-size: 86px 100%, 100% 100%;
+  border-bottom: 3.5px solid #181425;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 28px 6px;
+  z-index: 2;
+}
+
+.selecione-modo-banner-title {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-weight: 900;
+  font-size: clamp(22px, 2.5vw, 33px);
+  letter-spacing: 0.03em;
+  color: #e2e8f0;
+  text-transform: uppercase;
+  -webkit-text-stroke: 4.5px #181425;
+  paint-order: stroke fill;
+  text-shadow: 0 3px 0 #181425;
+  white-space: nowrap;
+}
+
+.selecione-modo-stone-ledge {
+  position: absolute;
+  bottom: -11px;
+  left: 22px;
+  right: 22px;
+  height: 14px;
+  background: linear-gradient(180deg, #64748b 0%, #475569 100%);
+  border: 3.5px solid #181425;
+  border-radius: 4px;
+  z-index: 3;
+  display: flex;
+  justify-content: space-evenly;
+}
+
+.selecione-modo-stone-ledge span {
+  width: 3px;
+  height: 100%;
+  background: #181425;
+}
+
+/* 2. Palco Central com 2 Grandes Blocos Quadrados + Setas ▲ / ▼ */
+.selecione-modo-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(32px, 5vw, 68px);
+  margin-top: 24px;
+}
+
+.selecione-modo-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+/* Botões de Seta Triangular em Pedra ▲ / ▼ */
+.selecione-modo-arrow-btn {
+  width: 68px;
+  height: 42px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  filter: drop-shadow(0 4px 6px rgba(15, 23, 42, 0.35));
+  transition: transform 0.14s ease, filter 0.14s ease;
+}
+
+.selecione-modo-arrow-btn:hover {
+  transform: scale(1.08);
+  filter: brightness(1.06) drop-shadow(0 6px 10px rgba(15, 23, 42, 0.42));
+}
+
+.selecione-modo-arrow-btn:active {
+  transform: scale(0.95);
+}
+
+.selecione-modo-arrow-btn svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Caixa Quadrada de Parede LEGO */
+.selecione-modo-brick-box {
+  position: relative;
+  width: clamp(260px, 23vw, 316px);
+  height: clamp(260px, 23vw, 316px);
+  background-color: #a3b6c9;
+  background-image:
+    linear-gradient(rgba(24, 20, 37, 0.18) 2px, transparent 2px),
+    linear-gradient(90deg, rgba(24, 20, 37, 0.15) 2px, transparent 2px),
+    linear-gradient(180deg, #9eb2c6 0%, #b4c6d8 100%);
+  background-size: 100% 38px, 64px 38px, 100% 100%;
+  border: 4.5px solid #181425;
+  border-radius: 8px;
+  box-shadow:
+    inset 0 4px 0 rgba(255, 255, 255, 0.45),
+    inset 0 -8px 0 rgba(51, 65, 85, 0.45),
+    0 12px 24px rgba(15, 23, 42, 0.35);
+  cursor: pointer;
+  transition: transform 0.15s ease;
+}
+
+.selecione-modo-brick-box:hover {
+  transform: translateY(-2px);
+}
+
+/* 8 Pinos Superiores no topo do bloco quadrado */
+.selecione-modo-box-studs {
+  position: absolute;
+  top: -13px;
+  left: 10px;
+  right: 10px;
+  display: flex;
+  justify-content: space-between;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.selecione-modo-box-studs span {
+  width: 22px;
+  height: 9px;
+  background: linear-gradient(180deg, #64748b 0%, #475569 100%);
+  border: 3px solid #181425;
+  border-bottom: none;
+  border-radius: 4px 4px 0 0;
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.35);
+}
+
+/* 4 Cantoneiras Amarelas/Laranjas em L ao redor do bloco selecionado */
+.selecione-corner {
+  position: absolute;
+  width: 44px;
+  height: 44px;
+  pointer-events: none;
+  z-index: 8;
+}
+
+.selecione-corner::before,
+.selecione-corner::after {
+  content: '';
+  position: absolute;
+  background: linear-gradient(180deg, #fcc419 0%, #f59f00 100%);
+  border: 3.5px solid #181425;
+  border-radius: 5px;
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.6);
+}
+
+.selecione-corner--tl {
+  top: -16px;
+  left: -16px;
+}
+.selecione-corner--tl::before {
+  top: 0;
+  left: 0;
+  width: 44px;
+  height: 15px;
+}
+.selecione-corner--tl::after {
+  top: 0;
+  left: 0;
+  width: 15px;
+  height: 44px;
+}
+
+.selecione-corner--tr {
+  top: -16px;
+  right: -16px;
+}
+.selecione-corner--tr::before {
+  top: 0;
+  right: 0;
+  width: 44px;
+  height: 15px;
+}
+.selecione-corner--tr::after {
+  top: 0;
+  right: 0;
+  width: 15px;
+  height: 44px;
+}
+
+.selecione-corner--bl {
+  bottom: -16px;
+  left: -16px;
+}
+.selecione-corner--bl::before {
+  bottom: 0;
+  left: 0;
+  width: 44px;
+  height: 15px;
+}
+.selecione-corner--bl::after {
+  bottom: 0;
+  left: 0;
+  width: 15px;
+  height: 44px;
+}
+
+.selecione-corner--br {
+  bottom: -16px;
+  right: -16px;
+}
+.selecione-corner--br::before {
+  bottom: 0;
+  right: 0;
+  width: 44px;
+  height: 15px;
+}
+.selecione-corner--br::after {
+  bottom: 0;
+  right: 0;
+  width: 15px;
+  height: 44px;
+}
+
+/* Interior do Cartão */
+.selecione-modo-card-inner {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 4px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 14px 18px;
+}
+
+/* Modo ALEATÓRIO dividido na diagonal */
+.selecione-random-half {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.selecione-random-half--tl {
+  clip-path: polygon(0 0, 100% 0, 0 100%);
+  background-color: rgba(148, 163, 184, 0.25);
+}
+
+.selecione-random-half--br {
+  clip-path: polygon(100% 0, 100% 100%, 0 100%);
+  background-color: rgba(226, 232, 240, 0.35);
+}
+
+.selecione-diagonal-line {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.selecione-char-cloud-wrap {
+  position: absolute;
+  width: 132px;
+  height: 132px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.selecione-char-cloud-wrap--tl {
+  top: 12px;
+  left: 16px;
+}
+
+.selecione-char-cloud-wrap--br {
+  bottom: 54px;
+  right: 14px;
+}
+
+.selecione-char-cloud-wrap--center {
+  position: relative;
+  width: 185px;
+  height: 185px;
+  margin-top: 8px;
+}
+
+.selecione-char-img {
+  position: relative;
+  z-index: 2;
+  width: 86px;
+  height: 86px;
+  object-fit: contain;
+  margin-bottom: -22px;
+  filter: drop-shadow(0 4px 6px rgba(15, 23, 42, 0.35));
+}
+
+.selecione-char-img--large {
+  width: 124px;
+  height: 124px;
+  margin-bottom: -28px;
+}
+
+.selecione-mini-flag-svg {
+  position: absolute;
+  top: 14px;
+  right: -6px;
+  width: 52px;
+  height: 52px;
+  z-index: 3;
+  transform: rotate(8deg);
+}
+
+.selecione-mini-flag-svg--large {
+  top: 16px;
+  right: 2px;
+  width: 68px;
+  height: 68px;
+}
+
+.selecione-cloud-svg {
+  position: relative;
+  z-index: 1;
+  width: 118px;
+  height: auto;
+  display: block;
+}
+
+.selecione-cloud-svg--large {
+  width: 158px;
+}
+
+.selecione-floating-heart {
+  position: absolute;
+  z-index: 4;
+  font-size: 15px;
+  line-height: 1;
+  filter: drop-shadow(0 2px 2px rgba(15, 23, 42, 0.45));
+}
+
+.selecione-floating-heart--1 {
+  top: 18px;
+  left: 10px;
+  transform: rotate(-15deg);
+}
+
+.selecione-floating-heart--2 {
+  top: 4px;
+  right: 18px;
+  transform: rotate(12deg);
+}
+
+.selecione-floating-heart--3 {
+  top: 32px;
+  right: 4px;
+  transform: rotate(20deg);
+}
+
+.selecione-floating-heart--4 {
+  top: 48px;
+  left: 6px;
+  transform: rotate(-10deg);
+}
+
+.selecione-single-mode-art {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+}
+
+/* Arte do Troféu na Coluna Direita */
+.selecione-cup-art {
+  flex: 1;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 4px;
+}
+
+.selecione-cup-svg {
+  width: min(215px, 84%);
+  height: auto;
+  display: block;
+  filter: drop-shadow(0 6px 10px rgba(15, 23, 42, 0.35));
+}
+
+/* Textos na Base dos Cartões ("ALEATÓRIO", "COPA 6 PONTOS", "Primeiro a 6 pontos") */
+.selecione-card-bottom-captions {
+  position: relative;
+  z-index: 5;
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  text-align: center;
+}
+
+.selecione-card-main-title {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-weight: 900;
+  font-size: clamp(21px, 2.2vw, 28px);
+  letter-spacing: 0.02em;
+  color: #ffffff;
+  text-transform: uppercase;
+  -webkit-text-stroke: 4.5px #181425;
+  paint-order: stroke fill;
+  text-shadow: 0 2.5px 0 #181425;
+  line-height: 1.05;
+}
+
+.selecione-card-sub-title {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-weight: 900;
+  font-size: clamp(13px, 1.3vw, 16px);
+  color: #ffffff;
+  -webkit-text-stroke: 3px #181425;
+  paint-order: stroke fill;
+  text-shadow: 0 2px 0 #181425;
+}
+
+/* 3. Botões LEGO no Canto Inferior Direito: PRONTO (Verde) e VOLTAR (Vermelho) */
+.selecione-modo-bottom-right-actions {
+  position: fixed;
+  bottom: 18px;
+  right: 26px;
+  z-index: 95;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.selecione-action-brick-btn {
+  padding: 0;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  filter: drop-shadow(0 5px 10px rgba(15, 23, 42, 0.4));
+  transition: transform 0.14s ease, filter 0.14s ease;
+}
+
+.selecione-action-brick-btn:hover {
+  transform: translateY(-2px) scale(1.04);
+  filter: brightness(1.06) drop-shadow(0 7px 14px rgba(15, 23, 42, 0.48));
+}
+
+.selecione-action-brick-btn:active {
+  transform: translateY(2px) scale(0.97);
+}
+
+.selecione-action-studs {
+  display: flex;
+  justify-content: space-around;
+  width: 82%;
+  margin-bottom: -3px;
+  z-index: 1;
+}
+
+.selecione-action-studs span {
+  width: 22px;
+  height: 8px;
+  border: 3px solid #181425;
+  border-bottom: none;
+  border-radius: 4px 4px 0 0;
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.45);
+}
+
+.selecione-action-body {
+  position: relative;
+  z-index: 2;
+  min-width: 162px;
+  padding: 10px 24px 12px;
+  border-radius: 8px;
+  border: 3.5px solid #181425;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-weight: 900;
+  font-size: 19px;
+  letter-spacing: 0.03em;
+  color: #ffffff;
+  text-transform: uppercase;
+  text-align: center;
+  -webkit-text-stroke: 3.8px #181425;
+  paint-order: stroke fill;
+  text-shadow: 0 2px 0 #181425;
+  box-shadow:
+    inset 0 3px 0 rgba(255, 255, 255, 0.45),
+    inset 0 -4px 0 rgba(0, 0, 0, 0.28),
+    0 4px 0 #181425;
+}
+
+.selecione-action-brick-btn--ready .selecione-action-studs span,
+.selecione-action-brick-btn--ready .selecione-action-body {
+  background: linear-gradient(180deg, #74b816 0%, #5c940d 100%);
+}
+
+.selecione-action-brick-btn--back .selecione-action-studs span,
+.selecione-action-brick-btn--back .selecione-action-body {
+  background: linear-gradient(180deg, #fa5252 0%, #c92a2a 100%);
+}
+
+@media (max-width: 720px) {
+  .selecione-modo-stage {
+    flex-direction: column;
+    gap: 20px;
+  }
+}
+
+/* ============================================================================
+   POPUP DE FIM DE PARTIDA: GRANDE COPA (IDÊNTICO À REFERÊNCIA)
+   ============================================================================ */
+
+.grande-copa-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(11, 22, 44, 0.56);
+  backdrop-filter: blur(4px);
+  cursor: pointer;
+  animation: grandeCopaOverlayFadeIn 0.22s ease-out;
+}
+
+@keyframes grandeCopaOverlayFadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.grande-copa-modal {
+  position: relative;
+  z-index: 2;
+  width: min(860px, 94vw);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  filter: drop-shadow(0 16px 32px rgba(0, 0, 0, 0.55));
+  user-select: none;
+}
+
+/* Troféus LEGO Dourados nos Cantos Superiores Esquerdo e Direito */
+.grande-copa-corner-trophy {
+  position: absolute;
+  top: -36px;
+  z-index: 15;
+  width: 112px;
+  height: 112px;
+  pointer-events: none;
+  filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.35));
+}
+
+.grande-copa-corner-trophy--left {
+  left: -34px;
+}
+
+.grande-copa-corner-trophy--right {
+  right: -34px;
+}
+
+.grande-copa-trophy-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Barra Superior de Blocos LEGO Azul-Claro e Amarelo */
+.grande-copa-top-rail {
+  display: flex;
+  align-items: stretch;
+  height: 36px;
+  margin: 0 38px;
+  z-index: 4;
+}
+
+.grande-copa-top-brick {
+  position: relative;
+  display: flex;
+  justify-content: space-evenly;
+  align-items: flex-start;
+  border: 3px solid #181425;
+  margin-right: -3px;
+  box-shadow:
+    inset 0 3px 0 rgba(255, 255, 255, 0.55),
+    inset 0 -3px 0 rgba(24, 52, 86, 0.18);
+}
+
+.grande-copa-top-brick--blue {
+  flex: 1.15;
+  background: linear-gradient(180deg, #b8dcf8 0%, #96c3ec 100%);
+}
+
+.grande-copa-top-brick--center {
+  flex: 2.6;
+}
+
+.grande-copa-top-brick--yellow {
+  flex: 1.05;
+  background: linear-gradient(180deg, #ffe066 0%, #fcc419 100%);
+}
+
+.grande-copa-top-stud {
+  width: 20px;
+  height: 7px;
+  margin-top: -9px;
+  background: inherit;
+  border: 2.8px solid #181425;
+  border-bottom: none;
+  border-radius: 3px 3px 0 0;
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.55);
+}
+
+/* Título Central 3D em SVG: GRANDE COPA */
+.grande-copa-title-wrap {
+  position: absolute;
+  top: -22px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 16;
+  width: min(460px, 68vw);
+  pointer-events: none;
+}
+
+.grande-copa-title-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+  overflow: visible;
+}
+
+.grande-copa-title-svg-shadow {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-weight: 900;
+  font-size: 56px;
+  letter-spacing: 0.02em;
+  fill: #181425;
+  stroke: #181425;
+  stroke-width: 12px;
+  stroke-linejoin: round;
+  paint-order: stroke fill;
+}
+
+.grande-copa-title-svg-text {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-weight: 900;
+  font-size: 56px;
+  letter-spacing: 0.02em;
+  fill: url(#grandeCopaTitleGrad);
+  stroke: #181425;
+  stroke-width: 11px;
+  stroke-linejoin: round;
+  paint-order: stroke fill;
+}
+
+/* Corpo Central: Colunas Laterais LEGO + Quadro Interno de Tijolos */
+.grande-copa-body-wrap {
+  display: flex;
+  align-items: stretch;
+  position: relative;
+  z-index: 5;
+  margin-top: -3px;
+}
+
+.grande-copa-side-rail {
+  width: 40px;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  z-index: 6;
+}
+
+.grande-copa-side-rail--left {
+  margin-right: -3px;
+}
+
+.grande-copa-side-rail--right {
+  margin-left: -3px;
+}
+
+.grande-copa-side-plate {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-evenly;
+  border: 3px solid #181425;
+  margin-bottom: -3px;
+  padding: 6px 0;
+  box-shadow:
+    inset 0 2px 0 rgba(255, 255, 255, 0.5),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.14);
+}
+
+.grande-copa-side-plate--blue {
+  flex: 1.55;
+  background: linear-gradient(90deg, #b0d6f5 0%, #92c0ea 100%);
+}
+
+.grande-copa-side-plate--bottom {
+  flex: 1.15;
+}
+
+.grande-copa-side-plate--yellow {
+  flex: 0.72;
+  background: linear-gradient(90deg, #ffe066 0%, #fcc419 100%);
+}
+
+.grande-copa-face-stud {
+  width: 21px;
+  height: 21px;
+  border-radius: 50%;
+  background: linear-gradient(180deg, #b8dcf8 0%, #7eb2e2 100%);
+  border: 2.5px solid #181425;
+  box-shadow:
+    inset 0 2px 0 rgba(255, 255, 255, 0.65),
+    0 2px 0 rgba(24, 20, 37, 0.22);
+  flex-shrink: 0;
+}
+
+.grande-copa-outer-bump {
+  width: 7px;
+  height: 18px;
+  background: #fcc419;
+  border: 2.6px solid #181425;
+  border-radius: 2px;
+}
+
+.grande-copa-side-rail--left .grande-copa-outer-bump {
+  margin-left: -41px;
+  border-right: none;
+}
+
+.grande-copa-side-rail--right .grande-copa-outer-bump {
+  margin-right: -41px;
+  border-left: none;
+}
+
+/* Quadro Interno Branco/Gelo com Textura de Parede de Tijolos LEGO */
+.grande-copa-board {
+  flex: 1;
+  min-width: 0;
+  background-color: #eef5fc;
+  background-image:
+    repeating-linear-gradient(
+      0deg,
+      transparent 0px,
+      transparent 54px,
+      rgba(162, 192, 222, 0.55) 54px,
+      rgba(162, 192, 222, 0.55) 56px
+    ),
+    repeating-linear-gradient(
+      90deg,
+      transparent 0px,
+      transparent 178px,
+      rgba(162, 192, 222, 0.42) 178px,
+      rgba(162, 192, 222, 0.42) 180px
+    );
+  border: 3.5px solid #181425;
+  padding: 18px 34px 22px;
+  box-shadow:
+    inset 0 4px 0 rgba(255, 255, 255, 0.85),
+    inset 0 -4px 0 rgba(145, 179, 212, 0.4);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+/* Lista das 4 Cartelas de Jogadores */
+.grande-copa-rows-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.grande-copa-player-block {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+/* Nome do Jogador acima da barra */
+.grande-copa-player-header {
+  display: flex;
+  align-items: center;
+  padding-left: 16px;
+}
+
+.grande-copa-player-name {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-weight: 900;
+  font-size: clamp(17px, 1.9vw, 22px);
+  color: #181425;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+}
+
+/* Barra Horizontal Azul-Claro LEGO (Cartela) */
+.grande-copa-track-bar {
+  display: flex;
+  align-items: center;
+  height: 74px;
+  background: linear-gradient(
+    180deg,
+    #b6daf8 0%,
+    #97c3ec 14%,
+    #97c3ec 86%,
+    #78a9db 100%
+  );
+  border: 3px solid #181425;
+  border-radius: 9px;
+  padding: 0 8px 0 14px;
+  box-shadow:
+    inset 0 3px 0 rgba(255, 255, 255, 0.55),
+    inset 0 -3px 0 rgba(35, 74, 118, 0.25);
+}
+
+/* Compartimento Esquerdo: Foto Quadrada + Medalhão Circular */
+.grande-copa-avatar-compartment {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  padding-right: 14px;
+}
+
+.grande-copa-portrait-square {
+  width: 52px;
+  height: 52px;
+  border-radius: 5px;
+  border: 2.6px solid #181425;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #3b4252;
+  flex-shrink: 0;
+}
+
+.grande-copa-character-circle {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: 2.6px solid #181425;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.grande-copa-avatar-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Divisória Vertical entre Avatar e Trilha de Pontos */
+.grande-copa-compartment-divider {
+  width: 2px;
+  align-self: stretch;
+  background: rgba(24, 20, 37, 0.55);
+  flex-shrink: 0;
+}
+
+/* Trilha Horizontal de 8 Slots (Medalhas 1/2/3 e Pontos Vazios •) */
+.grande-copa-slots-track {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  align-self: stretch;
+  padding: 0 4px;
+}
+
+.grande-copa-slot-cell {
+  position: relative;
+  flex: 1;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Emendas verticais da peça LEGO (após slot 4 e slot 7, idêntico ao print) */
+.grande-copa-slot-cell--seam::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: rgba(24, 20, 37, 0.42);
+  pointer-events: none;
+}
+
+/* Medalha Roseta Ondulada com Fitas (1 = Ouro, 2 = Prata/Roxo, 3 = Bronze) */
+.grande-copa-medal-wrap {
+  width: 54px;
+  height: 64px;
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 3;
+  filter: drop-shadow(0 2px 2px rgba(0, 0, 0, 0.25));
+}
+
+.grande-copa-medal-wrap--earned-now {
+  animation: grandeCopaMedalPop 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+@keyframes grandeCopaMedalPop {
+  0% {
+    opacity: 0;
+    transform: scale(0.25) rotate(-14deg);
+  }
+  70% {
+    opacity: 1;
+    transform: scale(1.14) rotate(3deg);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) rotate(0deg);
+  }
+}
+
+.grande-copa-medal-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  overflow: visible;
+}
+
+.grande-copa-medal-num {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-weight: 900;
+  font-size: 26px;
+  stroke: #181425;
+  stroke-width: 4.2px;
+  stroke-linejoin: round;
+  paint-order: stroke fill;
+}
+
+/* Ponto Circular Azul-Escuro Suave para Slots Vazios (sem borda preta, igual ao print) */
+.grande-copa-empty-dot {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: #5982ab;
+}
+
+/* Barra Inferior de Blocos LEGO (4 Pinos Esq + Barra Central Lisa + 4 Pinos Dir) */
+.grande-copa-bottom-rail {
+  display: flex;
+  align-items: stretch;
+  height: 40px;
+  margin-top: -3px;
+  z-index: 7;
+}
+
+.grande-copa-bottom-plate {
+  width: 176px;
+  background: linear-gradient(180deg, #b0d6f5 0%, #8ec0ea 100%);
+  border: 3px solid #181425;
+  border-radius: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: space-evenly;
+  padding: 0 6px;
+  flex-shrink: 0;
+  box-shadow:
+    inset 0 2px 0 rgba(255, 255, 255, 0.55),
+    inset 0 -3px 0 rgba(24, 52, 86, 0.22);
+}
+
+.grande-copa-bottom-center-bar {
+  position: relative;
+  flex: 1;
+  margin: 0 -3px;
+  background: linear-gradient(
+    180deg,
+    #c2e0fa 0%,
+    #9ec8ee 24%,
+    #9ec8ee 78%,
+    #7daee0 100%
+  );
+  border: 3px solid #181425;
+  box-shadow:
+    inset 0 3px 0 rgba(255, 255, 255, 0.6),
+    inset 0 -3px 0 rgba(24, 52, 86, 0.22);
+}
+
+.grande-copa-bottom-seam {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 62%;
+  width: 2.5px;
+  background: #181425;
+  opacity: 0.75;
+}
+
+@media (max-width: 680px) {
+  .grande-copa-board {
+    padding: 14px 12px 16px;
+  }
+  .grande-copa-bottom-plate {
+    width: 112px;
+  }
+  .grande-copa-character-circle {
+    display: none;
+  }
+}
+
+
+

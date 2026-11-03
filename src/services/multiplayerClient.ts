@@ -70,6 +70,7 @@ export interface MatchPlayerRealtimeState {
   fogAnchorY?: number
   islands?: FloatingIslandSnapshot[]
   isEliminated: boolean
+  eliminationOrder?: number
   updatedAt: number
 }
 
@@ -121,6 +122,13 @@ export interface MatchStartPayload {
   }>
 }
 
+export interface MatchSurvivalClimaxPayload {
+  roomId: string
+  winnerHandle: string
+  winnerCustomNick: string
+  winnerSkin?: string
+}
+
 export interface MatchGameOverPodiumEntry {
   rank: number
   userId?: string
@@ -130,10 +138,12 @@ export interface MatchGameOverPodiumEntry {
   slotIndex: number
   towerHeight: number
   lives: number
+  eliminationOrder?: number
   pointsEarned?: number
   previousCupPoints?: number
   cupPoints?: number
   cupTargetPoints?: number
+  pointMedals?: Array<1 | 2 | 3>
   isEliminated: boolean
   isWinner: boolean
   isCupWinner?: boolean
@@ -176,6 +186,9 @@ interface MultiplayerState {
   activeMatch: MatchStartPayload | null
   remoteLanes: Record<string, RemoteLaneInterpolatedState>
   activePowerVfx: SynchronizedPowerVfx[]
+  eliminationCounter: number
+  eliminationOrderByHandle: Record<string, number>
+  pointMedalsByHandle: Record<string, Array<1 | 2 | 3>>
   gameOverResult: MatchGameOverPayload | null
 }
 
@@ -191,6 +204,9 @@ const state = reactive<MultiplayerState>({
   activeMatch: null,
   remoteLanes: {},
   activePowerVfx: [],
+  eliminationCounter: 0,
+  eliminationOrderByHandle: {},
+  pointMedalsByHandle: {},
   gameOverResult: null,
 })
 
@@ -238,13 +254,35 @@ export function wakeUpSocketServer(): void {
 
 type MatchStartListener = (payload: MatchStartPayload) => void
 type NegativePowerListener = (powerType: PowerId, attackerNick: string) => void
+type SurvivalClimaxListener = (payload: MatchSurvivalClimaxPayload) => void
 type GameOverListener = (payload: MatchGameOverPayload) => void
 type ReturnToLobbyListener = (room: RoomStateDTO) => void
 
 let onMatchStartCallback: MatchStartListener | null = null
 let onReceiveNegativePowerCallback: NegativePowerListener | null = null
+let onSurvivalClimaxCallback: SurvivalClimaxListener | null = null
 let onGameOverCallback: GameOverListener | null = null
 let onReturnToLobbyCallback: ReturnToLobbyListener | null = null
+
+function recordEliminationIfNeeded(
+  rawHandle: string,
+  explicitOrder?: number
+): number {
+  if (!rawHandle) return 0
+  const h = normalizeHandle(rawHandle)
+  if (explicitOrder && explicitOrder > 0) {
+    state.eliminationOrderByHandle[h] = explicitOrder
+    if (explicitOrder > state.eliminationCounter) {
+      state.eliminationCounter = explicitOrder
+    }
+    return explicitOrder
+  }
+  if (!state.eliminationOrderByHandle[h]) {
+    state.eliminationCounter += 1
+    state.eliminationOrderByHandle[h] = state.eliminationCounter
+  }
+  return state.eliminationOrderByHandle[h]
+}
 
 function pushNotification(
   message: string,
@@ -379,6 +417,14 @@ function connect(): void {
   })
 
   socket.on('room:state_updated', (roomState: RoomStateDTO | null) => {
+    if (roomState && state.room) {
+      if (!roomState.selectedGameMode && state.room.selectedGameMode) {
+        roomState.selectedGameMode = state.room.selectedGameMode
+      }
+      if (!roomState.victoryCondition && state.room.victoryCondition) {
+        roomState.victoryCondition = state.room.victoryCondition
+      }
+    }
     state.room = roomState
     if (roomState) {
       state.countdownSeconds = roomState.countdownSeconds
@@ -435,6 +481,11 @@ function connect(): void {
     state.gameOverResult = null
     state.activePowerVfx = []
     state.activeMatch = payload
+    state.eliminationCounter = 0
+    state.eliminationOrderByHandle = {}
+    if ((payload.roundNumber || 1) <= 1) {
+      state.pointMedalsByHandle = {}
+    }
 
     const myHandle = normalizeHandle(authStore.state.user?.handle || '')
     const nextRemoteLanes: Record<string, RemoteLaneInterpolatedState> = {}
@@ -459,6 +510,7 @@ function connect(): void {
         fogAnchorY: -1.2 * GAME_CONSTANTS.UNIT_PX,
         islands: [],
         isEliminated: false,
+        eliminationOrder: 0,
         updatedAt: performance.now(),
         lastPieceSettledAtMs: 0,
         lastLifeLostAtMs: 0,
@@ -486,9 +538,14 @@ function connect(): void {
         const hasBlind =
           (remoteState.blindManualRemainingMs ?? 0) > 0 ||
           (remoteState.activeDebuffs || []).includes('BLIND_MANUAL')
+        const elimOrder =
+          remoteState.lives <= 0 || remoteState.isEliminated
+            ? recordEliminationIfNeeded(h, remoteState.eliminationOrder)
+            : 0
         state.remoteLanes[h] = {
           ...remoteState,
           handle: h,
+          eliminationOrder: elimOrder,
           renderActivePiece: remoteState.activePiece
             ? { ...remoteState.activePiece }
             : null,
@@ -527,6 +584,12 @@ function connect(): void {
       existing.lives = remoteState.lives
       existing.mana = remoteState.mana
       existing.isEliminated = remoteState.isEliminated
+      if (remoteState.lives <= 0 || remoteState.isEliminated) {
+        existing.eliminationOrder = recordEliminationIfNeeded(
+          h,
+          remoteState.eliminationOrder
+        )
+      }
       existing.updatedAt = performance.now()
       if (remoteState.islands) {
         existing.islands = remoteState.islands
@@ -589,7 +652,12 @@ function connect(): void {
 
   socket.on(
     'match:life_lost',
-    (payload: { handle: string; lives: number; isEliminated: boolean }) => {
+    (payload: {
+      handle: string
+      lives: number
+      isEliminated: boolean
+      eliminationOrder?: number
+    }) => {
       if (!payload?.handle) return
       const h = normalizeHandle(payload.handle)
       const lane = state.remoteLanes[h]
@@ -597,9 +665,30 @@ function connect(): void {
         const lostLife = payload.lives < lane.lives
         lane.lives = payload.lives
         lane.isEliminated = payload.isEliminated
+        if (payload.lives <= 0 || payload.isEliminated) {
+          lane.eliminationOrder = recordEliminationIfNeeded(
+            h,
+            payload.eliminationOrder
+          )
+          lane.activePiece = null
+          lane.renderActivePiece = null
+          lane.settledBlocks = []
+          lane.renderSettledBlocks = []
+        }
         if (lostLife) {
           lane.lastLifeLostAtMs = performance.now()
         }
+      } else if (payload.lives <= 0 || payload.isEliminated) {
+        recordEliminationIfNeeded(h, payload.eliminationOrder)
+      }
+    }
+  )
+
+  socket.on(
+    'match:survival_climax',
+    (payload: MatchSurvivalClimaxPayload) => {
+      if (onSurvivalClimaxCallback) {
+        onSurvivalClimaxCallback(payload)
       }
     }
   )
@@ -661,16 +750,101 @@ function connect(): void {
   )
 
   socket.on('match:game_over', (payload: MatchGameOverPayload) => {
+    const isSurvival =
+      payload.gameMode === 'SURVIVAL' ||
+      state.activeMatch?.gameMode === 'SURVIVAL'
+    const winnerHandleNorm = normalizeHandle(payload.winnerHandle || '')
+
+    let podium = (payload.podium || []).map((p) => {
+      const h = normalizeHandle(p.handle)
+      const elimOrder =
+        p.eliminationOrder || state.eliminationOrderByHandle[h] || 0
+      return {
+        ...p,
+        userId: p.userId || p.handle,
+        eliminationOrder: elimOrder,
+      }
+    })
+
+    if (isSurvival && podium.length > 1) {
+      // Capture previous points earned before re-sorting so totalCupPoints stays accurate if adjusted
+      const prevPointsByHandle: Record<string, number> = {}
+      for (const p of podium) {
+        prevPointsByHandle[normalizeHandle(p.handle)] = p.pointsEarned ?? 0
+      }
+
+      podium = [...podium].sort((a, b) => {
+        const aIsWinner = normalizeHandle(a.handle) === winnerHandleNorm
+        const bIsWinner = normalizeHandle(b.handle) === winnerHandleNorm
+        if (aIsWinner) return -1
+        if (bIsWinner) return 1
+        const aAlive = a.lives > 0
+        const bAlive = b.lives > 0
+        if (aAlive !== bAlive) return aAlive ? -1 : 1
+        if (!aAlive && !bAlive) {
+          const aOrder = a.eliminationOrder || 0
+          const bOrder = b.eliminationOrder || 0
+          if (aOrder !== bOrder) {
+            // Later eliminationOrder (died later) ranks higher!
+            return bOrder - aOrder
+          }
+        }
+        if (b.lives !== a.lives) return b.lives - a.lives
+        return b.towerHeight - a.towerHeight
+      })
+
+      const pointsByRank = [3, 2, 1, 0]
+      podium = podium.map((p, idx) => {
+        const newPoints = pointsByRank[idx] ?? 0
+        const oldPoints =
+          prevPointsByHandle[normalizeHandle(p.handle)] ?? newPoints
+        const prevCupPts =
+          p.previousCupPoints ??
+          Math.max(0, (p.cupPoints ?? oldPoints) - oldPoints)
+        return {
+          ...p,
+          rank: idx + 1,
+          pointsEarned: newPoints,
+          previousCupPoints: prevCupPts,
+          cupPoints: prevCupPts + newPoints,
+        }
+      })
+    }
+
+    podium = podium.map((p) => {
+      const h = normalizeHandle(p.handle)
+      const earned =
+        p.pointsEarned ??
+        (p.rank === 1 ? 3 : p.rank === 2 ? 2 : p.rank === 3 ? 1 : 0)
+      const prevPts =
+        p.previousCupPoints ?? Math.max(0, (p.cupPoints ?? earned) - earned)
+      const prevMedals = (state.pointMedalsByHandle[h] || []).slice(0, prevPts)
+      while (prevMedals.length < prevPts) {
+        prevMedals.push(1)
+      }
+      const medalRank: 1 | 2 | 3 =
+        p.rank === 1 ? 1 : p.rank === 2 ? 2 : 3
+      const nextMedals: Array<1 | 2 | 3> = [...prevMedals]
+      for (let i = 0; i < earned; i++) {
+        nextMedals.push(medalRank)
+      }
+      state.pointMedalsByHandle[h] = nextMedals
+      return {
+        ...p,
+        pointsEarned: earned,
+        previousCupPoints: prevPts,
+        cupPoints: prevPts + earned,
+        pointMedals: nextMedals,
+      }
+    })
+
     const normalized: MatchGameOverPayload = {
       ...payload,
       winnerCustomNick:
         payload.winnerCustomNick || payload.winnerNick || 'VENCEDOR',
       winnerNick:
         payload.winnerNick || payload.winnerCustomNick || 'VENCEDOR',
-      podium: (payload.podium || []).map((p) => ({
-        ...p,
-        userId: p.userId || p.handle,
-      })),
+      podium,
     }
     state.gameOverResult = normalized
     if (onGameOverCallback) {
@@ -685,6 +859,7 @@ function connect(): void {
       state.gameOverResult = null
       state.remoteLanes = {}
       state.activePowerVfx = []
+      state.pointMedalsByHandle = {}
       if (payload?.room) {
         state.room = payload.room
       }
@@ -711,17 +886,49 @@ function isFriendOnline(handle: string): boolean {
   return Boolean(state.onlineFriendHandles[normalizeHandle(handle)])
 }
 
-function enterLobby(): Promise<RoomStateDTO> {
+function enterLobby(options?: {
+  selectedGameMode?: SelectableGameMode
+  victoryCondition?: VictoryCondition
+}): Promise<RoomStateDTO> {
   connect()
   return new Promise((resolve, reject) => {
     if (!socket) {
       reject(new Error('Conexão em tempo real indisponível.'))
       return
     }
+    let settled = false
+    const timer = window.setTimeout(() => {
+      if (settled) return
+      settled = true
+      reject(new Error('Tempo limite ao criar a sala Multiplayer.'))
+    }, 4500)
+
     socket.emit(
       'room:enter_lobby',
+      {
+        selectedGameMode: options?.selectedGameMode,
+        victoryCondition: options?.victoryCondition,
+      },
       (res: { ok?: boolean; room?: RoomStateDTO; error?: string }) => {
+        if (settled) return
+        settled = true
+        window.clearTimeout(timer)
         if (res?.ok && res.room) {
+          if (options?.selectedGameMode) {
+            res.room.selectedGameMode = options.selectedGameMode
+            if (options.selectedGameMode !== 'RANDOM') {
+              res.room.activeGameMode = options.selectedGameMode
+            }
+          }
+          if (options?.victoryCondition) {
+            res.room.victoryCondition = options.victoryCondition
+            res.room.cupTargetPoints =
+              options.victoryCondition === 'SINGLE_WIN'
+                ? 1
+                : options.victoryCondition === 'CUP_12'
+                  ? 12
+                  : 6
+          }
           state.room = res.room
           resolve(res.room)
         } else {
@@ -742,16 +949,39 @@ function leaveRoom(): void {
 }
 
 function toggleReady(forceReady?: boolean): Promise<RoomStateDTO> {
+  connect()
   return new Promise((resolve, reject) => {
     if (!socket) {
       reject(new Error('Sem conexão com o servidor.'))
       return
     }
+    let settled = false
+    const timer = window.setTimeout(() => {
+      if (settled) return
+      settled = true
+      if (state.room) {
+        resolve(state.room)
+      } else {
+        reject(new Error('Tempo limite ao atualizar estado Pronto.'))
+      }
+    }, 3500)
+
     socket.emit(
       'room:toggle_ready',
       { isReady: forceReady },
       (res: { ok?: boolean; room?: RoomStateDTO; error?: string }) => {
+        if (settled) return
+        settled = true
+        window.clearTimeout(timer)
         if (res?.ok && res.room) {
+          if (state.room) {
+            if (!res.room.selectedGameMode && state.room.selectedGameMode) {
+              res.room.selectedGameMode = state.room.selectedGameMode
+            }
+            if (!res.room.victoryCondition && state.room.victoryCondition) {
+              res.room.victoryCondition = state.room.victoryCondition
+            }
+          }
           state.room = res.room
           resolve(res.room)
         } else {
@@ -763,18 +993,46 @@ function toggleReady(forceReady?: boolean): Promise<RoomStateDTO> {
 }
 
 function setRoomGameMode(gameMode: SelectableGameMode): Promise<RoomStateDTO> {
+  // Optimistically update local room state immediately so UI responds without delay
+  if (state.room) {
+    state.room.selectedGameMode = gameMode
+    if (gameMode !== 'RANDOM') {
+      state.room.activeGameMode = gameMode
+    }
+  }
+  connect()
   return new Promise((resolve, reject) => {
-    if (!socket) {
-      reject(new Error('Sem conexão com o servidor.'))
+    if (!socket || !socket.connected) {
+      if (state.room) {
+        resolve(state.room)
+      } else {
+        reject(new Error('Sem conexão com o servidor.'))
+      }
       return
     }
+    let settled = false
+    const timer = window.setTimeout(() => {
+      if (settled) return
+      settled = true
+      if (state.room) {
+        resolve(state.room)
+      } else {
+        reject(new Error('Tempo limite ao alterar modo de jogo.'))
+      }
+    }, 2000)
+
     socket.emit(
       'room:set_game_mode',
       { gameMode },
       (res: { ok?: boolean; room?: RoomStateDTO; error?: string }) => {
+        if (settled) return
+        settled = true
+        window.clearTimeout(timer)
         if (res?.ok && res.room) {
           state.room = res.room
           resolve(res.room)
+        } else if (state.room) {
+          resolve(state.room)
         } else {
           reject(new Error(res?.error || 'Falha ao alterar modo de jogo.'))
         }
@@ -786,18 +1044,49 @@ function setRoomGameMode(gameMode: SelectableGameMode): Promise<RoomStateDTO> {
 function setRoomVictoryCondition(
   victoryCondition: VictoryCondition
 ): Promise<RoomStateDTO> {
+  // Optimistically update local room state immediately so UI responds without delay
+  if (state.room) {
+    state.room.victoryCondition = victoryCondition
+    state.room.cupTargetPoints =
+      victoryCondition === 'SINGLE_WIN'
+        ? 1
+        : victoryCondition === 'CUP_12'
+          ? 12
+          : 6
+  }
+  connect()
   return new Promise((resolve, reject) => {
-    if (!socket) {
-      reject(new Error('Sem conexão com o servidor.'))
+    if (!socket || !socket.connected) {
+      if (state.room) {
+        resolve(state.room)
+      } else {
+        reject(new Error('Sem conexão com o servidor.'))
+      }
       return
     }
+    let settled = false
+    const timer = window.setTimeout(() => {
+      if (settled) return
+      settled = true
+      if (state.room) {
+        resolve(state.room)
+      } else {
+        reject(new Error('Tempo limite ao alterar condição de vitória.'))
+      }
+    }, 2000)
+
     socket.emit(
       'room:set_victory_condition',
       { victoryCondition },
       (res: { ok?: boolean; room?: RoomStateDTO; error?: string }) => {
+        if (settled) return
+        settled = true
+        window.clearTimeout(timer)
         if (res?.ok && res.room) {
           state.room = res.room
           resolve(res.room)
+        } else if (state.room) {
+          resolve(state.room)
         } else {
           reject(
             new Error(res?.error || 'Falha ao alterar condição de vitória.')
@@ -1021,6 +1310,12 @@ function emitMatchSyncState(payload: {
   islands?: FloatingIslandSnapshot[]
   isEliminated: boolean
 }): void {
+  if (payload.lives <= 0 || payload.isEliminated) {
+    const myHandle = normalizeHandle(authStore.state.user?.handle || '')
+    if (myHandle) {
+      recordEliminationIfNeeded(myHandle)
+    }
+  }
   if (!socket || !socket.connected || !state.activeMatch) return
   socket.emit('match:sync_state', payload)
 }
@@ -1031,6 +1326,12 @@ function emitPieceSettled(towerHeight: number, pieceCount: number): void {
 }
 
 function emitLifeLost(lives: number): void {
+  if (lives <= 0) {
+    const myHandle = normalizeHandle(authStore.state.user?.handle || '')
+    if (myHandle) {
+      recordEliminationIfNeeded(myHandle)
+    }
+  }
   if (!socket || !socket.connected || !state.activeMatch) return
   socket.emit('match:life_lost', { lives })
 }
@@ -1062,7 +1363,11 @@ function emitUseNegativePower(powerType: PowerId, targetId?: string): void {
 
 function emitClaimVictory(towerHeight: number, elapsedTimeMs: number): void {
   if (!socket || !socket.connected || !state.activeMatch) return
-  socket.emit('match:claim_victory', { towerHeight, elapsedTimeMs })
+  socket.emit('match:claim_victory', {
+    towerHeight,
+    elapsedTimeMs,
+    eliminationOrderByHandle: { ...state.eliminationOrderByHandle },
+  })
 }
 
 function emitReturnToLobby(): void {
@@ -1188,6 +1493,7 @@ function stepInterpolation(dtMs: number): void {
 function registerCallbacks(callbacks: {
   onMatchStart?: MatchStartListener
   onReceiveNegativePower?: NegativePowerListener
+  onSurvivalClimax?: SurvivalClimaxListener
   onGameOver?: GameOverListener
   onReturnToLobby?: ReturnToLobbyListener
 }): void {
@@ -1196,6 +1502,9 @@ function registerCallbacks(callbacks: {
   }
   if (callbacks.onReceiveNegativePower !== undefined) {
     onReceiveNegativePowerCallback = callbacks.onReceiveNegativePower
+  }
+  if (callbacks.onSurvivalClimax !== undefined) {
+    onSurvivalClimaxCallback = callbacks.onSurvivalClimax
   }
   if (callbacks.onGameOver !== undefined) {
     onGameOverCallback = callbacks.onGameOver

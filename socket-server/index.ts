@@ -326,6 +326,18 @@ export function isOriginAllowed(origin?: string): boolean {
 // 5. ROOMS, SOCIAL & 20HZ MATCH SYNC STATE
 // ============================================================================
 
+export type RoomGameMode = 'RACE' | 'SURVIVAL'
+export type RoomSelectableGameMode = 'RACE' | 'SURVIVAL' | 'RANDOM'
+export type RoomVictoryCondition = 'SINGLE_WIN' | 'CUP_6' | 'CUP_12'
+
+const CUP_RANK_POINTS: readonly [number, number, number, number] = [3, 2, 1, 0]
+
+function getCupTargetPoints(condition: RoomVictoryCondition): number {
+  if (condition === 'SINGLE_WIN') return 3
+  if (condition === 'CUP_12') return 12
+  return 6
+}
+
 interface RoomSlotPlayerDTO {
   socketId: string
   googleId: string
@@ -336,6 +348,8 @@ interface RoomSlotPlayerDTO {
   isHost: boolean
   isReady: boolean
   slotIndex: number
+  cupPoints?: number
+  lastPointsEarned?: number
 }
 
 interface RoomStateDTO {
@@ -344,6 +358,11 @@ interface RoomStateDTO {
   status: 'LOBBY' | 'COUNTDOWN' | 'PLAYING' | 'FINISHED'
   countdownSeconds: number | null
   pieceSeed: string | null
+  selectedGameMode: RoomSelectableGameMode
+  activeGameMode: RoomGameMode
+  victoryCondition: RoomVictoryCondition
+  cupTargetPoints: number
+  roundNumber: number
   slots: Array<RoomSlotPlayerDTO | null>
 }
 
@@ -354,6 +373,14 @@ interface InternalRoom {
   countdownSeconds: number | null
   countdownTimer: ReturnType<typeof setInterval> | null
   pieceSeed: string | null
+  selectedGameMode: RoomSelectableGameMode
+  activeGameMode: RoomGameMode
+  victoryCondition: RoomVictoryCondition
+  cupTargetPoints: number
+  roundNumber: number
+  eliminationCounter: number
+  survivalClimaxWinnerHandle: string | null
+  survivalClimaxTimer: ReturnType<typeof setTimeout> | null
   slots: [
     RoomSlotPlayerDTO | null,
     RoomSlotPlayerDTO | null,
@@ -366,6 +393,7 @@ interface InternalRoom {
       towerHeight: number
       lives: number
       isEliminated: boolean
+      eliminationOrder: number
     }
   >
 }
@@ -433,6 +461,11 @@ function serializeRoom(room: InternalRoom): RoomStateDTO {
     status: room.status,
     countdownSeconds: room.countdownSeconds,
     pieceSeed: room.pieceSeed,
+    selectedGameMode: room.selectedGameMode,
+    activeGameMode: room.activeGameMode,
+    victoryCondition: room.victoryCondition,
+    cupTargetPoints: room.cupTargetPoints,
+    roundNumber: room.roundNumber,
     slots: room.slots.map((s) => (s ? { ...s } : null)),
   }
 }
@@ -465,7 +498,7 @@ function checkAndStartRoomCountdown(
     (s): s is RoomSlotPlayerDTO => s !== null
   )
   const allReady =
-    occupied.length >= 2 && occupied.every((s) => s.isReady === true)
+    occupied.length >= 1 && occupied.every((s) => s.isReady === true)
 
   if (!allReady) {
     abortRoomCountdown(io, room)
@@ -488,7 +521,7 @@ function checkAndStartRoomCountdown(
       (s): s is RoomSlotPlayerDTO => s !== null
     )
     if (
-      currentOccupied.length < 2 ||
+      currentOccupied.length < 1 ||
       !currentOccupied.every((s) => s.isReady)
     ) {
       abortRoomCountdown(io, room)
@@ -518,13 +551,28 @@ function checkAndStartRoomCountdown(
     }
     room.countdownSeconds = null
     room.status = 'PLAYING'
+    room.roundNumber = 1
+    room.eliminationCounter = 0
+    room.survivalClimaxWinnerHandle = null
+    clearSurvivalClimaxTimer(room)
+    room.cupTargetPoints = getCupTargetPoints(room.victoryCondition)
     room.pieceSeed = generatePieceSeed()
+    room.activeGameMode =
+      room.selectedGameMode === 'RANDOM'
+        ? Math.random() < 0.5
+          ? 'RACE'
+          : 'SURVIVAL'
+        : room.selectedGameMode
+
     room.matchStateByHandle.clear()
     for (const p of currentOccupied) {
+      p.cupPoints = 0
+      p.lastPointsEarned = 0
       room.matchStateByHandle.set(p.handle, {
         towerHeight: 0,
         lives: 3,
         isEliminated: false,
+        eliminationOrder: 0,
       })
     }
 
@@ -532,6 +580,11 @@ function checkAndStartRoomCountdown(
     io.to(room.roomId).emit('match:start', {
       roomId: room.roomId,
       pieceSeed: room.pieceSeed,
+      gameMode: room.activeGameMode,
+      selectedGameMode: room.selectedGameMode,
+      victoryCondition: room.victoryCondition,
+      cupTargetPoints: room.cupTargetPoints,
+      roundNumber: room.roundNumber,
       startedAt: new Date().toISOString(),
       players: currentOccupied.map((p) => ({
         handle: p.handle,
@@ -539,9 +592,222 @@ function checkAndStartRoomCountdown(
         equippedSkin: p.equippedSkin,
         slotIndex: p.slotIndex,
         isHost: p.isHost,
+        cupPoints: p.cupPoints ?? 0,
+        lastPointsEarned: p.lastPointsEarned ?? 0,
       })),
     })
   }, 1000)
+}
+
+function clearSurvivalClimaxTimer(room: InternalRoom): void {
+  if (room.survivalClimaxTimer) {
+    clearTimeout(room.survivalClimaxTimer)
+    room.survivalClimaxTimer = null
+  }
+}
+
+async function concludeMultiplayerRound(
+  io: SocketIOServer,
+  room: InternalRoom,
+  winnerHandle: string,
+  elapsedTimeMs: number,
+  clientEliminationOrders?: Record<string, number>
+): Promise<void> {
+  if (room.status === 'FINISHED') return
+  clearSurvivalClimaxTimer(room)
+  room.survivalClimaxWinnerHandle = null
+  room.status = 'FINISHED'
+
+  const presentPlayers = room.slots.filter(
+    (s): s is RoomSlotPlayerDTO => s !== null
+  )
+  const winnerPlayer =
+    presentPlayers.find((p) => p.handle === winnerHandle) || presentPlayers[0]
+  if (!winnerPlayer) return
+
+  if (clientEliminationOrders) {
+    for (const p of presentPlayers) {
+      const st = room.matchStateByHandle.get(p.handle)
+      if (st && st.lives <= 0 && st.eliminationOrder === 0) {
+        const clientOrder =
+          clientEliminationOrders[p.handle.toLowerCase()] ??
+          clientEliminationOrders[p.handle]
+        if (typeof clientOrder === 'number' && clientOrder > 0) {
+          st.eliminationOrder = clientOrder
+        }
+      }
+    }
+  }
+
+  const sorted = [...presentPlayers].sort((a, b) => {
+    if (a.handle === winnerPlayer.handle) return -1
+    if (b.handle === winnerPlayer.handle) return 1
+    const stA = room.matchStateByHandle.get(a.handle)
+    const stB = room.matchStateByHandle.get(b.handle)
+    if (room.activeGameMode === 'SURVIVAL') {
+      const aAlive = (stA?.lives ?? 3) > 0 && !stA?.isEliminated ? 1 : 0
+      const bAlive = (stB?.lives ?? 3) > 0 && !stB?.isEliminated ? 1 : 0
+      if (bAlive !== aAlive) return bAlive - aAlive
+      if (aAlive === 0 && bAlive === 0) {
+        const aOrder = stA?.eliminationOrder || 0
+        const bOrder = stB?.eliminationOrder || 0
+        if (aOrder !== bOrder) return bOrder - aOrder
+      }
+      if ((stB?.lives ?? 3) !== (stA?.lives ?? 3)) {
+        return (stB?.lives ?? 3) - (stA?.lives ?? 3)
+      }
+    }
+    return (stB?.towerHeight ?? 0) - (stA?.towerHeight ?? 0)
+  })
+
+  const cupTargetPoints = getCupTargetPoints(room.victoryCondition)
+  room.cupTargetPoints = cupTargetPoints
+
+  const podium = sorted.map((p, idx) => {
+    const st = room.matchStateByHandle.get(p.handle)
+    const pointsEarned = CUP_RANK_POINTS[idx] ?? 0
+    const previousCupPoints = p.cupPoints ?? 0
+    const nextCupPoints = Math.min(
+      cupTargetPoints,
+      previousCupPoints + pointsEarned
+    )
+    p.lastPointsEarned = pointsEarned
+    p.cupPoints = nextCupPoints
+
+    return {
+      rank: idx + 1,
+      userId: p.handle,
+      handle: p.handle,
+      customNick: p.customNick,
+      equippedSkin: p.equippedSkin,
+      slotIndex: p.slotIndex,
+      towerHeight: st?.towerHeight ?? 0,
+      lives: st?.lives ?? 3,
+      eliminationOrder: st?.eliminationOrder ?? 0,
+      pointsEarned,
+      previousCupPoints,
+      cupPoints: nextCupPoints,
+      cupTargetPoints,
+      isEliminated: st?.isEliminated ?? false,
+      isWinner: p.handle === winnerPlayer.handle,
+      isCupWinner: nextCupPoints >= cupTargetPoints,
+    }
+  })
+
+  const isSingleWin = room.victoryCondition === 'SINGLE_WIN'
+  const cupChampions = podium.filter((p) => (p.cupPoints ?? 0) >= cupTargetPoints)
+  const isCupFinished = isSingleWin || cupChampions.length > 0
+
+  let cupWinnerEntry = podium[0]
+  if (isCupFinished && !isSingleWin && cupChampions.length > 0) {
+    cupWinnerEntry = [...cupChampions].sort((a, b) => {
+      if ((b.cupPoints ?? 0) !== (a.cupPoints ?? 0)) {
+        return (b.cupPoints ?? 0) - (a.cupPoints ?? 0)
+      }
+      return a.rank - b.rank
+    })[0]
+  }
+
+  for (const entry of podium) {
+    entry.isCupWinner =
+      isCupFinished && entry.handle === cupWinnerEntry?.handle
+  }
+
+  broadcastRoomState(io, room)
+  io.to(room.roomId).emit('match:game_over', {
+    roomId: room.roomId,
+    gameMode: room.activeGameMode,
+    selectedGameMode: room.selectedGameMode,
+    victoryCondition: room.victoryCondition,
+    cupTargetPoints,
+    roundNumber: room.roundNumber,
+    isCupFinished,
+    roundWinnerHandle: winnerPlayer.handle,
+    roundWinnerNick: winnerPlayer.customNick,
+    roundWinnerSkin: winnerPlayer.equippedSkin,
+    winnerId: cupWinnerEntry?.handle || winnerPlayer.handle,
+    winnerHandle: cupWinnerEntry?.handle || winnerPlayer.handle,
+    winnerNick: cupWinnerEntry?.customNick || winnerPlayer.customNick,
+    winnerCustomNick: cupWinnerEntry?.customNick || winnerPlayer.customNick,
+    winnerSkin: cupWinnerEntry?.equippedSkin || winnerPlayer.equippedSkin,
+    reason: 'GOAL_REACHED',
+    elapsedTimeMs,
+    podium,
+  })
+
+  if (isCupFinished) {
+    try {
+      await connectMongoDB()
+      for (const p of presentPlayers) {
+        await UserModel.updateOne(
+          { googleId: p.googleId },
+          {
+            $inc: {
+              'stats.matchesPlayed': 1,
+              'stats.wins': p.handle === (cupWinnerEntry?.handle || winnerPlayer.handle) ? 1 : 0,
+            },
+          }
+        )
+      }
+    } catch {
+      // Ignore stat update errors
+    }
+  }
+}
+
+function checkSurvivalLastPlayerStanding(
+  io: SocketIOServer,
+  room: InternalRoom
+): void {
+  if (room.status !== 'PLAYING' || room.activeGameMode !== 'SURVIVAL') {
+    return
+  }
+
+  const presentPlayers = room.slots.filter(
+    (s): s is RoomSlotPlayerDTO => s !== null
+  )
+  if (presentPlayers.length < 2) return
+
+  const alive = presentPlayers.filter((p) => {
+    const st = room.matchStateByHandle.get(p.handle)
+    return (st?.lives ?? 3) > 0 && !st?.isEliminated
+  })
+
+  if (alive.length > 1) return
+
+  const winnerPlayer =
+    alive[0] ||
+    [...presentPlayers].sort((a, b) => {
+      const stA = room.matchStateByHandle.get(a.handle)
+      const stB = room.matchStateByHandle.get(b.handle)
+      if ((stB?.lives ?? 0) !== (stA?.lives ?? 0)) {
+        return (stB?.lives ?? 0) - (stA?.lives ?? 0)
+      }
+      if ((stB?.eliminationOrder ?? 0) !== (stA?.eliminationOrder ?? 0)) {
+        return (stB?.eliminationOrder ?? 0) - (stA?.eliminationOrder ?? 0)
+      }
+      return (stB?.towerHeight ?? 0) - (stA?.towerHeight ?? 0)
+    })[0]
+  if (!winnerPlayer) return
+
+  if (room.survivalClimaxWinnerHandle === winnerPlayer.handle) {
+    return
+  }
+
+  room.survivalClimaxWinnerHandle = winnerPlayer.handle
+  io.to(room.roomId).emit('match:survival_climax', {
+    roomId: room.roomId,
+    winnerHandle: winnerPlayer.handle,
+    winnerCustomNick: winnerPlayer.customNick,
+    winnerSkin: winnerPlayer.equippedSkin,
+  })
+
+  clearSurvivalClimaxTimer(room)
+  room.survivalClimaxTimer = setTimeout(() => {
+    if (room.status === 'PLAYING') {
+      void concludeMultiplayerRound(io, room, winnerPlayer.handle, 0)
+    }
+  }, 15000)
 }
 
 function removePlayerFromRoom(
@@ -1009,15 +1275,61 @@ io.on('connection', async (socket) => {
   // PARTE 2: SALA DE 4 SLOTS, CONVITES E PRONTO (READY)
   // --------------------------------------------------------------------------
 
+  function safeAck<T>(maybeFn1: unknown, maybeFn2: unknown, data: T): void {
+    if (typeof maybeFn2 === 'function') {
+      ;(maybeFn2 as (res: T) => void)(data)
+    } else if (typeof maybeFn1 === 'function') {
+      ;(maybeFn1 as (res: T) => void)(data)
+    }
+  }
+
   socket.on(
     'room:enter_lobby',
-    (ack?: (res: { ok: boolean; room: RoomStateDTO }) => void) => {
+    (
+      payloadOrAck?: unknown,
+      maybeAck?: (res: { ok: boolean; room: RoomStateDTO }) => void
+    ) => {
+      const reqOpts =
+        payloadOrAck && typeof payloadOrAck === 'object'
+          ? (payloadOrAck as {
+              selectedGameMode?: RoomSelectableGameMode
+              victoryCondition?: RoomVictoryCondition
+            })
+          : undefined
+
+      const initialMode: RoomSelectableGameMode =
+        reqOpts?.selectedGameMode === 'SURVIVAL' ||
+        reqOpts?.selectedGameMode === 'RANDOM'
+          ? reqOpts.selectedGameMode
+          : 'RACE'
+
+      const initialVictory: RoomVictoryCondition =
+        reqOpts?.victoryCondition === 'SINGLE_WIN' ||
+        reqOpts?.victoryCondition === 'CUP_12'
+          ? reqOpts.victoryCondition
+          : 'CUP_6'
+
       if (session.roomId) {
         const existing = roomsById.get(session.roomId)
         if (existing) {
+          if (
+            existing.status === 'LOBBY' &&
+            existing.hostHandle.toLowerCase() === session.handle.toLowerCase()
+          ) {
+            if (reqOpts?.selectedGameMode) {
+              existing.selectedGameMode = initialMode
+              if (initialMode !== 'RANDOM') {
+                existing.activeGameMode = initialMode
+              }
+            }
+            if (reqOpts?.victoryCondition) {
+              existing.victoryCondition = initialVictory
+              existing.cupTargetPoints = getCupTargetPoints(initialVictory)
+            }
+          }
           const dto = serializeRoom(existing)
           socket.emit('room:state_updated', dto)
-          ack?.({ ok: true, room: dto })
+          safeAck(payloadOrAck, maybeAck, { ok: true, room: dto })
           return
         }
       }
@@ -1037,6 +1349,8 @@ io.on('connection', async (socket) => {
         isHost: true,
         isReady: false,
         slotIndex: 0,
+        cupPoints: 0,
+        lastPointsEarned: 0,
       }
 
       const room: InternalRoom = {
@@ -1046,6 +1360,14 @@ io.on('connection', async (socket) => {
         countdownSeconds: null,
         countdownTimer: null,
         pieceSeed: null,
+        selectedGameMode: initialMode,
+        activeGameMode: initialMode === 'SURVIVAL' ? 'SURVIVAL' : 'RACE',
+        victoryCondition: initialVictory,
+        cupTargetPoints: getCupTargetPoints(initialVictory),
+        roundNumber: 1,
+        eliminationCounter: 0,
+        survivalClimaxWinnerHandle: null,
+        survivalClimaxTimer: null,
         slots: [hostSlot, null, null, null],
         matchStateByHandle: new Map(),
       }
@@ -1056,7 +1378,75 @@ io.on('connection', async (socket) => {
 
       const dto = serializeRoom(room)
       socket.emit('room:state_updated', dto)
-      ack?.({ ok: true, room: dto })
+      safeAck(payloadOrAck, maybeAck, { ok: true, room: dto })
+    }
+  )
+
+  socket.on(
+    'room:set_game_mode',
+    (
+      payload: { gameMode?: RoomSelectableGameMode },
+      ack?: (res: { ok: boolean; error?: string; room?: RoomStateDTO }) => void
+    ) => {
+      if (!session.roomId) {
+        safeAck(payload, ack, { ok: false, error: 'Você não está em uma sala.' })
+        return
+      }
+      const room = roomsById.get(session.roomId)
+      if (!room) {
+        safeAck(payload, ack, { ok: false, error: 'Sala não encontrada.' })
+        return
+      }
+      if (room.status === 'PLAYING') {
+        safeAck(payload, ack, {
+          ok: false,
+          error: 'Não é possível mudar o modo com a partida em andamento.',
+        })
+        return
+      }
+      const requested = payload?.gameMode
+      const nextMode: RoomSelectableGameMode =
+        requested === 'SURVIVAL' || requested === 'RANDOM' ? requested : 'RACE'
+      room.selectedGameMode = nextMode
+      if (nextMode !== 'RANDOM') {
+        room.activeGameMode = nextMode
+      }
+      broadcastRoomState(io, room)
+      safeAck(payload, ack, { ok: true, room: serializeRoom(room) })
+    }
+  )
+
+  socket.on(
+    'room:set_victory_condition',
+    (
+      payload: { victoryCondition?: RoomVictoryCondition },
+      ack?: (res: { ok: boolean; error?: string; room?: RoomStateDTO }) => void
+    ) => {
+      if (!session.roomId) {
+        safeAck(payload, ack, { ok: false, error: 'Você não está em uma sala.' })
+        return
+      }
+      const room = roomsById.get(session.roomId)
+      if (!room) {
+        safeAck(payload, ack, { ok: false, error: 'Sala não encontrada.' })
+        return
+      }
+      if (room.status === 'PLAYING') {
+        safeAck(payload, ack, {
+          ok: false,
+          error: 'Não é possível mudar a condição de vitória durante a partida.',
+        })
+        return
+      }
+      const requested = payload?.victoryCondition
+      const nextCondition: RoomVictoryCondition =
+        requested === 'SINGLE_WIN' || requested === 'CUP_12'
+          ? requested
+          : 'CUP_6'
+      room.victoryCondition = nextCondition
+      room.cupTargetPoints = getCupTargetPoints(nextCondition)
+      broadcastRoomState(io, room)
+      safeAck(payload, ack, { ok: true, room: serializeRoom(room) })
     }
   )
 
@@ -1216,13 +1606,24 @@ io.on('connection', async (socket) => {
     const mySlot = room.slots.find((s) => s?.handle === session.handle)
     const towerHeight = Number(payload?.towerHeight || 0)
     const lives = Number(payload?.lives ?? 3)
-    const isEliminated = Boolean(payload?.isEliminated)
+    const isEliminated = Boolean(payload?.isEliminated) || lives <= 0
+    const prev = room.matchStateByHandle.get(session.handle)
+    let eliminationOrder = prev?.eliminationOrder ?? 0
+    if (lives <= 0 && eliminationOrder === 0) {
+      room.eliminationCounter += 1
+      eliminationOrder = room.eliminationCounter
+    }
 
     room.matchStateByHandle.set(session.handle, {
       towerHeight,
       lives,
       isEliminated,
+      eliminationOrder,
     })
+
+    if (lives <= 0) {
+      checkSurvivalLastPlayerStanding(io, room)
+    }
 
     socket.to(room.roomId).emit('match:player_state_updated', {
       handle: session.handle,
@@ -1242,6 +1643,7 @@ io.on('connection', async (socket) => {
       fogAnchorY: Number(payload?.fogAnchorY ?? 2.2),
       islands: Array.isArray(payload?.islands) ? payload.islands : [],
       isEliminated,
+      eliminationOrder,
       updatedAt: Date.now(),
     })
   })
@@ -1260,12 +1662,32 @@ io.on('connection', async (socket) => {
 
   socket.on('match:life_lost', (payload: { lives?: number }) => {
     if (!session.roomId) return
+    const room = roomsById.get(session.roomId)
     const lives = Number(payload?.lives ?? 0)
+    let eliminationOrder = 0
+    if (room) {
+      const prev = room.matchStateByHandle.get(session.handle)
+      eliminationOrder = prev?.eliminationOrder ?? 0
+      if (lives <= 0 && eliminationOrder === 0) {
+        room.eliminationCounter += 1
+        eliminationOrder = room.eliminationCounter
+      }
+      room.matchStateByHandle.set(session.handle, {
+        towerHeight: prev?.towerHeight ?? 0,
+        lives,
+        isEliminated: lives <= 0,
+        eliminationOrder,
+      })
+    }
     socket.to(session.roomId).emit('match:life_lost', {
       handle: session.handle,
       lives,
       isEliminated: lives <= 0,
+      eliminationOrder,
     })
+    if (room && lives <= 0) {
+      checkSurvivalLastPlayerStanding(io, room)
+    }
   })
 
   socket.on('match:use_positive_power', (payload: { powerType?: string }) => {
@@ -1314,89 +1736,113 @@ io.on('connection', async (socket) => {
 
   socket.on(
     'match:claim_victory',
-    async (payload: { towerHeight?: number; elapsedTimeMs?: number }) => {
+    async (payload: {
+      towerHeight?: number
+      elapsedTimeMs?: number
+      eliminationOrderByHandle?: Record<string, number>
+    }) => {
       if (!session.roomId) return
       const room = roomsById.get(session.roomId)
       if (!room || room.status === 'FINISHED') return
 
-      room.status = 'FINISHED'
-      const winHeight = Number(payload?.towerHeight || 30)
+      const prev = room.matchStateByHandle.get(session.handle)
+      const winHeight = Number(payload?.towerHeight ?? prev?.towerHeight ?? 30)
       room.matchStateByHandle.set(session.handle, {
         towerHeight: winHeight,
-        lives: 3,
+        lives: Math.max(1, prev?.lives ?? 3),
         isEliminated: false,
+        eliminationOrder: 0,
       })
 
-      const presentPlayers = room.slots.filter(
-        (s): s is RoomSlotPlayerDTO => s !== null
+      await concludeMultiplayerRound(
+        io,
+        room,
+        session.handle,
+        Number(payload?.elapsedTimeMs || 0),
+        payload?.eliminationOrderByHandle
       )
-
-      const sorted = [...presentPlayers].sort((a, b) => {
-        if (a.handle === session.handle) return -1
-        if (b.handle === session.handle) return 1
-        const ha = room.matchStateByHandle.get(a.handle)?.towerHeight ?? 0
-        const hb = room.matchStateByHandle.get(b.handle)?.towerHeight ?? 0
-        return hb - ha
-      })
-
-      const podium = sorted.map((p, idx) => {
-        const st = room.matchStateByHandle.get(p.handle)
-        return {
-          rank: idx + 1,
-          userId: p.handle,
-          handle: p.handle,
-          customNick: p.customNick,
-          equippedSkin: p.equippedSkin,
-          slotIndex: p.slotIndex,
-          towerHeight: st?.towerHeight ?? 0,
-          lives: st?.lives ?? 3,
-          isEliminated: st?.isEliminated ?? false,
-          isWinner: p.handle === session.handle,
-        }
-      })
-
-      io.to(room.roomId).emit('match:game_over', {
-        roomId: room.roomId,
-        winnerId: session.handle,
-        winnerHandle: session.handle,
-        winnerNick: session.customNick,
-        winnerCustomNick: session.customNick,
-        winnerSkin: session.equippedSkin,
-        reason: 'GOAL_REACHED',
-        elapsedTimeMs: Number(payload?.elapsedTimeMs || 0),
-        podium,
-      })
-
-      // Update MongoDB stats asynchronously
-      try {
-        await connectMongoDB()
-        for (const p of presentPlayers) {
-          await UserModel.updateOne(
-            { googleId: p.googleId },
-            {
-              $inc: {
-                'stats.matchesPlayed': 1,
-                'stats.wins': p.handle === session.handle ? 1 : 0,
-              },
-            }
-          )
-        }
-      } catch {
-        // Ignore stat update errors
-      }
     }
   )
+
+  socket.on('match:next_cup_round', () => {
+    if (!session.roomId) return
+    const room = roomsById.get(session.roomId)
+    if (!room || room.status !== 'FINISHED') return
+
+    const cupTargetPoints = getCupTargetPoints(room.victoryCondition)
+    const presentPlayers = room.slots.filter(
+      (s): s is RoomSlotPlayerDTO => s !== null
+    )
+    const hasCupWinner =
+      room.victoryCondition === 'SINGLE_WIN' ||
+      presentPlayers.some((s) => (s.cupPoints ?? 0) >= cupTargetPoints)
+    if (hasCupWinner) return
+
+    clearSurvivalClimaxTimer(room)
+    room.survivalClimaxWinnerHandle = null
+    room.eliminationCounter = 0
+    room.status = 'PLAYING'
+    room.roundNumber += 1
+    room.cupTargetPoints = cupTargetPoints
+    room.pieceSeed = generatePieceSeed()
+    room.activeGameMode =
+      room.selectedGameMode === 'RANDOM'
+        ? Math.random() < 0.5
+          ? 'RACE'
+          : 'SURVIVAL'
+        : room.selectedGameMode
+
+    room.matchStateByHandle.clear()
+    for (const p of presentPlayers) {
+      p.lastPointsEarned = 0
+      room.matchStateByHandle.set(p.handle, {
+        towerHeight: 0,
+        lives: 3,
+        isEliminated: false,
+        eliminationOrder: 0,
+      })
+    }
+
+    broadcastRoomState(io, room)
+    io.to(room.roomId).emit('match:start', {
+      roomId: room.roomId,
+      pieceSeed: room.pieceSeed,
+      gameMode: room.activeGameMode,
+      selectedGameMode: room.selectedGameMode,
+      victoryCondition: room.victoryCondition,
+      cupTargetPoints: room.cupTargetPoints,
+      roundNumber: room.roundNumber,
+      startedAt: new Date().toISOString(),
+      players: presentPlayers.map((p) => ({
+        handle: p.handle,
+        customNick: p.customNick,
+        equippedSkin: p.equippedSkin,
+        slotIndex: p.slotIndex,
+        isHost: p.isHost,
+        cupPoints: p.cupPoints ?? 0,
+        lastPointsEarned: 0,
+      })),
+    })
+  })
 
   socket.on('match:return_to_lobby', () => {
     if (!session.roomId) return
     const room = roomsById.get(session.roomId)
     if (!room) return
 
+    clearSurvivalClimaxTimer(room)
+    room.survivalClimaxWinnerHandle = null
+    room.eliminationCounter = 0
     room.status = 'LOBBY'
     room.countdownSeconds = null
     room.pieceSeed = null
+    room.roundNumber = 1
     for (const s of room.slots) {
-      if (s) s.isReady = false
+      if (s) {
+        s.isReady = false
+        s.cupPoints = 0
+        s.lastPointsEarned = 0
+      }
     }
 
     const dto = serializeRoom(room)

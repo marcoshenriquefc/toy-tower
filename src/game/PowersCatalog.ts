@@ -96,11 +96,11 @@ export const POWERS_REGISTRY: PowerConfig[] = [
     icon: '🎈',
     category: 'POSITIVE',
     durationPieces: 1,
-    weight: 28,
+    weight: 8,
     shortDescription:
-      'Solta um Balão de Vida Extra flutuando que vai embora: pegue-o com a peça que está controlando para ganhar +1 ❤️!',
+      'Poder raro (só aparece com 2 vidas ou menos, máx. 3 ❤️): solta um Balão de Vida Extra flutuando — pegue-o com a peça controlada para recuperar +1 ❤️!',
     description:
-      'Não é de graça! Ao utilizar, um Balão de Vida Extra surge flutuando e indo embora. Para conseguir a vida extra (+1 ❤️), você deve alcançá-lo e encostar nele com a peça que está controlando!',
+      'Poder raro que só aparece quando você já perdeu pelo menos uma vida (2 ❤️ ou menos, máximo de 3 ❤️)! Ao utilizar, um Balão de Vida Extra surge flutuando e indo embora: alcance-o com a peça que está controlando para recuperar +1 ❤️!',
     accentColor: '#F43F5E',
   },
 

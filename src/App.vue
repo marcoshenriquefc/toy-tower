@@ -82,7 +82,7 @@ const isOnlineMultiplayerMatch = ref<boolean>(false)
 const localPlayerLives = ref<number>(3)
 
 /** Selected game mode in Local / Multiplayer lobby ('RACE' | 'SURVIVAL' | 'RANDOM') */
-const selectedGameMode = ref<SelectableGameMode>('RACE')
+const selectedGameMode = ref<SelectableGameMode>('RANDOM')
 /** Resolved active game mode for the current match ('RACE' | 'SURVIVAL') */
 const activeMatchGameMode = ref<GameMode>('RACE')
 /** Selected Victory Condition (valid only for Multiplayer mode: 'SINGLE_WIN' | 'CUP_6' | 'CUP_12') */
@@ -157,13 +157,19 @@ const fallbackLobbySlots = ref<LobbySlotInfo[]>([
   },
 ])
 
+function normalizePlayerHandle(raw?: string | null): string {
+  const cleaned = (raw || '').trim().toLowerCase()
+  if (!cleaned) return ''
+  return cleaned.startsWith('@') ? cleaned : `@${cleaned}`
+}
+
 const lobbySlots = computed<LobbySlotInfo[]>(() => {
   const room = multiplayerClient.state.room
   if (!room) {
     return fallbackLobbySlots.value
   }
-  const myHandle = (authStore.state.user?.handle || '').toLowerCase()
-  return [0, 1, 2, 3].map((idx) => {
+  const myHandle = normalizePlayerHandle(authStore.state.user?.handle)
+  const mapped = [0, 1, 2, 3].map((idx) => {
     const slotPlayer = room.slots[idx]
     const silhouetteSkinId = DEFAULT_SILHOUETTE_SKINS[idx] || 'player_mage'
     if (!slotPlayer || !slotPlayer.handle) {
@@ -179,7 +185,8 @@ const lobbySlots = computed<LobbySlotInfo[]>(() => {
       }
     }
     const isMe =
-      Boolean(myHandle) && slotPlayer.handle.toLowerCase() === myHandle
+      Boolean(myHandle) &&
+      normalizePlayerHandle(slotPlayer.handle) === myHandle
     return {
       slotIndex: idx,
       state: (slotPlayer.isReady ? 'READY' : 'JOINED_UNREADY') as LobbySlotState,
@@ -191,6 +198,15 @@ const lobbySlots = computed<LobbySlotInfo[]>(() => {
       cupPoints: slotPlayer.cupPoints ?? 0,
     }
   })
+
+  if (!mapped.some((s) => s.isLocalHost)) {
+    const firstOccupied = mapped.find((s) => s.state !== 'EMPTY')
+    if (firstOccupied) {
+      firstOccupied.isLocalHost = true
+    }
+  }
+
+  return mapped
 })
 
 const isFriendsModalOpen = ref<boolean>(false)
@@ -325,7 +341,7 @@ const GAME_MODE_OPTIONS: GameModeOptionCard[] = [
     rulesSummary: [
       '🧱 Meta de 50 Peças: Coloque todas as 50 peças primeiro mantendo suas vidas para vencer!',
       '❤️❤️❤️ 3 Vidas + 3s Invulnerável: Ao cair uma peça, seu mago pisca invulnerável por 3s',
-      '🎈 Poder Vida Extra: Solta um balão flutuante — pegue-o com a peça controlada antes que fuja!',
+      '🎈 Poder Vida Extra (Raro, máx. 3 ❤️): Só aparece com 2 vidas ou menos — pegue o balão com a peça controlada!',
     ],
   },
   {
@@ -481,6 +497,24 @@ async function selectGameModeOption(mode: SelectableGameMode) {
   }
 }
 
+const selectedModeScreenColumn = ref<'MODE' | 'CUP'>('MODE')
+
+function cycleGameModeOption(dir: -1 | 1) {
+  selectedModeScreenColumn.value = 'MODE'
+  const order: SelectableGameMode[] = ['RACE', 'SURVIVAL', 'RANDOM']
+  const curIdx = order.indexOf(currentLobbySelectableMode.value)
+  const nextIdx = (curIdx + dir + order.length) % order.length
+  void selectGameModeOption(order[nextIdx])
+}
+
+function cycleVictoryConditionOption(dir: -1 | 1) {
+  selectedModeScreenColumn.value = 'CUP'
+  const order: VictoryCondition[] = ['SINGLE_WIN', 'CUP_6', 'CUP_12']
+  const curIdx = order.indexOf(currentLobbyVictoryCondition.value)
+  const nextIdx = (curIdx + dir + order.length) % order.length
+  void selectVictoryConditionOption(order[nextIdx])
+}
+
 async function selectVictoryConditionOption(vc: VictoryCondition) {
   selectedVictoryCondition.value = vc
   const chosen =
@@ -506,15 +540,449 @@ async function selectVictoryConditionOption(vc: VictoryCondition) {
       )
     }
   } else {
+    resetLocalCupState()
     triggerBanner(
-      `🏆 Condição de Vitória (Multiplayer): ${chosen.icon} ${chosen.title}!`,
+      `🏆 Condição de Vitória: ${chosen.icon} ${chosen.title}!`,
       'info'
     )
   }
 }
 
+interface GrandeCopaScoreboardRow {
+  key: string
+  slotIndex: number
+  rank: number
+  customNick: string
+  handle: string
+  skinSpriteId: string
+  towerHeight: number
+  lives: number
+  eliminationOrder: number
+  pointsEarned: number
+  previousCupPoints: number
+  cupPoints: number
+  cupTargetPoints: number
+  totalVisualSlots: number
+  pointMedals: Array<1 | 2 | 3>
+  isCupWinner: boolean
+  isLocalPlayer: boolean
+}
+
+interface LocalCupParticipant {
+  slotIndex: number
+  isLocalPlayer: boolean
+  customNick: string
+  handle: string
+  skinSpriteId: string
+  rank: number
+  towerHeight: number
+  lives: number
+  eliminationOrder: number
+  pointsEarned: number
+  previousCupPoints: number
+  cupPoints: number
+  pointMedals: Array<1 | 2 | 3>
+  isCupWinner: boolean
+}
+
+const localCupState = ref<{
+  roundNumber: number
+  lastProcessedRound: number
+  isCupFinished: boolean
+  cupWinnerNick: string
+  roundWinnerNick: string
+  participants: LocalCupParticipant[]
+}>({
+  roundNumber: 1,
+  lastProcessedRound: 0,
+  isCupFinished: false,
+  cupWinnerNick: '',
+  roundWinnerNick: '',
+  participants: [],
+})
+
+function buildInitialLocalParticipants(): LocalCupParticipant[] {
+  const myNick =
+    authStore.state.user?.customNick ||
+    fallbackLobbySlots.value[0]?.customNick ||
+    'Rick The Hank'
+  const myHandle = authStore.state.user?.handle || '@voce'
+  const mySkin = activePlayerSkinId.value || 'player_mage'
+  const otherSkins = DEFAULT_SILHOUETTE_SKINS.filter((s) => s !== mySkin)
+  while (otherSkins.length < 3) {
+    otherSkins.push('player_dino', 'player_pirate', 'player_shadow')
+  }
+  const rivals = [
+    { nick: 'Heitir', handle: '@heitir', skin: otherSkins[0] },
+    { nick: 'RaFiTa', handle: '@rafita', skin: otherSkins[1] },
+    { nick: 'Ratto', handle: '@ratto', skin: otherSkins[2] },
+  ]
+  return [
+    {
+      slotIndex: 0,
+      isLocalPlayer: true,
+      customNick: myNick,
+      handle: myHandle,
+      skinSpriteId: mySkin,
+      rank: 1,
+      towerHeight: 0,
+      lives: 3,
+      eliminationOrder: 0,
+      pointsEarned: 0,
+      previousCupPoints: 0,
+      cupPoints: 0,
+      pointMedals: [],
+      isCupWinner: false,
+    },
+    ...rivals.map((r, idx) => ({
+      slotIndex: idx + 1,
+      isLocalPlayer: false,
+      customNick: r.nick,
+      handle: r.handle,
+      skinSpriteId: r.skin,
+      rank: idx + 2,
+      towerHeight: 0,
+      lives: 3,
+      eliminationOrder: 0,
+      pointsEarned: 0,
+      previousCupPoints: 0,
+      cupPoints: 0,
+      pointMedals: [],
+      isCupWinner: false,
+    })),
+  ]
+}
+
+function resetLocalCupState() {
+  localCupState.value = {
+    roundNumber: 1,
+    lastProcessedRound: 0,
+    isCupFinished: false,
+    cupWinnerNick: '',
+    roundWinnerNick: '',
+    participants: buildInitialLocalParticipants(),
+  }
+}
+
+function recordLocalRoundResult(snap: TowerSnapshot) {
+  if (isOnlineMultiplayerMatch.value) return
+  if (
+    localCupState.value.participants.length === 0 ||
+    localCupState.value.isCupFinished
+  ) {
+    if (localCupState.value.participants.length === 0) {
+      resetLocalCupState()
+    }
+  }
+  if (
+    localCupState.value.lastProcessedRound >= localCupState.value.roundNumber
+  ) {
+    return
+  }
+
+  const targetPts = currentLobbyVictoryInfo.value.targetPoints || 6
+  const playerWon = snap.state === 'VICTORY'
+  const roundNum = localCupState.value.roundNumber
+  const myNick =
+    authStore.state.user?.customNick ||
+    fallbackLobbySlots.value[0]?.customNick ||
+    'Rick The Hank'
+  const myHandle = authStore.state.user?.handle || '@voce'
+  const mySkin = activePlayerSkinId.value || 'player_mage'
+
+  // Determine ranks for the 3 rivals (slots 1, 2, 3) rotated by roundNumber
+  const rivalOrder = [1, 2, 3]
+  const shift = (roundNum - 1) % 3
+  const rotatedRivals = [
+    ...rivalOrder.slice(shift),
+    ...rivalOrder.slice(0, shift),
+  ]
+
+  const rankBySlot: Record<number, number> = {}
+  if (playerWon) {
+    rankBySlot[0] = 1
+    rankBySlot[rotatedRivals[0]] = 2
+    rankBySlot[rotatedRivals[1]] = 3
+    rankBySlot[rotatedRivals[2]] = 4
+  } else {
+    rankBySlot[rotatedRivals[0]] = 1
+    rankBySlot[rotatedRivals[1]] = 2
+    rankBySlot[rotatedRivals[2]] = 3
+    rankBySlot[0] = 4
+  }
+
+  const pointsByRank: Record<number, number> = { 1: 3, 2: 2, 3: 1, 4: 0 }
+
+  for (const p of localCupState.value.participants) {
+    if (p.isLocalPlayer) {
+      p.customNick = myNick
+      p.handle = myHandle
+      p.skinSpriteId = mySkin
+      p.towerHeight = snap.towerHeight || snap.maxTowerHeight || 0
+      p.lives = snap.lives
+      p.eliminationOrder = playerWon ? 0 : 1
+    } else {
+      const rRank = rankBySlot[p.slotIndex] || 2
+      p.towerHeight = Math.max(
+        4,
+        Number(((30 - rRank * 4.2) + ((roundNum * p.slotIndex) % 3)).toFixed(1))
+      )
+      p.lives = snap.gameMode === 'SURVIVAL' ? (rRank === 1 ? 2 : 0) : 3
+      p.eliminationOrder =
+        snap.gameMode === 'SURVIVAL' && rRank > 1 ? 5 - rRank : 0
+    }
+
+    const r = rankBySlot[p.slotIndex] || 4
+    const earned = pointsByRank[r] ?? 0
+    p.rank = r
+    p.previousCupPoints = p.cupPoints
+    p.pointsEarned = earned
+    p.cupPoints = p.previousCupPoints + earned
+    const medalRank: 1 | 2 | 3 = r === 1 ? 1 : r === 2 ? 2 : 3
+    for (let i = 0; i < earned; i++) {
+      p.pointMedals.push(medalRank)
+    }
+    p.isCupWinner = false
+  }
+
+  const roundWinner =
+    localCupState.value.participants.find((p) => p.rank === 1) ||
+    localCupState.value.participants[0]
+  localCupState.value.roundWinnerNick = roundWinner?.customNick || myNick
+
+  const candidates = localCupState.value.participants
+    .filter((p) => p.cupPoints >= targetPts)
+    .sort((a, b) =>
+      b.cupPoints !== a.cupPoints ? b.cupPoints - a.cupPoints : a.rank - b.rank
+    )
+
+  if (candidates.length > 0) {
+    candidates[0].isCupWinner = true
+    localCupState.value.isCupFinished = true
+    localCupState.value.cupWinnerNick = candidates[0].customNick
+  } else {
+    localCupState.value.isCupFinished = false
+    localCupState.value.cupWinnerNick = ''
+  }
+
+  localCupState.value.lastProcessedRound = roundNum
+}
+
+function handleLocalNextCupRound() {
+  if (localCupState.value.isCupFinished) {
+    resetLocalCupState()
+  } else {
+    localCupState.value.roundNumber += 1
+  }
+  restartMatch(true)
+}
+
+const grandeCopaScoreboard = computed<{
+  isOnline: boolean
+  roundNumber: number
+  isCupFinished: boolean
+  victoryCondition: VictoryCondition
+  cupTargetPoints: number
+  cupTitle: string
+  winnerNick: string
+  roundWinnerNick: string
+  gameMode: GameMode
+  rows: GrandeCopaScoreboardRow[]
+}>(() => {
+  const mpResult = multiplayerClient.state.gameOverResult
+  if (mpResult) {
+    const vc = mpResult.victoryCondition || currentLobbyVictoryCondition.value
+    const targetPts =
+      mpResult.cupTargetPoints ||
+      (vc === 'SINGLE_WIN' ? 3 : vc === 'CUP_12' ? 12 : 6)
+    const roundNum = mpResult.roundNumber || 1
+    const myHandle = normalizePlayerHandle(authStore.state.user?.handle)
+    const rows: GrandeCopaScoreboardRow[] = (mpResult.podium || []).map(
+      (entry, idx) => {
+        const earned =
+          entry.pointsEarned ??
+          (entry.rank === 1
+            ? 3
+            : entry.rank === 2
+              ? 2
+              : entry.rank === 3
+                ? 1
+                : 0)
+        const prevPts =
+          entry.previousCupPoints ??
+          Math.max(0, (entry.cupPoints ?? earned) - earned)
+        const totalPts = entry.cupPoints ?? prevPts + earned
+        let medals = entry.pointMedals ? [...entry.pointMedals] : []
+        if (medals.length < totalPts) {
+          const fallbackMedal: 1 | 2 | 3 =
+            entry.rank === 1 ? 1 : entry.rank === 2 ? 2 : 3
+          while (medals.length < prevPts) medals.push(1)
+          while (medals.length < totalPts) medals.push(fallbackMedal)
+        }
+        const rowTarget = entry.cupTargetPoints || targetPts
+        return {
+          key: entry.handle || entry.userId || `mp-${idx}`,
+          slotIndex: entry.slotIndex ?? idx,
+          rank: entry.rank || idx + 1,
+          customNick: entry.customNick || entry.handle || `Jogador ${idx + 1}`,
+          handle: entry.handle || '',
+          skinSpriteId: dbSkinToSpriteId(entry.equippedSkin),
+          towerHeight: entry.towerHeight ?? 0,
+          lives: entry.lives ?? 0,
+          eliminationOrder: entry.eliminationOrder ?? 0,
+          pointsEarned: earned,
+          previousCupPoints: prevPts,
+          cupPoints: totalPts,
+          cupTargetPoints: rowTarget,
+          totalVisualSlots: Math.max(8, rowTarget, medals.length),
+          pointMedals: medals,
+          isCupWinner: Boolean(entry.isCupWinner),
+          isLocalPlayer:
+            Boolean(myHandle) &&
+            normalizePlayerHandle(entry.handle) === myHandle,
+        }
+      }
+    )
+
+    // Ensure the Grande Copa board always shows 4 player rows (pad remaining slots with rivals)
+    const defaultRivals: Array<{
+      nick: string
+      handle: string
+      skin: string
+      presetMedals: Array<1 | 2 | 3>
+    }> = [
+      {
+        nick: 'Heitir',
+        handle: '@heitir',
+        skin: 'player_dino',
+        presetMedals: roundNum >= 2 ? [3, 2] : [3],
+      },
+      {
+        nick: 'RaFiTa',
+        handle: '@rafita',
+        skin: 'player_shadow',
+        presetMedals: roundNum >= 2 ? [2, 2, 1] : [2, 2],
+      },
+      {
+        nick: 'Ratto',
+        handle: '@ratto',
+        skin: 'player_mage',
+        presetMedals: roundNum >= 2 ? [1, 1, 1, 3] : [3],
+      },
+    ]
+
+    let rivalIdx = 0
+    while (rows.length < 4 && rivalIdx < defaultRivals.length) {
+      const r = defaultRivals[rivalIdx]
+      rivalIdx += 1
+      const slotIdx = rows.length
+      const rRank = slotIdx + 1
+      const earned = rRank === 2 ? 2 : rRank === 3 ? 1 : 0
+      const medals = [...r.presetMedals]
+      rows.push({
+        key: `pad-${r.handle}`,
+        slotIndex: slotIdx,
+        rank: rRank,
+        customNick: r.nick,
+        handle: r.handle,
+        skinSpriteId: r.skin,
+        towerHeight: Math.max(6, 26 - slotIdx * 4),
+        lives: 0,
+        eliminationOrder: slotIdx,
+        pointsEarned: earned,
+        previousCupPoints: Math.max(0, medals.length - earned),
+        cupPoints: medals.length,
+        cupTargetPoints: targetPts,
+        totalVisualSlots: Math.max(8, targetPts, medals.length),
+        pointMedals: medals,
+        isCupWinner: false,
+        isLocalPlayer: false,
+      })
+    }
+
+    return {
+      isOnline: true,
+      roundNumber: roundNum,
+      isCupFinished: mpResult.isCupFinished !== false,
+      victoryCondition: vc,
+      cupTargetPoints: targetPts,
+      cupTitle: 'GRANDE COPA',
+      winnerNick:
+        mpResult.winnerCustomNick || mpResult.winnerNick || 'VENCEDOR',
+      roundWinnerNick:
+        mpResult.roundWinnerNick ||
+        mpResult.winnerCustomNick ||
+        mpResult.winnerNick ||
+        'VENCEDOR',
+      gameMode: mpResult.gameMode || snapshot.value.gameMode,
+      rows,
+    }
+  }
+
+  // Local Cup Scoreboard
+  const vc = currentLobbyVictoryCondition.value
+  const targetPts = currentLobbyVictoryInfo.value.targetPoints || 6
+  const participants =
+    localCupState.value.participants.length > 0
+      ? localCupState.value.participants
+      : buildInitialLocalParticipants()
+
+  const rows: GrandeCopaScoreboardRow[] = participants.map((p) => ({
+    key: p.handle || `local-${p.slotIndex}`,
+    slotIndex: p.slotIndex,
+    rank: p.rank,
+    customNick: p.customNick,
+    handle: p.handle,
+    skinSpriteId: p.skinSpriteId,
+    towerHeight: p.towerHeight,
+    lives: p.lives,
+    eliminationOrder: p.eliminationOrder,
+    pointsEarned: p.pointsEarned,
+    previousCupPoints: p.previousCupPoints,
+    cupPoints: p.cupPoints,
+    cupTargetPoints: targetPts,
+    totalVisualSlots: Math.max(8, targetPts, p.pointMedals.length),
+    pointMedals: [...p.pointMedals],
+    isCupWinner: p.isCupWinner,
+    isLocalPlayer: p.isLocalPlayer,
+  }))
+
+  return {
+    isOnline: false,
+    roundNumber: localCupState.value.roundNumber || 1,
+    isCupFinished: localCupState.value.isCupFinished,
+    victoryCondition: vc,
+    cupTargetPoints: targetPts,
+    cupTitle: 'GRANDE COPA',
+    winnerNick:
+      localCupState.value.cupWinnerNick ||
+      localCupState.value.roundWinnerNick ||
+      rows[0]?.customNick ||
+      'VOCÊ',
+    roundWinnerNick:
+      localCupState.value.roundWinnerNick || rows[0]?.customNick || 'VOCÊ',
+    gameMode: snapshot.value.gameMode,
+    rows,
+  }
+})
+
 function handleNextCupRound() {
   multiplayerClient.emitNextCupRound()
+}
+
+function handleGrandeCopaContinue() {
+  if (
+    isOnlineMultiplayerMatch.value ||
+    multiplayerClient.state.gameOverResult
+  ) {
+    if (!grandeCopaScoreboard.value.isCupFinished) {
+      handleNextCupRound()
+    } else {
+      handleReturnToLobbyFromMatch()
+    }
+    return
+  }
+  handleLocalNextCupRound()
 }
 
 function resolveEffectiveGameMode(mode: SelectableGameMode): GameMode {
@@ -716,22 +1184,29 @@ async function enterMultiplayerLobby() {
   screenFlow.value = 'MULTIPLAYER_LOBBY'
 
   try {
-    const room = await multiplayerClient.enterLobby()
-    if (
-      room &&
-      room.selectedGameMode !== selectedGameMode.value &&
-      room.hostHandle?.toLowerCase() === (user?.handle || '').toLowerCase()
-    ) {
-      await multiplayerClient.setRoomGameMode(selectedGameMode.value)
-    }
-    if (
-      room &&
-      room.victoryCondition !== selectedVictoryCondition.value &&
-      room.hostHandle?.toLowerCase() === (user?.handle || '').toLowerCase()
-    ) {
-      await multiplayerClient.setRoomVictoryCondition(
-        selectedVictoryCondition.value
-      )
+    const room = await multiplayerClient.enterLobby({
+      selectedGameMode: selectedGameMode.value,
+      victoryCondition: selectedVictoryCondition.value,
+    })
+    const isHost =
+      normalizePlayerHandle(room?.hostHandle) ===
+      normalizePlayerHandle(user?.handle)
+    if (room && isHost) {
+      if (room.selectedGameMode !== selectedGameMode.value) {
+        await multiplayerClient.setRoomGameMode(selectedGameMode.value)
+      }
+      if (room.victoryCondition !== selectedVictoryCondition.value) {
+        await multiplayerClient.setRoomVictoryCondition(
+          selectedVictoryCondition.value
+        )
+      }
+    } else if (room && !isHost) {
+      if (room.selectedGameMode) {
+        selectedGameMode.value = room.selectedGameMode
+      }
+      if (room.victoryCondition) {
+        selectedVictoryCondition.value = room.victoryCondition
+      }
     }
   } catch {
     // Fallback local lobby if offline
@@ -760,9 +1235,16 @@ async function toggleLobbySlotReady(slotIndex: number) {
     try {
       const nextReady = slot.state !== 'READY'
       const updatedRoom = await multiplayerClient.toggleReady(nextReady)
-      const occupied = updatedRoom.slots.filter(Boolean)
-      // If playing solo in the room (1 player) and ready, start local 3s countdown too so host can test immediately
-      if (occupied.length === 1 && nextReady) {
+      const occupied = updatedRoom.slots.filter((s) =>
+        Boolean(s && s.handle && s.handle.trim())
+      )
+      // Fallback local 3s countdown if server did not start COUNTDOWN on a 1-player test room
+      if (
+        occupied.length === 1 &&
+        nextReady &&
+        updatedRoom.status !== 'COUNTDOWN' &&
+        multiplayerClient.state.countdownSeconds === null
+      ) {
         lobbyCountdownMs.value = 3000
       } else {
         lobbyCountdownMs.value = null
@@ -1038,6 +1520,9 @@ function startGame(
   lobbyCountdownMs.value = null
   isOnlineMultiplayerMatch.value = isOnlineMatch
   localPlayerLives.value = GAME_CONSTANTS.SURVIVAL_INITIAL_LIVES
+  if (!isOnlineMatch) {
+    resetLocalCupState()
+  }
 
   const selectableMode: SelectableGameMode = isOnlineMatch
     ? onlineSelectedMode ||
@@ -1240,24 +1725,47 @@ function computeLaneLayoutAndRanks(now: number) {
   const myHandle = (authStore.state.user?.handle || '@voce').toLowerCase()
   const myNick = authStore.state.user?.customNick || 'VOCÊ'
   const isSurvivalMode = snapshot.value.gameMode === 'SURVIVAL'
+
+  // If in Survival Mode and all opponents have lost all their lives while we are alive,
+  // trigger the Castle Roof Climax on our tower so we place the final Castle to finish!
+  if (
+    isSurvivalMode &&
+    remoteEntries.length >= 1 &&
+    snapshot.value.lives > 0 &&
+    towerInstance.state === 'PLAYING' &&
+    remoteEntries.every((r) => r.lives <= 0 || r.isEliminated)
+  ) {
+    towerInstance.triggerSurvivalCastleClimax()
+  }
+
+  const elimMap = multiplayerClient.state.eliminationOrderByHandle
   const allHeights = [
     {
       handle: myHandle,
       height: snapshot.value.towerHeight,
       lives: snapshot.value.lives,
       pieces: snapshot.value.piecesPlaced,
+      eliminationOrder: elimMap[myHandle] || 0,
     },
-    ...remoteEntries.map((r) => ({
-      handle: r.handle.toLowerCase(),
-      height: r.towerHeight,
-      lives: r.lives,
-      pieces: r.settledBlocks?.length ?? 0,
-    })),
+    ...remoteEntries.map((r) => {
+      const h = r.handle.toLowerCase()
+      return {
+        handle: h,
+        height: r.towerHeight,
+        lives: r.lives,
+        pieces: r.settledBlocks?.length ?? 0,
+        eliminationOrder: r.eliminationOrder || elimMap[h] || 0,
+      }
+    }),
   ].sort((a, b) => {
     if (isSurvivalMode) {
       const aAlive = a.lives > 0 ? 1 : 0
       const bAlive = b.lives > 0 ? 1 : 0
       if (bAlive !== aAlive) return bAlive - aAlive
+      if (!aAlive && !bAlive && a.eliminationOrder !== b.eliminationOrder) {
+        // Reverse order of death: died later -> higher rank; died first -> last place
+        return b.eliminationOrder - a.eliminationOrder
+      }
       if (b.pieces !== a.pieces) return b.pieces - a.pieces
       if (b.lives !== a.lives) return b.lives - a.lives
     }
@@ -1373,10 +1881,20 @@ function startLoop() {
       screenFlow.value === 'MULTIPLAYER_LOBBY' &&
       lobbyCountdownMs.value !== null
     ) {
-      lobbyCountdownMs.value = Math.max(0, lobbyCountdownMs.value - dt)
-      if (lobbyCountdownMs.value <= 0) {
+      if (multiplayerClient.state.countdownSeconds !== null) {
         lobbyCountdownMs.value = null
-        startGame()
+      } else {
+        lobbyCountdownMs.value = Math.max(0, lobbyCountdownMs.value - dt)
+        if (lobbyCountdownMs.value <= 0) {
+          lobbyCountdownMs.value = null
+          const isOnline = Boolean(multiplayerClient.state.room)
+          startGame(
+            multiplayerClient.state.room?.pieceSeed || undefined,
+            isOnline,
+            undefined,
+            currentLobbySelectableMode.value
+          )
+        }
       }
     }
 
@@ -1513,9 +2031,29 @@ function handleKeyDown(e: KeyboardEvent) {
   }
 
   if (isGameModeModalOpen.value) {
-    if (e.code === 'Escape') {
+    if (e.code === 'Escape' || e.code === 'Enter' || e.code === 'Space') {
       e.preventDefault()
       closeGameModeModal()
+    } else if (e.code === 'ArrowLeft' || e.code === 'KeyA') {
+      e.preventDefault()
+      selectedModeScreenColumn.value = 'MODE'
+    } else if (e.code === 'ArrowRight' || e.code === 'KeyD') {
+      e.preventDefault()
+      selectedModeScreenColumn.value = 'CUP'
+    } else if (e.code === 'ArrowUp' || e.code === 'KeyW') {
+      e.preventDefault()
+      if (selectedModeScreenColumn.value === 'MODE') {
+        cycleGameModeOption(-1)
+      } else {
+        cycleVictoryConditionOption(-1)
+      }
+    } else if (e.code === 'ArrowDown' || e.code === 'KeyS') {
+      e.preventDefault()
+      if (selectedModeScreenColumn.value === 'MODE') {
+        cycleGameModeOption(1)
+      } else {
+        cycleVictoryConditionOption(1)
+      }
     }
     return
   }
@@ -1536,11 +2074,31 @@ function handleKeyDown(e: KeyboardEvent) {
     return
   }
 
-  // Tela de Preparação Batalha Local (LOCAL_LOBBY)
+  // Tela SELECIONE O MODO (LOCAL_LOBBY)
   if (screenFlow.value === 'LOCAL_LOBBY') {
     if (e.code === 'Escape') {
       e.preventDefault()
       returnToMainMenu()
+    } else if (e.code === 'ArrowLeft' || e.code === 'KeyA') {
+      e.preventDefault()
+      selectedModeScreenColumn.value = 'MODE'
+    } else if (e.code === 'ArrowRight' || e.code === 'KeyD') {
+      e.preventDefault()
+      selectedModeScreenColumn.value = 'CUP'
+    } else if (e.code === 'ArrowUp' || e.code === 'KeyW') {
+      e.preventDefault()
+      if (selectedModeScreenColumn.value === 'MODE') {
+        cycleGameModeOption(-1)
+      } else {
+        cycleVictoryConditionOption(-1)
+      }
+    } else if (e.code === 'ArrowDown' || e.code === 'KeyS') {
+      e.preventDefault()
+      if (selectedModeScreenColumn.value === 'MODE') {
+        cycleGameModeOption(1)
+      } else {
+        cycleVictoryConditionOption(1)
+      }
     } else if (e.code === 'Enter' || e.code === 'Space') {
       e.preventDefault()
       startGame()
@@ -1593,6 +2151,23 @@ function handleKeyDown(e: KeyboardEvent) {
 
   isShiftHeld.value = e.shiftKey
   if (!towerInstance) return
+
+  if (
+    multiplayerClient.state.gameOverResult !== null ||
+    snapshot.value.state === 'VICTORY' ||
+    (snapshot.value.state === 'GAME_OVER' && !isOnlineMultiplayerMatch.value)
+  ) {
+    if (
+      e.code === 'Enter' ||
+      e.code === 'Space' ||
+      e.code === 'KeyR' ||
+      e.code === 'Escape'
+    ) {
+      e.preventDefault()
+      handleGrandeCopaContinue()
+    }
+    return
+  }
 
   if (e.code === 'KeyR') {
     e.preventDefault()
@@ -1876,6 +2451,18 @@ onMounted(() => {
         'danger'
       )
     },
+    onSurvivalClimax: (payload) => {
+      const myHandle = normalizePlayerHandle(authStore.state.user?.handle || '')
+      const winnerHandle = normalizePlayerHandle(payload.winnerHandle || '')
+      if (myHandle && myHandle === winnerHandle) {
+        towerInstance?.triggerSurvivalCastleClimax()
+      } else {
+        triggerBanner(
+          `🏰 Fim de jogo! ${payload.winnerCustomNick} foi o último sobrevivente e está colocando o Castelo na torre!`,
+          'info'
+        )
+      }
+    },
     onGameOver: (payload) => {
       triggerBanner(
         `🏆 Fim de Jogo! Vencedor: ${payload.winnerNick} (${payload.winnerHandle})!`,
@@ -1910,6 +2497,12 @@ onMounted(() => {
     gameMode: activeMatchGameMode.value,
     onSnapshot: (snap) => {
       snapshot.value = snap
+      if (
+        !isOnlineMultiplayerMatch.value &&
+        (snap.state === 'VICTORY' || snap.state === 'GAME_OVER')
+      ) {
+        recordLocalRoundResult(snap)
+      }
     },
     onEventBanner: (msg, tone) => {
       triggerBanner(msg, tone)
@@ -2153,8 +2746,9 @@ onUnmounted(() => {
       <div v-if="screenFlow === 'MAIN_MENU'" class="main-menu-overlay">
         <div class="main-menu-grid">
           <!-- BLOCO 1: BATALHA LOCAL (ATIVO) -->
-          <button
-            type="button"
+          <div
+            role="button"
+            tabindex="0"
             class="menu-brick-card menu-brick-card--active"
             :class="{
               'menu-brick-card--selected': selectedMenuCard === 'LOCAL',
@@ -2162,6 +2756,7 @@ onUnmounted(() => {
             @mouseenter="selectedMenuCard = 'LOCAL'"
             @focus="selectedMenuCard = 'LOCAL'"
             @click="openLocalBattleLobby"
+            @keydown.enter.prevent="openLocalBattleLobby"
           >
             <!-- 4 Cantoneiras Amarelas estilo Bloco de Montar -->
             <svg
@@ -2287,24 +2882,25 @@ onUnmounted(() => {
             </div>
 
             <!-- Botão de Engrenagem (Modo de Jogo) direto no cartão Batalha Local -->
-            <span
+            <button
+              type="button"
               class="menu-card-gear-pill"
-              role="button"
-              tabindex="0"
               title="Selecionar Modo de Jogo antes de iniciar"
+              @pointerdown.stop
               @click.stop="openGameModeModal"
               @keydown.enter.stop.prevent="openGameModeModal"
             >
               <span class="menu-card-gear-icon" aria-hidden="true">⚙️</span>
               <span class="menu-card-gear-text">
-                {{ currentLobbyModeInfo.icon }} {{ currentLobbyModeInfo.shortTitle }}
+                {{ currentLobbyModeInfo.icon }} {{ currentLobbyModeInfo.shortTitle }} ▾
               </span>
-            </span>
-          </button>
+            </button>
+          </div>
 
           <!-- BLOCO 2: MULTIPLAYER (ATIVO — AUTENTICAÇÃO GOOGLE + MONGODB) -->
-          <button
-            type="button"
+          <div
+            role="button"
+            tabindex="0"
             class="menu-brick-card menu-brick-card--active"
             :class="{
               'menu-brick-card--selected': selectedMenuCard === 'MULTIPLAYER',
@@ -2312,6 +2908,7 @@ onUnmounted(() => {
             @mouseenter="selectedMenuCard = 'MULTIPLAYER'"
             @focus="selectedMenuCard = 'MULTIPLAYER'"
             @click="handleMultiplayerCardClick"
+            @keydown.enter.prevent="handleMultiplayerCardClick"
           >
             <!-- 4 Cantoneiras Amarelas estilo Bloco de Montar -->
             <svg
@@ -2437,35 +3034,35 @@ onUnmounted(() => {
             </div>
 
             <!-- Botões de Modo de Jogo + Condição de Vitória (ao lado) direto no cartão Multiplayer -->
-            <div class="menu-card-pills-row">
-              <span
+            <div class="menu-card-pills-row" @pointerdown.stop @click.stop>
+              <button
+                type="button"
                 class="menu-card-gear-pill"
-                role="button"
-                tabindex="0"
                 title="Selecionar Modo de Jogo e Condição de Vitória antes de iniciar"
+                @pointerdown.stop
                 @click.stop="openGameModeModal"
                 @keydown.enter.stop.prevent="openGameModeModal"
               >
                 <span class="menu-card-gear-icon" aria-hidden="true">⚙️</span>
                 <span class="menu-card-gear-text">
-                  {{ currentLobbyModeInfo.icon }} {{ currentLobbyModeInfo.shortTitle }}
+                  {{ currentLobbyModeInfo.icon }} {{ currentLobbyModeInfo.shortTitle }} ▾
                 </span>
-              </span>
+              </button>
 
-              <span
+              <button
+                type="button"
                 class="menu-card-gear-pill menu-card-gear-pill--cup"
-                role="button"
-                tabindex="0"
                 title="Selecionar Condição de Vitória (Copa Multiplayer)"
+                @pointerdown.stop
                 @click.stop="openGameModeModal"
                 @keydown.enter.stop.prevent="openGameModeModal"
               >
                 <span class="menu-card-gear-text">
-                  {{ currentLobbyVictoryInfo.icon }} {{ currentLobbyVictoryInfo.shortTitle }}
+                  {{ currentLobbyVictoryInfo.icon }} {{ currentLobbyVictoryInfo.shortTitle }} ▾
                 </span>
-              </span>
+              </button>
             </div>
-          </button>
+          </div>
 
           <!-- BLOCO 3: SKINS (BLOQUEADO) -->
           <div
@@ -2513,16 +3110,28 @@ onUnmounted(() => {
     </transition>
 
     <!-- =================================================================== -->
-    <!-- TELA DE PREPARAÇÃO BATALHA LOCAL (LOCAL_LOBBY + ENGRENAGEM ⚙️)      -->
+    <!-- TELA E POPUP DE SELEÇÃO DE MODO ("SELECIONE O MODO")                -->
     <!-- =================================================================== -->
     <transition name="menu-fade-300">
-      <div v-if="screenFlow === 'LOCAL_LOBBY'" class="local-lobby-screen">
-        <!-- Botão superior esquerdo para voltar ao Menu Principal -->
+      <div
+        v-if="screenFlow === 'LOCAL_LOBBY' || isGameModeModalOpen"
+        class="selecione-modo-screen"
+        :class="{
+          'selecione-modo-screen--in-game': screenFlow === 'IN_GAME',
+        }"
+      >
+        <!-- Botão superior esquerdo (X) para fechar o popup ou voltar ao Menu Principal -->
         <button
           type="button"
           class="mp-lobby-back-btn"
-          title="Voltar ao Menu Principal (Esc)"
-          @click="returnToMainMenu"
+          :title="
+            isGameModeModalOpen
+              ? 'Fechar seleção de modo (Esc)'
+              : 'Voltar ao Menu Principal (Esc)'
+          "
+          @click="
+            isGameModeModalOpen ? closeGameModeModal() : returnToMainMenu()
+          "
         >
           <img
             :src="menuSprites.button_x"
@@ -2531,126 +3140,576 @@ onUnmounted(() => {
           />
         </button>
 
-        <div class="local-lobby-card">
-          <div class="local-lobby-studs" aria-hidden="true">
-            <span class="local-lobby-stud"></span>
-            <span class="local-lobby-stud"></span>
-            <span class="local-lobby-stud"></span>
-            <span class="local-lobby-stud"></span>
-            <span class="local-lobby-stud"></span>
-            <span class="local-lobby-stud"></span>
-          </div>
-
-          <header class="local-lobby-header">
-            <span class="local-lobby-kicker">PREPARAÇÃO DA PARTIDA</span>
-            <h2 class="local-lobby-title">BATALHA LOCAL</h2>
-          </header>
-
-          <div class="local-lobby-body">
-            <!-- Coluna Esquerda: Personagem Selecionado (clicável para trocar skin) -->
-            <div class="local-lobby-char-box">
-              <div
-                class="local-lobby-char-stage"
-                title="Clique para trocar de personagem"
-                @click="cycleLocalLobbySkin"
-              >
-                <img
-                  :src="menuSprites.area_ready"
-                  alt=""
-                  class="local-lobby-char-bg"
-                  draggable="false"
-                />
-                <img
-                  v-if="activePlayerSkin"
-                  :src="activePlayerSkin.url"
-                  :alt="activePlayerSkin.name"
-                  class="local-lobby-char-sprite"
-                  draggable="false"
-                />
-              </div>
-              <button
-                type="button"
-                class="local-lobby-skin-cycle-btn"
-                @click="cycleLocalLobbySkin"
-              >
-                🎭 {{ activePlayerSkin ? activePlayerSkin.name : 'Personagem' }} ↻
-              </button>
+        <!-- 1. Topo em Pedra: "SELECIONE O MODO" -->
+        <header class="selecione-modo-top-banner" aria-hidden="true">
+          <div class="selecione-modo-stone-header">
+            <div class="selecione-modo-stone-wing selecione-modo-stone-wing--left"></div>
+            <div class="selecione-modo-stone-pillar"></div>
+            <div class="selecione-modo-stone-center">
+              <span class="selecione-modo-banner-title">SELECIONE O MODO</span>
             </div>
+            <div class="selecione-modo-stone-pillar"></div>
+            <div class="selecione-modo-stone-wing selecione-modo-stone-wing--right"></div>
+            <div class="selecione-modo-stone-ledge">
+              <span></span><span></span><span></span>
+            </div>
+          </div>
+        </header>
 
-            <!-- Coluna Direita: Modo de Jogo Selecionado + Botão de Engrenagem ⚙️ -->
-            <div class="local-lobby-mode-panel">
-              <div class="local-lobby-mode-top">
-                <div class="local-lobby-mode-label-col">
-                  <span class="local-lobby-mode-caption">MODO DE JOGO ATUAL</span>
-                  <div class="local-lobby-mode-current">
-                    <span class="local-lobby-mode-icon">
-                      {{ currentLobbyModeInfo.icon }}
-                    </span>
-                    <span class="local-lobby-mode-name">
-                      {{ currentLobbyModeInfo.title }}
-                    </span>
-                    <span
-                      class="local-lobby-mode-badge"
-                      :style="{ backgroundColor: currentLobbyModeInfo.accentColor }"
-                    >
-                      {{ currentLobbyModeInfo.badge }}
-                    </span>
+        <!-- 2. Dois Grandes Blocos Centrais com Setas ▲ / ▼ -->
+        <div class="selecione-modo-stage">
+          <!-- COLUNA ESQUERDA: MODO DE JOGO (ALEATÓRIO / CORRIDA / SOBREVIVÊNCIA) -->
+          <div
+            class="selecione-modo-col"
+            @mouseenter="selectedModeScreenColumn = 'MODE'"
+            @click="selectedModeScreenColumn = 'MODE'"
+          >
+            <!-- Seta Superior ▲ -->
+            <button
+              type="button"
+              class="selecione-modo-arrow-btn"
+              title="Modo anterior"
+              aria-label="Modo anterior"
+              @click.stop="cycleGameModeOption(-1)"
+            >
+              <svg viewBox="0 0 84 52" aria-hidden="true">
+                <path
+                  d="M 36,6 Q 42,0 48,6 L 78,38 Q 84,45 75,47 H 9 Q 0,45 6,38 Z"
+                  fill="#94a3b8"
+                  stroke="#181425"
+                  stroke-width="4"
+                  stroke-linejoin="round"
+                />
+                <path
+                  d="M 38,10 Q 42,6 46,10 L 72,38 H 12 Z"
+                  fill="#cbd5e1"
+                />
+                <polygon
+                  points="42,16 58,34 26,34"
+                  fill="#f97316"
+                  stroke="#9a3412"
+                  stroke-width="2"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
+
+            <!-- Cartão Quadrado de Parede LEGO -->
+            <div
+              class="selecione-modo-brick-box"
+              :class="{
+                'selecione-modo-brick-box--active':
+                  selectedModeScreenColumn === 'MODE',
+              }"
+              @click="cycleGameModeOption(1)"
+            >
+              <!-- 8 Pinos Superiores Escuros -->
+              <div class="selecione-modo-box-studs" aria-hidden="true">
+                <span v-for="s in 8" :key="s"></span>
+              </div>
+
+              <!-- 4 Cantoneiras Amarelas/Laranjas quando focado -->
+              <template v-if="selectedModeScreenColumn === 'MODE'">
+                <span class="selecione-corner selecione-corner--tl" aria-hidden="true"></span>
+                <span class="selecione-corner selecione-corner--tr" aria-hidden="true"></span>
+                <span class="selecione-corner selecione-corner--bl" aria-hidden="true"></span>
+                <span class="selecione-corner selecione-corner--br" aria-hidden="true"></span>
+              </template>
+
+              <!-- CONTEÚDO INTERNO DO MODO: ALEATÓRIO (DIVIDIDO NA DIAGONAL) -->
+              <div
+                v-if="currentLobbySelectableMode === 'RANDOM'"
+                class="selecione-modo-card-inner selecione-modo-card-inner--random"
+              >
+                <!-- Metade Superior Esquerda: Pirata na nuvem com bandeira de corrida -->
+                <div class="selecione-random-half selecione-random-half--tl">
+                  <div class="selecione-char-cloud-wrap selecione-char-cloud-wrap--tl">
+                    <img
+                      :src="getSkinSpriteUrl('player_pirate')"
+                      alt=""
+                      class="selecione-char-img"
+                      draggable="false"
+                    />
+                    <!-- Bandeira Quadriculada -->
+                    <svg class="selecione-mini-flag-svg" viewBox="0 0 64 64" aria-hidden="true">
+                      <rect
+                        x="8"
+                        y="6"
+                        width="5"
+                        height="52"
+                        rx="2.5"
+                        fill="#b45309"
+                        stroke="#181425"
+                        stroke-width="3"
+                      />
+                      <path
+                        d="M 13,9 C 26,4 38,16 54,10 L 54,36 C 38,42 26,30 13,35 Z"
+                        fill="#ffffff"
+                        stroke="#181425"
+                        stroke-width="3"
+                        stroke-linejoin="round"
+                      />
+                      <path
+                        d="M 13,9 L 23,8 L 23,17 L 13,18 Z M 33,10 L 43,12 L 43,21 L 33,19 Z M 23,17 L 33,19 L 33,28 L 23,26 Z M 43,21 L 54,19 L 54,28 L 43,30 Z M 13,26 L 23,26 L 23,35 L 13,35 Z M 33,28 L 43,30 L 43,38 L 33,36 Z"
+                        fill="#181425"
+                      />
+                    </svg>
+                    <!-- Nuvem Branca -->
+                    <svg class="selecione-cloud-svg" viewBox="0 0 140 60" aria-hidden="true">
+                      <path
+                        d="M 28,50 C 14,50 8,40 13,30 C 16,23 24,20 31,22 C 36,11 49,6 62,10 C 70,3 85,3 93,11 C 104,8 118,14 120,25 C 129,27 134,35 130,43 C 127,48 120,50 111,50 Z"
+                        fill="#ffffff"
+                        stroke="#181425"
+                        stroke-width="3.8"
+                        stroke-linejoin="round"
+                      />
+                      <path
+                        d="M 22,43 C 36,48 104,48 120,42"
+                        fill="none"
+                        stroke="#cbd5e1"
+                        stroke-width="4"
+                        stroke-linecap="round"
+                      />
+                    </svg>
                   </div>
                 </div>
 
-                <!-- BOTÃO DE ENGRENAGEM (SELECIONE O MODO DE JOGO) -->
-                <button
-                  type="button"
-                  class="mode-gear-btn"
-                  title="Selecionar o Modo de Jogo"
-                  aria-label="Selecionar o Modo de Jogo"
-                  @click="openGameModeModal"
-                >
-                  <span class="mode-gear-btn-icon" aria-hidden="true">⚙️</span>
-                  <span class="mode-gear-btn-text">MODO DE JOGO</span>
-                </button>
+                <!-- Metade Inferior Direita: Dino na nuvem com corações -->
+                <div class="selecione-random-half selecione-random-half--br">
+                  <div class="selecione-char-cloud-wrap selecione-char-cloud-wrap--br">
+                    <!-- Corações flutuantes ao redor do Dino -->
+                    <span class="selecione-floating-heart selecione-floating-heart--1">❤️</span>
+                    <span class="selecione-floating-heart selecione-floating-heart--2">❤️</span>
+                    <span class="selecione-floating-heart selecione-floating-heart--3">❤️</span>
+                    <span class="selecione-floating-heart selecione-floating-heart--4">❤️</span>
+                    <img
+                      :src="getSkinSpriteUrl('player_dino')"
+                      alt=""
+                      class="selecione-char-img"
+                      draggable="false"
+                    />
+                    <svg class="selecione-cloud-svg" viewBox="0 0 140 60" aria-hidden="true">
+                      <path
+                        d="M 28,50 C 14,50 8,40 13,30 C 16,23 24,20 31,22 C 36,11 49,6 62,10 C 70,3 85,3 93,11 C 104,8 118,14 120,25 C 129,27 134,35 130,43 C 127,48 120,50 111,50 Z"
+                        fill="#ffffff"
+                        stroke="#181425"
+                        stroke-width="3.8"
+                        stroke-linejoin="round"
+                      />
+                      <path
+                        d="M 22,43 C 36,48 104,48 120,42"
+                        fill="none"
+                        stroke="#cbd5e1"
+                        stroke-width="4"
+                        stroke-linecap="round"
+                      />
+                    </svg>
+                  </div>
+                </div>
+
+                <!-- Linha Diagonal Divisória -->
+                <svg class="selecione-diagonal-line" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                  <line x1="100" y1="0" x2="0" y2="100" stroke="#181425" stroke-width="1.6" />
+                </svg>
+
+                <div class="selecione-card-bottom-captions">
+                  <span class="selecione-card-main-title">ALEATÓRIO</span>
+                </div>
               </div>
 
-              <p class="local-lobby-mode-desc">
-                {{ currentLobbyModeInfo.description }}
-              </p>
+              <!-- CONTEÚDO INTERNO DO MODO: CORRIDA -->
+              <div
+                v-else-if="currentLobbySelectableMode === 'RACE'"
+                class="selecione-modo-card-inner"
+              >
+                <div class="selecione-single-mode-art">
+                  <div class="selecione-char-cloud-wrap selecione-char-cloud-wrap--center">
+                    <img
+                      :src="getSkinSpriteUrl('player_pirate')"
+                      alt=""
+                      class="selecione-char-img selecione-char-img--large"
+                      draggable="false"
+                    />
+                    <svg class="selecione-mini-flag-svg selecione-mini-flag-svg--large" viewBox="0 0 64 64" aria-hidden="true">
+                      <rect
+                        x="8"
+                        y="6"
+                        width="5"
+                        height="52"
+                        rx="2.5"
+                        fill="#b45309"
+                        stroke="#181425"
+                        stroke-width="3"
+                      />
+                      <path
+                        d="M 13,9 C 26,4 38,16 54,10 L 54,36 C 38,42 26,30 13,35 Z"
+                        fill="#ffffff"
+                        stroke="#181425"
+                        stroke-width="3"
+                        stroke-linejoin="round"
+                      />
+                      <path
+                        d="M 13,9 L 23,8 L 23,17 L 13,18 Z M 33,10 L 43,12 L 43,21 L 33,19 Z M 23,17 L 33,19 L 33,28 L 23,26 Z M 43,21 L 54,19 L 54,28 L 43,30 Z M 13,26 L 23,26 L 23,35 L 13,35 Z M 33,28 L 43,30 L 43,38 L 33,36 Z"
+                        fill="#181425"
+                      />
+                    </svg>
+                    <svg class="selecione-cloud-svg selecione-cloud-svg--large" viewBox="0 0 140 60" aria-hidden="true">
+                      <path
+                        d="M 28,50 C 14,50 8,40 13,30 C 16,23 24,20 31,22 C 36,11 49,6 62,10 C 70,3 85,3 93,11 C 104,8 118,14 120,25 C 129,27 134,35 130,43 C 127,48 120,50 111,50 Z"
+                        fill="#ffffff"
+                        stroke="#181425"
+                        stroke-width="3.8"
+                        stroke-linejoin="round"
+                      />
+                      <path
+                        d="M 22,43 C 36,48 104,48 120,42"
+                        fill="none"
+                        stroke="#cbd5e1"
+                        stroke-width="4"
+                        stroke-linecap="round"
+                      />
+                    </svg>
+                  </div>
+                </div>
+                <div class="selecione-card-bottom-captions">
+                  <span class="selecione-card-main-title">CORRIDA</span>
+                  <span class="selecione-card-sub-title">Primeiro a 30 metros</span>
+                </div>
+              </div>
 
-              <ul class="local-lobby-mode-rules">
-                <li
-                  v-for="(rule, rIdx) in currentLobbyModeInfo.rulesSummary"
-                  :key="rIdx"
-                >
-                  {{ rule }}
-                </li>
-              </ul>
-
-              <div class="local-lobby-actions">
-                <button
-                  type="button"
-                  class="local-lobby-ChangeMode-btn"
-                  @click="openGameModeModal"
-                >
-                  ⚙️ SELECIONE O MODO DE JOGO
-                </button>
-
-                <button
-                  type="button"
-                  class="mp-clean-brick-btn mp-clean-brick-btn--local-start"
-                  @click="startGame()"
-                >
-                  <img
-                    :src="
-                      menuSprites.button_clean_green || menuSprites.button_clean
-                    "
-                    alt=""
-                    aria-hidden="true"
-                    draggable="false"
-                  />
-                  <span class="mp-clean-brick-btn-label">INICIAR PARTIDA</span>
-                </button>
+              <!-- CONTEÚDO INTERNO DO MODO: SOBREVIVÊNCIA -->
+              <div
+                v-else
+                class="selecione-modo-card-inner"
+              >
+                <div class="selecione-single-mode-art">
+                  <div class="selecione-char-cloud-wrap selecione-char-cloud-wrap--center">
+                    <span class="selecione-floating-heart selecione-floating-heart--1">❤️</span>
+                    <span class="selecione-floating-heart selecione-floating-heart--2">❤️</span>
+                    <span class="selecione-floating-heart selecione-floating-heart--3">❤️</span>
+                    <span class="selecione-floating-heart selecione-floating-heart--4">❤️</span>
+                    <img
+                      :src="getSkinSpriteUrl('player_dino')"
+                      alt=""
+                      class="selecione-char-img selecione-char-img--large"
+                      draggable="false"
+                    />
+                    <svg class="selecione-cloud-svg selecione-cloud-svg--large" viewBox="0 0 140 60" aria-hidden="true">
+                      <path
+                        d="M 28,50 C 14,50 8,40 13,30 C 16,23 24,20 31,22 C 36,11 49,6 62,10 C 70,3 85,3 93,11 C 104,8 118,14 120,25 C 129,27 134,35 130,43 C 127,48 120,50 111,50 Z"
+                        fill="#ffffff"
+                        stroke="#181425"
+                        stroke-width="3.8"
+                        stroke-linejoin="round"
+                      />
+                      <path
+                        d="M 22,43 C 36,48 104,48 120,42"
+                        fill="none"
+                        stroke="#cbd5e1"
+                        stroke-width="4"
+                        stroke-linecap="round"
+                      />
+                    </svg>
+                  </div>
+                </div>
+                <div class="selecione-card-bottom-captions">
+                  <span class="selecione-card-main-title">SOBREVIVÊNCIA</span>
+                  <span class="selecione-card-sub-title">3 Vidas • 50 Peças</span>
+                </div>
               </div>
             </div>
+
+            <!-- Seta Inferior ▼ -->
+            <button
+              type="button"
+              class="selecione-modo-arrow-btn"
+              title="Próximo modo"
+              aria-label="Próximo modo"
+              @click.stop="cycleGameModeOption(1)"
+            >
+              <svg viewBox="0 0 84 52" aria-hidden="true">
+                <path
+                  d="M 9,5 H 75 Q 84,7 78,14 L 48,46 Q 42,52 36,46 L 6,14 Q 0,7 9,5 Z"
+                  fill="#94a3b8"
+                  stroke="#181425"
+                  stroke-width="4"
+                  stroke-linejoin="round"
+                />
+                <path
+                  d="M 12,14 H 72 L 46,42 Q 42,46 38,42 Z"
+                  fill="#cbd5e1"
+                />
+                <polygon
+                  points="42,36 58,18 26,18"
+                  fill="#f97316"
+                  stroke="#9a3412"
+                  stroke-width="2"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
           </div>
+
+          <!-- COLUNA DIREITA: CONDIÇÃO DE VITÓRIA / COPA (COPA 1 / COPA 6 PONTOS / COPA 12 PONTOS) -->
+          <div
+            class="selecione-modo-col"
+            @mouseenter="selectedModeScreenColumn = 'CUP'"
+            @click="selectedModeScreenColumn = 'CUP'"
+          >
+            <!-- Seta Superior ▲ -->
+            <button
+              type="button"
+              class="selecione-modo-arrow-btn"
+              title="Copa anterior"
+              aria-label="Copa anterior"
+              @click.stop="cycleVictoryConditionOption(-1)"
+            >
+              <svg viewBox="0 0 84 52" aria-hidden="true">
+                <path
+                  d="M 36,6 Q 42,0 48,6 L 78,38 Q 84,45 75,47 H 9 Q 0,45 6,38 Z"
+                  fill="#94a3b8"
+                  stroke="#181425"
+                  stroke-width="4"
+                  stroke-linejoin="round"
+                />
+                <path
+                  d="M 38,10 Q 42,6 46,10 L 72,38 H 12 Z"
+                  fill="#cbd5e1"
+                />
+                <polygon
+                  points="42,16 58,34 26,34"
+                  fill="#f97316"
+                  stroke="#9a3412"
+                  stroke-width="2"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
+
+            <!-- Cartão Quadrado de Parede LEGO -->
+            <div
+              class="selecione-modo-brick-box"
+              :class="{
+                'selecione-modo-brick-box--active':
+                  selectedModeScreenColumn === 'CUP',
+              }"
+              @click="cycleVictoryConditionOption(1)"
+            >
+              <!-- 8 Pinos Superiores Escuros -->
+              <div class="selecione-modo-box-studs" aria-hidden="true">
+                <span v-for="s in 8" :key="s"></span>
+              </div>
+
+              <!-- 4 Cantoneiras Amarelas/Laranjas quando focado -->
+              <template v-if="selectedModeScreenColumn === 'CUP'">
+                <span class="selecione-corner selecione-corner--tl" aria-hidden="true"></span>
+                <span class="selecione-corner selecione-corner--tr" aria-hidden="true"></span>
+                <span class="selecione-corner selecione-corner--bl" aria-hidden="true"></span>
+                <span class="selecione-corner selecione-corner--br" aria-hidden="true"></span>
+              </template>
+
+              <div class="selecione-modo-card-inner selecione-modo-card-inner--cup">
+                <!-- Ilustração Grande: Troféu Dourado com Coroa de Louros Verde -->
+                <div class="selecione-cup-art" aria-hidden="true">
+                  <svg viewBox="0 0 220 175" class="selecione-cup-svg">
+                    <!-- Coroa de Louros Verde (Esquerda e Direita) -->
+                    <g stroke="#181425" stroke-width="3" stroke-linejoin="round">
+                      <!-- Ramo Esquerdo -->
+                      <path
+                        d="M 88,136 C 52,128 32,96 36,56 C 48,62 56,74 56,86 C 44,74 44,52 52,38 C 62,48 66,62 64,76 C 58,60 64,44 74,34 C 80,46 80,62 74,76 C 72,98 78,116 94,128 Z"
+                        fill="#40c057"
+                      />
+                      <circle cx="42" cy="72" r="8" fill="#69db7c" />
+                      <circle cx="54" cy="96" r="9" fill="#51cf66" />
+                      <circle cx="70" cy="116" r="9" fill="#69db7c" />
+                      <!-- Ramo Direito -->
+                      <path
+                        d="M 132,136 C 168,128 188,96 184,56 C 172,62 164,74 164,86 C 176,74 176,52 168,38 C 158,48 154,62 156,76 C 162,60 156,44 146,34 C 140,46 140,62 146,76 C 148,98 142,116 126,128 Z"
+                        fill="#40c057"
+                      />
+                      <circle cx="178" cy="72" r="8" fill="#69db7c" />
+                      <circle cx="166" cy="96" r="9" fill="#51cf66" />
+                      <circle cx="150" cy="116" r="9" fill="#69db7c" />
+                    </g>
+
+                    <!-- Alças Laterais do Troféu -->
+                    <path
+                      d="M 74,72 C 48,68 48,104 78,112"
+                      fill="none"
+                      stroke="#181425"
+                      stroke-width="11"
+                      stroke-linecap="round"
+                    />
+                    <path
+                      d="M 74,72 C 48,68 48,104 78,112"
+                      fill="none"
+                      stroke="#f97316"
+                      stroke-width="5.5"
+                      stroke-linecap="round"
+                    />
+                    <path
+                      d="M 146,72 C 172,68 172,104 142,112"
+                      fill="none"
+                      stroke="#181425"
+                      stroke-width="11"
+                      stroke-linecap="round"
+                    />
+                    <path
+                      d="M 146,72 C 172,68 172,104 142,112"
+                      fill="none"
+                      stroke="#f97316"
+                      stroke-width="5.5"
+                      stroke-linecap="round"
+                    />
+
+                    <!-- Base e Pedestal do Troféu -->
+                    <path
+                      d="M 98,122 H 122 L 128,146 H 92 Z"
+                      fill="#f59f00"
+                      stroke="#181425"
+                      stroke-width="3.8"
+                      stroke-linejoin="round"
+                    />
+                    <ellipse
+                      cx="110"
+                      cy="150"
+                      rx="30"
+                      ry="9"
+                      fill="#fcc419"
+                      stroke="#181425"
+                      stroke-width="3.8"
+                    />
+
+                    <!-- Cálice Principal -->
+                    <path
+                      d="M 68,66 H 152 C 150,104 134,126 110,126 C 86,126 70,104 68,66 Z"
+                      fill="#fcc419"
+                      stroke="#181425"
+                      stroke-width="4"
+                      stroke-linejoin="round"
+                    />
+                    <!-- Emblema T no centro do cálice -->
+                    <path
+                      d="M 96,82 H 124 V 91 H 115 V 104 H 105 V 91 H 96 Z"
+                      fill="#f59f00"
+                      stroke="#d97706"
+                      stroke-width="2"
+                      stroke-linejoin="round"
+                    />
+
+                    <!-- Tampa Abobadada do Cálice -->
+                    <path
+                      d="M 64,66 C 64,34 86,20 110,20 C 134,20 156,34 156,66 Z"
+                      fill="#ffd43b"
+                      stroke="#181425"
+                      stroke-width="4"
+                      stroke-linejoin="round"
+                    />
+                    <!-- Topo da Tampa -->
+                    <circle
+                      cx="110"
+                      cy="17"
+                      r="8"
+                      fill="#fcc419"
+                      stroke="#181425"
+                      stroke-width="3.8"
+                    />
+                    <!-- Faixa Decorativa com Bolinhas Douradas -->
+                    <path
+                      d="M 64,62 Q 110,72 156,62"
+                      fill="none"
+                      stroke="#f59f00"
+                      stroke-width="8"
+                      stroke-linecap="round"
+                    />
+                    <circle cx="78" cy="56" r="4" fill="#fff3bf" />
+                    <circle cx="94" cy="58" r="4" fill="#fff3bf" />
+                    <circle cx="110" cy="59" r="4" fill="#fff3bf" />
+                    <circle cx="126" cy="58" r="4" fill="#fff3bf" />
+                    <circle cx="142" cy="56" r="4" fill="#fff3bf" />
+                  </svg>
+                </div>
+
+                <div class="selecione-card-bottom-captions">
+                  <span class="selecione-card-main-title">
+                    {{
+                      currentLobbyVictoryCondition === 'SINGLE_WIN'
+                        ? 'COPA 1'
+                        : currentLobbyVictoryCondition === 'CUP_12'
+                          ? 'COPA 12 PONTOS'
+                          : 'COPA 6 PONTOS'
+                    }}
+                  </span>
+                  <span class="selecione-card-sub-title">
+                    {{
+                      currentLobbyVictoryCondition === 'SINGLE_WIN'
+                        ? 'Primeiro a 3 pontos (1 vitória)'
+                        : currentLobbyVictoryCondition === 'CUP_12'
+                          ? 'Primeiro a 12 pontos'
+                          : 'Primeiro a 6 pontos'
+                    }}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Seta Inferior ▼ -->
+            <button
+              type="button"
+              class="selecione-modo-arrow-btn"
+              title="Próxima copa"
+              aria-label="Próxima copa"
+              @click.stop="cycleVictoryConditionOption(1)"
+            >
+              <svg viewBox="0 0 84 52" aria-hidden="true">
+                <path
+                  d="M 9,5 H 75 Q 84,7 78,14 L 48,46 Q 42,52 36,46 L 6,14 Q 0,7 9,5 Z"
+                  fill="#94a3b8"
+                  stroke="#181425"
+                  stroke-width="4"
+                  stroke-linejoin="round"
+                />
+                <path
+                  d="M 12,14 H 72 L 46,42 Q 42,46 38,42 Z"
+                  fill="#cbd5e1"
+                />
+                <polygon
+                  points="42,36 58,18 26,18"
+                  fill="#f97316"
+                  stroke="#9a3412"
+                  stroke-width="2"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- 3. Botões LEGO no Canto Inferior Direito: PRONTO (Verde) e VOLTAR (Vermelho) -->
+        <div class="selecione-modo-bottom-right-actions">
+          <button
+            type="button"
+            class="selecione-action-brick-btn selecione-action-brick-btn--ready"
+            @click="isGameModeModalOpen ? closeGameModeModal() : startGame()"
+          >
+            <span class="selecione-action-studs" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </span>
+            <span class="selecione-action-body">PRONTO</span>
+          </button>
+
+          <button
+            type="button"
+            class="selecione-action-brick-btn selecione-action-brick-btn--back"
+            @click="
+              isGameModeModalOpen ? closeGameModeModal() : returnToMainMenu()
+            "
+          >
+            <span class="selecione-action-studs" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </span>
+            <span class="selecione-action-body">VOLTAR</span>
+          </button>
         </div>
       </div>
     </transition>
@@ -2733,7 +3792,7 @@ onUnmounted(() => {
     <!-- =================================================================== -->
     <transition name="menu-fade-300">
       <div
-        v-if="screenFlow === 'MULTIPLAYER_LOBBY'"
+        v-if="screenFlow === 'MULTIPLAYER_LOBBY' && !isGameModeModalOpen"
         class="mp-lobby-screen"
       >
         <!-- Botão discreto no canto superior esquerdo para voltar ao Menu Principal -->
@@ -2759,66 +3818,87 @@ onUnmounted(() => {
             draggable="false"
           />
 
-          <!-- Barra Dupla Lado a Lado: Modo de Jogo + Condição de Vitória (Copa) -->
-          <div class="mp-lobby-settings-row">
-            <!-- Bloco 1: Modo de Jogo -->
-            <div class="mp-lobby-mode-bar">
-              <div class="mp-lobby-mode-status">
-                <span class="mp-lobby-mode-kicker">MODO DE JOGO:</span>
-                <span class="mp-lobby-mode-value">
-                  {{ currentLobbyModeInfo.icon }} {{ currentLobbyModeInfo.title }}
-                </span>
-                <span
-                  class="mp-lobby-mode-tag"
-                  :style="{ backgroundColor: currentLobbyModeInfo.accentColor }"
-                >
-                  {{ currentLobbyModeInfo.badge }}
-                </span>
-              </div>
-
-              <button
-                type="button"
-                class="mode-gear-btn mode-gear-btn--mp"
-                title="Selecionar o Modo de Jogo da Sala"
-                aria-label="Selecionar o Modo de Jogo da Sala"
-                @click="openGameModeModal"
+          <!-- Botão LEGO Amarelo "MODO E COPA" (idêntico à imagem de referência) -->
+          <button
+            type="button"
+            class="lego-modo-copa-btn"
+            title="Selecionar Modo de Jogo e Condição de Vitória (Copa)"
+            aria-label="Modo e Copa"
+            @click="openGameModeModal"
+          >
+            <span class="lego-modo-copa-studs" aria-hidden="true">
+              <span class="lego-modo-copa-stud"></span>
+              <span class="lego-modo-copa-stud"></span>
+              <span class="lego-modo-copa-stud"></span>
+              <span class="lego-modo-copa-stud"></span>
+            </span>
+            <span class="lego-modo-copa-body">
+              <!-- Ícone duplo de engrenagens laranja/dourado -->
+              <svg
+                class="lego-modo-copa-gears"
+                viewBox="0 0 44 36"
+                aria-hidden="true"
               >
-                <span class="mode-gear-btn-icon" aria-hidden="true">⚙️</span>
-                <span class="mode-gear-btn-text">MODO DE JOGO</span>
-              </button>
-            </div>
-
-            <!-- Bloco 2 (AO LADO): Condição de Vitória (Copa Multiplayer + Cartela) -->
-            <div class="mp-lobby-mode-bar mp-lobby-mode-bar--victory">
-              <div class="mp-lobby-mode-status">
-                <span class="mp-lobby-mode-kicker">CONDIÇÃO DE VITÓRIA:</span>
-                <span class="mp-lobby-mode-value">
-                  {{ currentLobbyVictoryInfo.icon }} {{ currentLobbyVictoryInfo.title }}
-                </span>
-                <div
-                  class="cartela-mini-preview"
-                  :title="`Cartela de ${currentLobbyVictoryInfo.targetPoints} áreas (1º=3pts, 2º=2pts, 3º=1pt, 4º=0pts)`"
-                >
-                  <span
-                    v-for="cell in currentLobbyVictoryInfo.targetPoints"
-                    :key="cell"
-                    class="cartela-mini-cell"
-                  ></span>
-                </div>
-              </div>
-
-              <button
-                type="button"
-                class="mode-gear-btn mode-gear-btn--mp mode-gear-btn--cup"
-                title="Selecionar Condição de Vitória da Copa Multiplayer"
-                aria-label="Selecionar Condição de Vitória"
-                @click="openGameModeModal"
-              >
-                <span class="mode-gear-btn-icon" aria-hidden="true">🏆</span>
-                <span class="mode-gear-btn-text">CONDIÇÃO DE VITÓRIA</span>
-              </button>
-            </div>
-          </div>
+                <!-- Engrenagem maior (esquerda) -->
+                <g transform="translate(15, 19)">
+                  <circle
+                    r="10.5"
+                    fill="#f59e0b"
+                    stroke="#451a03"
+                    stroke-width="2.4"
+                  />
+                  <path
+                    d="M-2.5,-13.5 H2.5 L3.2,-10 H-3.2 Z M-2.5,13.5 H2.5 L3.2,10 H-3.2 Z M-13.5,-2.5 V2.5 L-10,3.2 V-3.2 Z M13.5,-2.5 V2.5 L10,3.2 V-3.2 Z M-10.5,-8.5 L-7,-11.5 L-5.2,-8.5 L-8.5,-5.5 Z M10.5,8.5 L7,11.5 L5.2,8.5 L8.5,5.5 Z M8.5,-10.5 L11.5,-7 L8.5,-5.2 L5.5,-8.5 Z M-8.5,10.5 L-11.5,7 L-8.5,5.2 L-5.5,8.5 Z"
+                    fill="#fbbf24"
+                    stroke="#451a03"
+                    stroke-width="1.8"
+                    stroke-linejoin="round"
+                  />
+                  <circle
+                    r="7.5"
+                    fill="#fbbf24"
+                    stroke="#78350f"
+                    stroke-width="1.6"
+                  />
+                  <circle
+                    r="3.6"
+                    fill="#92400e"
+                    stroke="#451a03"
+                    stroke-width="1.8"
+                  />
+                </g>
+                <!-- Engrenagem menor (direita superior) -->
+                <g transform="translate(32, 11)">
+                  <circle
+                    r="7.2"
+                    fill="#d97706"
+                    stroke="#451a03"
+                    stroke-width="2.2"
+                  />
+                  <path
+                    d="M-1.8,-9.5 H1.8 L2.3,-7 H-2.3 Z M-1.8,9.5 H1.8 L2.3,7 H-2.3 Z M-9.5,-1.8 V1.8 L-7,2.3 V-2.3 Z M9.5,-1.8 V1.8 L7,2.3 V-2.3 Z M-7.2,-6 L-4.8,-8.2 L-3.5,-6 L-6,-3.8 Z M7.2,6 L4.8,8.2 L3.5,6 L6,3.8 Z M6,-7.2 L8.2,-4.8 L6,-3.5 L3.8,-6 Z M-6,7.2 L-8.2,4.8 L-6,3.5 L-3.8,6 Z"
+                    fill="#f59e0b"
+                    stroke="#451a03"
+                    stroke-width="1.5"
+                    stroke-linejoin="round"
+                  />
+                  <circle
+                    r="5"
+                    fill="#fbbf24"
+                    stroke="#78350f"
+                    stroke-width="1.4"
+                  />
+                  <circle
+                    r="2.4"
+                    fill="#92400e"
+                    stroke="#451a03"
+                    stroke-width="1.5"
+                  />
+                </g>
+              </svg>
+              <span class="lego-modo-copa-label">MODO E COPA</span>
+            </span>
+          </button>
         </header>
 
         <!-- 2. Grid Central de 4 Slots Horizontais (Máximo de 4 Players) -->
@@ -2891,7 +3971,7 @@ onUnmounted(() => {
                 >
                   <div class="mp-slot-cartela-header">
                     <span class="mp-slot-cartela-title">
-                      {{ currentLobbyVictoryInfo.icon }} CARTELA
+                      🏆 CARTELA
                     </span>
                     <span class="mp-slot-cartela-score mono">
                       {{ slot.cupPoints }}/{{ currentLobbyVictoryInfo.targetPoints }}
@@ -3035,9 +4115,8 @@ onUnmounted(() => {
             v-if="lobbyCountdownDisplayNumber !== null"
             class="mp-lobby-countdown-footer"
           >
-            <span class="mp-countdown-heading">COMEÇANDO EM:</span>
-            <span class="mp-countdown-digit">
-              {{ lobbyCountdownDisplayNumber }}
+            <span class="mp-countdown-heading">
+              COMEÇANDO EM: {{ lobbyCountdownDisplayNumber }}
             </span>
             <div class="mp-starting-badge-wrap">
               <div class="mp-clean-brick-btn mp-clean-brick-btn--starting">
@@ -3069,258 +4148,8 @@ onUnmounted(() => {
       </div>
     </transition>
 
-    <!-- =================================================================== -->
-    <!-- MENU POPUP: "SELECIONE O MODO DE JOGO" + AO LADO "CONDIÇÃO DE VITÓRIA" -->
-    <!-- =================================================================== -->
-    <transition name="menu-fade-300">
-      <div
-        v-if="isGameModeModalOpen"
-        class="gamemode-modal-backdrop"
-        @click.self="closeGameModeModal"
-      >
-        <div
-          class="gamemode-lego-modal gamemode-lego-modal--wide"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="gamemode-modal-title"
-        >
-          <div class="gamemode-modal-studs" aria-hidden="true">
-            <span class="gamemode-modal-stud"></span>
-            <span class="gamemode-modal-stud"></span>
-            <span class="gamemode-modal-stud"></span>
-            <span class="gamemode-modal-stud"></span>
-            <span class="gamemode-modal-stud"></span>
-            <span class="gamemode-modal-stud"></span>
-            <span class="gamemode-modal-stud"></span>
-            <span class="gamemode-modal-stud"></span>
-          </div>
 
-          <button
-            type="button"
-            class="gamemode-modal-close-x"
-            title="Fechar configurações da partida (Esc)"
-            aria-label="Fechar configurações da partida"
-            @click="closeGameModeModal"
-          >
-            <img
-              :src="menuSprites.button_x"
-              alt="Fechar"
-              draggable="false"
-            />
-          </button>
 
-          <!-- DUAS COLUNAS LADO A LADO: MODO DE JOGO (ESQUERDA) + CONDIÇÃO DE VITÓRIA (DIREITA - MULTIPLAYER) -->
-          <div class="gamemode-dual-columns">
-            <!-- COLUNA 1: SELECIONE O MODO DE JOGO -->
-            <section class="gamemode-column-panel">
-              <header class="gamemode-modal-header">
-                <div class="gamemode-modal-gear-badge" aria-hidden="true">⚙️</div>
-                <div>
-                  <h2 id="gamemode-modal-title" class="gamemode-modal-title">
-                    SELECIONE O MODO DE JOGO
-                  </h2>
-                  <p class="gamemode-modal-subtitle">
-                    Válido para Batalha Local e Multiplayer (ou deixe no Aleatório!)
-                  </p>
-                </div>
-              </header>
-
-              <div class="gamemode-options-grid">
-                <button
-                  v-for="opt in GAME_MODE_OPTIONS"
-                  :key="opt.id"
-                  type="button"
-                  class="gamemode-option-card"
-                  :class="{
-                    'gamemode-option-card--selected':
-                      currentLobbySelectableMode === opt.id,
-                  }"
-                  :style="{ '--mode-accent': opt.accentColor }"
-                  @click="selectGameModeOption(opt.id)"
-                >
-                  <div class="gamemode-option-top">
-                    <span class="gamemode-option-icon">{{ opt.icon }}</span>
-                    <span
-                      class="gamemode-option-badge"
-                      :style="{ backgroundColor: opt.accentColor }"
-                    >
-                      {{ opt.badge }}
-                    </span>
-                  </div>
-
-                  <h3 class="gamemode-option-title">{{ opt.title }}</h3>
-                  <p class="gamemode-option-desc">{{ opt.description }}</p>
-
-                  <ul class="gamemode-option-rules">
-                    <li v-for="(rule, rIdx) in opt.rulesSummary" :key="rIdx">
-                      {{ rule }}
-                    </li>
-                  </ul>
-
-                  <div class="gamemode-option-footer">
-                    <span
-                      class="gamemode-option-cta"
-                      :class="{
-                        'gamemode-option-cta--active':
-                          currentLobbySelectableMode === opt.id,
-                      }"
-                    >
-                      {{
-                        currentLobbySelectableMode === opt.id
-                          ? '✓ MODO SELECIONADO'
-                          : 'SELECIONAR MODO'
-                      }}
-                    </span>
-                  </div>
-                </button>
-              </div>
-            </section>
-
-            <!-- COLUNA 2 (AO LADO): CONDIÇÃO DE VITÓRIA (VÁLIDO APENAS PARA O MODO MULTIPLAYER) -->
-            <section
-              class="gamemode-column-panel gamemode-column-panel--victory"
-              :class="{
-                'gamemode-column-panel--local-hint':
-                  screenFlow === 'LOCAL_LOBBY' ||
-                  (screenFlow === 'MAIN_MENU' && selectedMenuCard === 'LOCAL'),
-              }"
-            >
-              <header class="gamemode-modal-header">
-                <div
-                  class="gamemode-modal-gear-badge gamemode-modal-gear-badge--cup"
-                  aria-hidden="true"
-                >
-                  🏆
-                </div>
-                <div class="gamemode-victory-header-copy">
-                  <div class="gamemode-victory-title-row">
-                    <h2 class="gamemode-modal-title">CONDIÇÃO DE VITÓRIA</h2>
-                    <span class="gamemode-mp-only-pill">
-                      🌐 APENAS MULTIPLAYER
-                    </span>
-                  </div>
-                  <p class="gamemode-modal-subtitle">
-                    Pontuação Tricky Towers:
-                    <strong>1º = 3 pts</strong> •
-                    <strong>2º = 2 pts</strong> •
-                    <strong>3º = 1 pt</strong> •
-                    <strong>4º = 0 pts</strong>
-                    (cada ponto preenche 1 área da cartela!)
-                  </p>
-                </div>
-              </header>
-
-              <div class="gamemode-options-grid">
-                <button
-                  v-for="vcOpt in VICTORY_CONDITION_OPTIONS"
-                  :key="vcOpt.id"
-                  type="button"
-                  class="gamemode-option-card gamemode-option-card--victory"
-                  :class="{
-                    'gamemode-option-card--selected':
-                      currentLobbyVictoryCondition === vcOpt.id,
-                  }"
-                  :style="{ '--mode-accent': vcOpt.accentColor }"
-                  @click="selectVictoryConditionOption(vcOpt.id)"
-                >
-                  <div class="gamemode-option-top">
-                    <span class="gamemode-option-icon">{{ vcOpt.icon }}</span>
-                    <span
-                      class="gamemode-option-badge"
-                      :style="{ backgroundColor: vcOpt.accentColor }"
-                    >
-                      {{ vcOpt.badge }}
-                    </span>
-                  </div>
-
-                  <h3 class="gamemode-option-title">{{ vcOpt.title }}</h3>
-
-                  <!-- CARTELA VISUAL DE DEMONSTRAÇÃO (CADA PONTO PREENCHE UMA ÁREA) -->
-                  <div class="victory-card-cartela-box">
-                    <div class="victory-card-cartela-top">
-                      <span class="victory-card-cartela-label">
-                        📋 CARTELA DE {{ vcOpt.targetPoints }} ÁREAS:
-                      </span>
-                      <span class="victory-card-cartela-pts mono">
-                        {{ vcOpt.targetPoints }} PTS
-                      </span>
-                    </div>
-                    <div
-                      class="victory-card-cartela-slots"
-                      :class="`victory-card-cartela-slots--${vcOpt.targetPoints}`"
-                    >
-                      <span
-                        v-for="slotNum in vcOpt.targetPoints"
-                        :key="slotNum"
-                        class="victory-card-cartela-slot"
-                        :class="{
-                          'victory-card-cartela-slot--sample-1st': slotNum <= 3,
-                          'victory-card-cartela-slot--sample-2nd':
-                            slotNum > 3 && slotNum <= 5,
-                        }"
-                      >
-                        {{ slotNum }}
-                      </span>
-                    </div>
-                  </div>
-
-                  <p class="gamemode-option-desc">{{ vcOpt.description }}</p>
-
-                  <ul class="gamemode-option-rules">
-                    <li v-for="(rule, rIdx) in vcOpt.rulesSummary" :key="rIdx">
-                      {{ rule }}
-                    </li>
-                  </ul>
-
-                  <div class="gamemode-option-footer">
-                    <span
-                      class="gamemode-option-cta"
-                      :class="{
-                        'gamemode-option-cta--active':
-                          currentLobbyVictoryCondition === vcOpt.id,
-                      }"
-                    >
-                      {{
-                        currentLobbyVictoryCondition === vcOpt.id
-                          ? '✓ COPA SELECIONADA'
-                          : 'SELECIONAR COPA'
-                      }}
-                    </span>
-                  </div>
-                </button>
-              </div>
-            </section>
-          </div>
-
-          <footer class="gamemode-modal-bottom-bar">
-            <div class="gamemode-modal-summary">
-              <span>
-                ⚙️ Modo:
-                <strong>
-                  {{ currentLobbyModeInfo.icon }} {{ currentLobbyModeInfo.title }}
-                </strong>
-              </span>
-              <span class="gamemode-modal-summary-sep">•</span>
-              <span>
-                🏆 Copa Multiplayer:
-                <strong>
-                  {{ currentLobbyVictoryInfo.icon }}
-                  {{ currentLobbyVictoryInfo.title }}
-                  ({{ currentLobbyVictoryInfo.targetPoints }} áreas na cartela)
-                </strong>
-              </span>
-            </div>
-            <button
-              type="button"
-              class="gamemode-modal-confirm-btn"
-              @click="closeGameModeModal"
-            >
-              ✓ CONFIRMAR E VOLTAR
-            </button>
-          </footer>
-        </div>
-      </div>
-    </transition>
 
     <!-- =================================================================== -->
     <!-- 4. POPUP GLOBAL DE AMIGOS E ENVIAR CONVITE (MENU E MULTIPLAYER)     -->
@@ -4294,315 +5123,936 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- SURVIVAL SINGLE-PLAYER GAME OVER OVERLAY -->
+      <!-- ================================================================= -->
+      <!-- POPUP DE FIM DE PARTIDA: GRANDE COPA (IDÊNTICO À REFERÊNCIA)      -->
+      <!-- ================================================================= -->
       <div
         v-if="
-          snapshot.state === 'GAME_OVER' &&
-          !isOnlineMultiplayerMatch &&
-          multiplayerClient.state.gameOverResult === null
-        "
-        class="winner-screen-overlay winner-screen-overlay--gameover"
-      >
-        <div class="tricky-winner-text tricky-winner-text--gameover">
-          FIM DE JOGO!
-        </div>
-        <div class="winner-subcard winner-subcard--gameover">
-          <div class="survival-gameover-badge">
-            💔 SUAS 3 VIDAS ACABARAM!
-          </div>
-
-          <div class="survival-stats-grid">
-            <div class="survival-stat-box">
-              <span class="survival-stat-label">🧱 PEÇAS EMPILHADAS</span>
-              <strong class="survival-stat-value mono">
-                {{ snapshot.piecesPlaced }} / {{ snapshot.survivalGoalPieces }}
-              </strong>
-            </div>
-            <div class="survival-stat-box">
-              <span class="survival-stat-label">📏 ALTURA MÁXIMA</span>
-              <strong class="survival-stat-value mono">
-                {{ snapshot.maxTowerHeight.toFixed(1) }}m
-              </strong>
-            </div>
-            <div class="survival-stat-box">
-              <span class="survival-stat-label">⏱️ TEMPO SOBREVIVIDO</span>
-              <strong class="survival-stat-value mono">
-                {{ formattedTime }}
-              </strong>
-            </div>
-          </div>
-
-          <div class="winner-actions">
-            <button
-              class="btn btn-primary"
-              @click="restartMatch(true)"
-            >
-              🔄 Tentar Novamente (R)
-            </button>
-            <button
-              class="btn btn-secondary"
-              @click="openGameModeModal"
-            >
-              ⚙️ Modo de Jogo
-            </button>
-            <button class="btn btn-secondary" @click="returnToMainMenu">
-              🏠 Menu Principal
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- TRICKY TOWERS STYLE "WINNER!" & 4-PLAYER PODIUM OVERLAY -->
-      <div
-        v-if="
+          multiplayerClient.state.gameOverResult !== null ||
           snapshot.state === 'VICTORY' ||
-          multiplayerClient.state.gameOverResult !== null
+          (snapshot.state === 'GAME_OVER' && !isOnlineMultiplayerMatch)
         "
-        class="winner-screen-overlay"
+        class="grande-copa-overlay"
+        @click="handleGrandeCopaContinue"
       >
-        <div class="winner-sunburst" />
-        <div class="tricky-winner-text">
-          {{
-            multiplayerClient.state.gameOverResult
-              ? multiplayerClient.state.gameOverResult.isCupFinished === false
-                ? `RODADA ${multiplayerClient.state.gameOverResult.roundNumber || 1}: ${multiplayerClient.state.gameOverResult.roundWinnerNick || multiplayerClient.state.gameOverResult.winnerCustomNick}!`
-                : `🏆 ${multiplayerClient.state.gameOverResult.winnerCustomNick} VENCEU A COPA!`
-              : snapshot.gameMode === 'SURVIVAL'
-                ? 'SOBREVIVEU!'
-                : 'WINNER!'
-          }}
-        </div>
-        <div class="winner-subcard winner-subcard--cup">
-          <!-- Cabeçalho da Copa Multiplayer e Regras da Cartela -->
+        <div class="grande-copa-modal">
+          <!-- TROFÉU LEGO DOURADO COM LOUROS (CANTO SUPERIOR ESQUERDO) -->
           <div
-            v-if="multiplayerClient.state.gameOverResult"
-            class="mp-cup-banner"
+            class="grande-copa-corner-trophy grande-copa-corner-trophy--left"
+            aria-hidden="true"
           >
-            <div class="mp-cup-banner-top">
-              <span class="mp-cup-banner-title">
-                {{
-                  multiplayerClient.state.gameOverResult.victoryCondition ===
-                  'SINGLE_WIN'
-                    ? '🥇 COPA 1 VITÓRIA'
-                    : multiplayerClient.state.gameOverResult
-                          .victoryCondition === 'CUP_12'
-                      ? '👑 COPA 12 PONTOS'
-                      : '🏆 COPA 6 PONTOS'
-                }}
-                • RODADA {{ multiplayerClient.state.gameOverResult.roundNumber || 1 }}
-              </span>
-              <span
-                class="mp-cup-banner-status"
-                :class="{
-                  'mp-cup-banner-status--done':
-                    multiplayerClient.state.gameOverResult.isCupFinished !==
-                    false,
-                }"
-              >
-                {{
-                  multiplayerClient.state.gameOverResult.isCupFinished === false
-                    ? `EM DISPUTA (META: ${multiplayerClient.state.gameOverResult.cupTargetPoints || 6} ÁREAS)`
-                    : '🏆 COPA FINALIZADA!'
-                }}
-              </span>
-            </div>
-            <div class="mp-cup-banner-rules">
-              <span>🥇 1º = +3 pts</span>
-              <span>🥈 2º = +2 pts</span>
-              <span>🥉 3º = +1 pt</span>
-              <span>4º = +0 pts</span>
-            </div>
-          </div>
-
-          <!-- Pódio Multiplayer Online com CARTELA DE PONTOS (até 4 jogadores) -->
-          <div
-            v-if="multiplayerClient.state.gameOverResult"
-            class="mp-podium-list"
-          >
-            <div
-              v-for="entry in multiplayerClient.state.gameOverResult.podium"
-              :key="entry.handle || entry.userId"
-              class="mp-podium-row mp-podium-row--with-cartela"
-              :class="[
-                `mp-podium-row--rank-${entry.rank}`,
-                { 'mp-podium-row--cup-champion': entry.isCupWinner },
-              ]"
-            >
-              <div class="mp-podium-row-main">
-                <span class="mp-podium-rank">{{ entry.rank }}º</span>
-                <img
-                  :src="getFriendSkinSpriteUrl(entry.equippedSkin)"
-                  :alt="entry.customNick"
-                  class="mp-podium-skin"
+            <svg viewBox="0 0 120 120" class="grande-copa-trophy-svg">
+              <!-- Folhas de Louro Verdes atrás do Troféu -->
+              <g stroke="#181425" stroke-width="3.5" stroke-linejoin="round">
+                <path
+                  d="M 24 66 C 6 52, 6 28, 26 22 C 24 38, 28 52, 38 62 Z"
+                  fill="#40c057"
                 />
-                <div class="mp-podium-identity">
-                  <strong>
-                    {{ entry.customNick }}
-                    <span
-                      v-if="entry.isCupWinner"
-                      class="mp-podium-cup-crown"
-                      title="Campeão da Copa!"
-                    >
-                      👑 CAMPEÃO
-                    </span>
-                  </strong>
-                  <small>
-                    {{ entry.handle }} • {{ entry.towerHeight.toFixed(1) }}m
-                    <template
-                      v-if="
-                        multiplayerClient.state.gameOverResult.gameMode ===
-                          'SURVIVAL' || snapshot.gameMode === 'SURVIVAL'
-                      "
-                    >
-                      •
-                      {{
-                        entry.lives > 0
-                          ? '❤️'.repeat(Math.min(3, entry.lives))
-                          : '💀 Eliminado'
-                      }}
-                    </template>
-                  </small>
-                </div>
-
-                <!-- Pontos Ganhos na Rodada (+3, +2, +1, +0) -->
-                <span
-                  class="mp-podium-round-pts"
-                  :class="`mp-podium-round-pts--rank-${entry.rank}`"
-                >
-                  +{{
-                    entry.pointsEarned ??
-                    (entry.rank === 1
-                      ? 3
-                      : entry.rank === 2
-                        ? 2
-                        : entry.rank === 3
-                          ? 1
-                          : 0)
-                  }}
-                  {{
-                    (entry.pointsEarned ??
-                      (entry.rank === 1
-                        ? 3
-                        : entry.rank === 2
-                          ? 2
-                          : entry.rank === 3
-                            ? 1
-                            : 0)) === 1
-                      ? 'PT'
-                      : 'PTS'
-                  }}
-                </span>
-              </div>
-
-              <!-- CARTELA DE PONTOS DO JOGADOR (CADA PONTO PREENCHE UMA ÁREA) -->
-              <div class="mp-podium-cartela-wrap">
-                <div
-                  class="mp-podium-cartela-grid"
-                  :class="`mp-podium-cartela-grid--${entry.cupTargetPoints || multiplayerClient.state.gameOverResult.cupTargetPoints || 6}`"
-                >
-                  <span
-                    v-for="cellIdx in entry.cupTargetPoints ||
-                    multiplayerClient.state.gameOverResult.cupTargetPoints ||
-                    6"
-                    :key="cellIdx"
-                    class="mp-podium-cartela-cell"
-                    :class="{
-                      'mp-podium-cartela-cell--filled':
-                        cellIdx <= (entry.previousCupPoints ?? 0),
-                      'mp-podium-cartela-cell--earned-now':
-                        cellIdx > (entry.previousCupPoints ?? 0) &&
-                        cellIdx <= (entry.cupPoints ?? entry.pointsEarned ?? 0),
-                    }"
-                  >
-                    <span class="mp-podium-cartela-cell-num">{{ cellIdx }}</span>
-                  </span>
-                </div>
-                <span class="mp-podium-cartela-total mono">
-                  {{ entry.cupPoints ?? entry.pointsEarned ?? 0 }}/{{
-                    entry.cupTargetPoints ||
-                    multiplayerClient.state.gameOverResult.cupTargetPoints ||
-                    6
-                  }}
-                </span>
-              </div>
-            </div>
+                <path
+                  d="M 18 82 C 2 72, 2 50, 18 42 C 20 56, 26 68, 36 76 Z"
+                  fill="#2f9e44"
+                />
+                <path
+                  d="M 96 66 C 114 52, 114 28, 94 22 C 96 38, 92 52, 82 62 Z"
+                  fill="#40c057"
+                />
+                <path
+                  d="M 102 82 C 118 72, 118 50, 102 42 C 100 56, 94 68, 84 76 Z"
+                  fill="#2f9e44"
+                />
+              </g>
+              <!-- 2 Pinos LEGO no Topo da Taça -->
+              <rect
+                x="41"
+                y="13"
+                width="14"
+                height="9"
+                rx="2"
+                fill="#ffd43b"
+                stroke="#181425"
+                stroke-width="3.5"
+              />
+              <rect
+                x="65"
+                y="13"
+                width="14"
+                height="9"
+                rx="2"
+                fill="#ffd43b"
+                stroke="#181425"
+                stroke-width="3.5"
+              />
+              <!-- Alças Laterais da Taça -->
+              <path
+                d="M 34 30 H 19 C 13 30, 13 55, 24 57 L 38 58"
+                fill="none"
+                stroke="#181425"
+                stroke-width="9.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M 34 30 H 19 C 13 30, 13 55, 24 57 L 38 58"
+                fill="none"
+                stroke="#ffaa00"
+                stroke-width="4.2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M 86 30 H 101 C 107 30, 107 55, 96 57 L 82 58"
+                fill="none"
+                stroke="#181425"
+                stroke-width="9.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M 86 30 H 101 C 107 30, 107 55, 96 57 L 82 58"
+                fill="none"
+                stroke="#ffaa00"
+                stroke-width="4.2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <!-- Corpo Principal da Taça LEGO -->
+              <path
+                d="M 32 22 H 88 V 50 C 88 68, 74 76, 60 76 C 46 76, 32 68, 32 50 Z"
+                fill="#fcc419"
+                stroke="#181425"
+                stroke-width="3.8"
+                stroke-linejoin="round"
+              />
+              <!-- Brilho Lateral da Taça -->
+              <path
+                d="M 39 27 H 49 V 52 C 49 60, 43 64, 39 60 Z"
+                fill="#fff3bf"
+                opacity="0.85"
+              />
+              <!-- Haste e Base do Troféu -->
+              <rect
+                x="51"
+                y="74"
+                width="18"
+                height="16"
+                fill="#f59f00"
+                stroke="#181425"
+                stroke-width="3.6"
+              />
+              <rect
+                x="38"
+                y="89"
+                width="44"
+                height="10"
+                rx="2.5"
+                fill="#ffd43b"
+                stroke="#181425"
+                stroke-width="3.6"
+              />
+              <rect
+                x="31"
+                y="98"
+                width="58"
+                height="11"
+                rx="2.5"
+                fill="#f08c00"
+                stroke="#181425"
+                stroke-width="3.6"
+              />
+            </svg>
           </div>
 
+          <!-- TROFÉU LEGO DOURADO COM LOUROS (CANTO SUPERIOR DIREITO) -->
           <div
-            v-else-if="snapshot.gameMode === 'SURVIVAL'"
-            class="survival-stats-grid"
+            class="grande-copa-corner-trophy grande-copa-corner-trophy--right"
+            aria-hidden="true"
           >
-            <div class="survival-stat-box">
-              <span class="survival-stat-label">❤️ VIDAS RESTANTES</span>
-              <strong class="survival-stat-value">
-                {{ '❤️'.repeat(Math.max(0, snapshot.lives)) }} ({{ snapshot.lives }}/3)
-              </strong>
+            <svg viewBox="0 0 120 120" class="grande-copa-trophy-svg">
+              <g stroke="#181425" stroke-width="3.5" stroke-linejoin="round">
+                <path
+                  d="M 24 66 C 6 52, 6 28, 26 22 C 24 38, 28 52, 38 62 Z"
+                  fill="#40c057"
+                />
+                <path
+                  d="M 18 82 C 2 72, 2 50, 18 42 C 20 56, 26 68, 36 76 Z"
+                  fill="#2f9e44"
+                />
+                <path
+                  d="M 96 66 C 114 52, 114 28, 94 22 C 96 38, 92 52, 82 62 Z"
+                  fill="#40c057"
+                />
+                <path
+                  d="M 102 82 C 118 72, 118 50, 102 42 C 100 56, 94 68, 84 76 Z"
+                  fill="#2f9e44"
+                />
+              </g>
+              <rect
+                x="41"
+                y="13"
+                width="14"
+                height="9"
+                rx="2"
+                fill="#ffd43b"
+                stroke="#181425"
+                stroke-width="3.5"
+              />
+              <rect
+                x="65"
+                y="13"
+                width="14"
+                height="9"
+                rx="2"
+                fill="#ffd43b"
+                stroke="#181425"
+                stroke-width="3.5"
+              />
+              <path
+                d="M 34 30 H 19 C 13 30, 13 55, 24 57 L 38 58"
+                fill="none"
+                stroke="#181425"
+                stroke-width="9.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M 34 30 H 19 C 13 30, 13 55, 24 57 L 38 58"
+                fill="none"
+                stroke="#ffaa00"
+                stroke-width="4.2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M 86 30 H 101 C 107 30, 107 55, 96 57 L 82 58"
+                fill="none"
+                stroke="#181425"
+                stroke-width="9.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M 86 30 H 101 C 107 30, 107 55, 96 57 L 82 58"
+                fill="none"
+                stroke="#ffaa00"
+                stroke-width="4.2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M 32 22 H 88 V 50 C 88 68, 74 76, 60 76 C 46 76, 32 68, 32 50 Z"
+                fill="#fcc419"
+                stroke="#181425"
+                stroke-width="3.8"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M 39 27 H 49 V 52 C 49 60, 43 64, 39 60 Z"
+                fill="#fff3bf"
+                opacity="0.85"
+              />
+              <rect
+                x="51"
+                y="74"
+                width="18"
+                height="16"
+                fill="#f59f00"
+                stroke="#181425"
+                stroke-width="3.6"
+              />
+              <rect
+                x="38"
+                y="89"
+                width="44"
+                height="10"
+                rx="2.5"
+                fill="#ffd43b"
+                stroke="#181425"
+                stroke-width="3.6"
+              />
+              <rect
+                x="31"
+                y="98"
+                width="58"
+                height="11"
+                rx="2.5"
+                fill="#f08c00"
+                stroke="#181425"
+                stroke-width="3.6"
+              />
+            </svg>
+          </div>
+
+          <!-- BARRA SUPERIOR DE BLOCOS LEGO AZUL-CLARO E AMARELO -->
+          <div class="grande-copa-top-rail" aria-hidden="true">
+            <div class="grande-copa-top-brick grande-copa-top-brick--blue">
+              <span class="grande-copa-top-stud"></span>
+              <span class="grande-copa-top-stud"></span>
+              <span class="grande-copa-top-stud"></span>
             </div>
-            <div class="survival-stat-box">
-              <span class="survival-stat-label">🧱 PEÇAS EMPILHADAS</span>
-              <strong class="survival-stat-value mono">
-                {{ snapshot.piecesPlaced }}
-              </strong>
+            <div class="grande-copa-top-brick grande-copa-top-brick--yellow">
+              <span class="grande-copa-top-stud"></span>
+              <span class="grande-copa-top-stud"></span>
+              <span class="grande-copa-top-stud"></span>
             </div>
-            <div class="survival-stat-box">
-              <span class="survival-stat-label">📏 ALTURA MÁXIMA</span>
-              <strong class="survival-stat-value mono">
-                {{ snapshot.maxTowerHeight.toFixed(1) }}m
-              </strong>
+            <div
+              class="grande-copa-top-brick grande-copa-top-brick--blue grande-copa-top-brick--center"
+            >
+              <span class="grande-copa-top-stud"></span>
+              <span class="grande-copa-top-stud"></span>
+              <span class="grande-copa-top-stud"></span>
+              <span class="grande-copa-top-stud"></span>
+              <span class="grande-copa-top-stud"></span>
+              <span class="grande-copa-top-stud"></span>
+              <span class="grande-copa-top-stud"></span>
+            </div>
+            <div class="grande-copa-top-brick grande-copa-top-brick--yellow">
+              <span class="grande-copa-top-stud"></span>
+              <span class="grande-copa-top-stud"></span>
+              <span class="grande-copa-top-stud"></span>
+            </div>
+            <div class="grande-copa-top-brick grande-copa-top-brick--blue">
+              <span class="grande-copa-top-stud"></span>
+              <span class="grande-copa-top-stud"></span>
+              <span class="grande-copa-top-stud"></span>
             </div>
           </div>
 
-          <p class="winner-time">
-            Tempo da Partida: <strong>{{ formattedTime }}</strong>
-          </p>
-          <div class="winner-actions">
-            <template
-              v-if="
-                isOnlineMultiplayerMatch ||
-                multiplayerClient.state.gameOverResult
-              "
-            >
-              <button
-                v-if="
-                  multiplayerClient.state.gameOverResult &&
-                  multiplayerClient.state.gameOverResult.isCupFinished === false
-                "
-                class="btn btn-primary"
-                @click="handleNextCupRound"
+          <!-- TÍTULO CENTRAL 3D EM SVG: GRANDE COPA -->
+          <div class="grande-copa-title-wrap" aria-hidden="true">
+            <svg viewBox="0 0 540 84" class="grande-copa-title-svg">
+              <defs>
+                <linearGradient
+                  id="grandeCopaTitleGrad"
+                  x1="0%"
+                  y1="0%"
+                  x2="0%"
+                  y2="100%"
+                >
+                  <stop offset="0%" stop-color="#ffe066" />
+                  <stop offset="45%" stop-color="#ff9f1c" />
+                  <stop offset="100%" stop-color="#e8590c" />
+                </linearGradient>
+              </defs>
+              <!-- Sombra sólida inferior 3D -->
+              <text
+                x="270"
+                y="65"
+                text-anchor="middle"
+                class="grande-copa-title-svg-shadow"
               >
-                ⏭️ PRÓXIMA RODADA DA COPA (RODADA
-                {{ (multiplayerClient.state.gameOverResult.roundNumber || 1) + 1 }})
-              </button>
-              <button
-                class="btn"
-                :class="
-                  multiplayerClient.state.gameOverResult &&
-                  multiplayerClient.state.gameOverResult.isCupFinished === false
-                    ? 'btn-secondary'
-                    : 'btn-primary'
-                "
-                @click="handleReturnToLobbyFromMatch"
+                {{ grandeCopaScoreboard.cupTitle }}
+              </text>
+              <!-- Texto principal com preenchimento dourado/laranja brilhante e contorno grosso -->
+              <text
+                x="270"
+                y="60"
+                text-anchor="middle"
+                class="grande-copa-title-svg-text"
               >
-                🎉 VOLTAR PARA A SALA
-              </button>
-            </template>
-            <button
-              v-else
-              class="btn btn-primary"
-              @click="restartMatch(true)"
+                {{ grandeCopaScoreboard.cupTitle }}
+              </text>
+            </svg>
+          </div>
+
+          <!-- CORPO CENTRAL: COLUNAS LEGO LATERAIS + QUADRO DE TIJOLOS BRANCOS -->
+          <div class="grande-copa-body-wrap">
+            <!-- Coluna Lateral Esquerda de Pinos LEGO -->
+            <div
+              class="grande-copa-side-rail grande-copa-side-rail--left"
+              aria-hidden="true"
             >
-              🎲 Nova Partida
-            </button>
-            <button
-              v-if="!isOnlineMultiplayerMatch"
-              class="btn btn-secondary"
-              @click="openGameModeModal"
+              <div class="grande-copa-side-plate grande-copa-side-plate--blue">
+                <span class="grande-copa-face-stud"></span>
+                <span class="grande-copa-face-stud"></span>
+                <span class="grande-copa-face-stud"></span>
+                <span class="grande-copa-face-stud"></span>
+              </div>
+              <div
+                class="grande-copa-side-plate grande-copa-side-plate--yellow"
+              >
+                <span class="grande-copa-outer-bump"></span>
+                <span class="grande-copa-outer-bump"></span>
+              </div>
+              <div
+                class="grande-copa-side-plate grande-copa-side-plate--blue grande-copa-side-plate--bottom"
+              >
+                <span class="grande-copa-face-stud"></span>
+                <span class="grande-copa-face-stud"></span>
+                <span class="grande-copa-face-stud"></span>
+              </div>
+            </div>
+
+            <!-- QUADRO INTERNO DE PAREDE DE TIJOLOS BRANCO/GELO -->
+            <div class="grande-copa-board">
+              <!-- LISTA DE 4 JOGADORES COM SUAS CARTELAS E MEDALHAS -->
+              <div class="grande-copa-rows-list">
+                <div
+                  v-for="(row, rowIdx) in grandeCopaScoreboard.rows"
+                  :key="row.key"
+                  class="grande-copa-player-block"
+                >
+                  <!-- Apenas o Nome do Jogador acima da Barra (idêntico ao print) -->
+                  <div class="grande-copa-player-header">
+                    <span class="grande-copa-player-name">
+                      {{ row.customNick }}
+                    </span>
+                  </div>
+
+                  <!-- BARRA HORIZONTAL AZUL-CLARO LEGO (CARTELA DO JOGADOR) -->
+                  <div class="grande-copa-track-bar">
+                    <!-- Compartimento Esquerdo: Foto Quadrada + Ícone Redondo do Personagem -->
+                    <div class="grande-copa-avatar-compartment">
+                      <!-- 1. Foto Quadrada do Jogador -->
+                      <div class="grande-copa-portrait-square">
+                        <!-- Slot 0 / Pirata -->
+                        <svg
+                          v-if="rowIdx % 4 === 0"
+                          viewBox="0 0 64 64"
+                          class="grande-copa-avatar-svg"
+                        >
+                          <rect width="64" height="64" fill="#74b0e3" />
+                          <!-- Chapéu Pirata -->
+                          <path
+                            d="M 8 28 C 12 10, 52 10, 56 28 Z"
+                            fill="#2b2d42"
+                            stroke="#181425"
+                            stroke-width="3"
+                          />
+                          <rect
+                            x="12"
+                            y="24"
+                            width="40"
+                            height="6"
+                            rx="2"
+                            fill="#c1121f"
+                            stroke="#181425"
+                            stroke-width="2.5"
+                          />
+                          <!-- Caveirinha no chapéu -->
+                          <circle cx="32" cy="18" r="4.5" fill="#ffffff" />
+                          <!-- Rosto e Barba Ruiva -->
+                          <circle
+                            cx="32"
+                            cy="38"
+                            r="14"
+                            fill="#f8cfa9"
+                            stroke="#181425"
+                            stroke-width="2.8"
+                          />
+                          <!-- Tapa-olho -->
+                          <path
+                            d="M 19 32 L 45 36"
+                            stroke="#181425"
+                            stroke-width="2.5"
+                          />
+                          <circle cx="26" cy="35" r="4.2" fill="#181425" />
+                          <circle cx="38" cy="36" r="2.3" fill="#181425" />
+                          <!-- Barba -->
+                          <path
+                            d="M 16 40 C 14 56, 50 56, 48 40 C 42 44, 22 44, 16 40 Z"
+                            fill="#a84320"
+                            stroke="#181425"
+                            stroke-width="2.8"
+                          />
+                          <path
+                            d="M 28 45 Q 32 48 36 45"
+                            fill="none"
+                            stroke="#ffffff"
+                            stroke-width="2.5"
+                            stroke-linecap="round"
+                          />
+                        </svg>
+
+                        <!-- Slot 1 / Heitir (Máscara Branca) -->
+                        <svg
+                          v-else-if="rowIdx % 4 === 1"
+                          viewBox="0 0 64 64"
+                          class="grande-copa-avatar-svg"
+                        >
+                          <rect width="64" height="64" fill="#4ea8de" />
+                          <path d="M 0 0 L 28 0 L 14 64 L 0 64 Z" fill="#e63946" />
+                          <!-- Casaco Escuro -->
+                          <path
+                            d="M 10 64 C 12 46, 52 46, 54 64 Z"
+                            fill="#1d1e2c"
+                            stroke="#181425"
+                            stroke-width="3"
+                          />
+                          <!-- Cabeça / Máscara Branca -->
+                          <ellipse
+                            cx="34"
+                            cy="30"
+                            rx="14"
+                            ry="16"
+                            fill="#ffffff"
+                            stroke="#181425"
+                            stroke-width="3"
+                          />
+                          <path
+                            d="M 25 27 L 31 29 M 37 29 L 43 27"
+                            stroke="#181425"
+                            stroke-width="3"
+                            stroke-linecap="round"
+                          />
+                          <path
+                            d="M 27 37 Q 34 41 41 37"
+                            fill="none"
+                            stroke="#181425"
+                            stroke-width="2.5"
+                          />
+                        </svg>
+
+                        <!-- Slot 2 / RaFiTa (Bloco Pixel P&B Inclinado) -->
+                        <svg
+                          v-else-if="rowIdx % 4 === 2"
+                          viewBox="0 0 64 64"
+                          class="grande-copa-avatar-svg"
+                        >
+                          <rect width="64" height="64" fill="#212529" />
+                          <g transform="rotate(26 32 34)">
+                            <rect
+                              x="12"
+                              y="14"
+                              width="40"
+                              height="40"
+                              rx="3"
+                              fill="#f8f9fa"
+                              stroke="#181425"
+                              stroke-width="3.5"
+                            />
+                            <rect
+                              x="18"
+                              y="24"
+                              width="9"
+                              height="6"
+                              fill="#181425"
+                            />
+                            <rect
+                              x="35"
+                              y="24"
+                              width="9"
+                              height="6"
+                              fill="#181425"
+                            />
+                            <rect
+                              x="26"
+                              y="36"
+                              width="10"
+                              height="5"
+                              fill="#181425"
+                            />
+                          </g>
+                        </svg>
+
+                        <!-- Slot 3 / Ratto (Lobo/Cachorro Escuro no Fundo Menta) -->
+                        <svg
+                          v-else
+                          viewBox="0 0 64 64"
+                          class="grande-copa-avatar-svg"
+                        >
+                          <rect width="64" height="64" fill="#63e6be" />
+                          <!-- Orelhas -->
+                          <path
+                            d="M 16 26 L 14 10 L 28 18 Z"
+                            fill="#343a40"
+                            stroke="#181425"
+                            stroke-width="2.8"
+                          />
+                          <path
+                            d="M 48 26 L 50 10 L 36 18 Z"
+                            fill="#343a40"
+                            stroke="#181425"
+                            stroke-width="2.8"
+                          />
+                          <!-- Cabeça -->
+                          <circle
+                            cx="32"
+                            cy="34"
+                            r="16"
+                            fill="#343a40"
+                            stroke="#181425"
+                            stroke-width="3"
+                          />
+                          <!-- Focinho Claro -->
+                          <ellipse cx="32" cy="40" rx="11" ry="8" fill="#f1faee" />
+                          <!-- Bigode -->
+                          <path
+                            d="M 22 40 Q 32 35 42 40"
+                            fill="none"
+                            stroke="#181425"
+                            stroke-width="3"
+                            stroke-linecap="round"
+                          />
+                          <!-- Olhos -->
+                          <circle cx="25" cy="30" r="2.5" fill="#ffffff" />
+                          <circle cx="39" cy="30" r="2.5" fill="#ffffff" />
+                        </svg>
+                      </div>
+
+                      <!-- 2. Medalhão Circular da Cabeça do Personagem -->
+                      <div class="grande-copa-character-circle">
+                        <!-- Cabeça Pirata (Fundo Amarelo) -->
+                        <svg
+                          v-if="rowIdx % 4 === 0"
+                          viewBox="0 0 64 64"
+                          class="grande-copa-avatar-svg"
+                        >
+                          <circle cx="32" cy="32" r="30" fill="#ffd43b" />
+                          <path
+                            d="M 10 27 C 14 10, 50 10, 54 27 Z"
+                            fill="#2b2d42"
+                            stroke="#181425"
+                            stroke-width="3"
+                          />
+                          <rect
+                            x="14"
+                            y="24"
+                            width="36"
+                            height="5"
+                            rx="2"
+                            fill="#c1121f"
+                            stroke="#181425"
+                            stroke-width="2.4"
+                          />
+                          <circle cx="32" cy="18" r="4" fill="#ffffff" />
+                          <circle
+                            cx="32"
+                            cy="37"
+                            r="13"
+                            fill="#f8cfa9"
+                            stroke="#181425"
+                            stroke-width="2.8"
+                          />
+                          <path
+                            d="M 20 32 L 44 35"
+                            stroke="#181425"
+                            stroke-width="2.4"
+                          />
+                          <circle cx="26" cy="34" r="3.8" fill="#181425" />
+                          <circle cx="38" cy="35" r="2.2" fill="#181425" />
+                          <path
+                            d="M 17 39 C 16 55, 48 55, 47 39 C 41 43, 23 43, 17 39 Z"
+                            fill="#a84320"
+                            stroke="#181425"
+                            stroke-width="2.8"
+                          />
+                        </svg>
+
+                        <!-- Cabeça Dino Verde -->
+                        <svg
+                          v-else-if="rowIdx % 4 === 1"
+                          viewBox="0 0 64 64"
+                          class="grande-copa-avatar-svg"
+                        >
+                          <circle cx="32" cy="32" r="30" fill="#74c69d" />
+                          <!-- Chifres Amarelos -->
+                          <path
+                            d="M 18 18 L 22 10 L 26 18 Z"
+                            fill="#ffd43b"
+                            stroke="#181425"
+                            stroke-width="2.5"
+                          />
+                          <path
+                            d="M 28 16 L 32 8 L 36 16 Z"
+                            fill="#ffd43b"
+                            stroke="#181425"
+                            stroke-width="2.5"
+                          />
+                          <!-- Cabeça Dino -->
+                          <ellipse
+                            cx="33"
+                            cy="35"
+                            rx="18"
+                            ry="16"
+                            fill="#40c057"
+                            stroke="#181425"
+                            stroke-width="3"
+                          />
+                          <circle cx="39" cy="28" r="2.6" fill="#181425" />
+                          <!-- Boca Sorridente com Dentes -->
+                          <path
+                            d="M 25 38 C 28 48, 46 48, 48 38 Z"
+                            fill="#f06595"
+                            stroke="#181425"
+                            stroke-width="2.6"
+                          />
+                          <path
+                            d="M 28 38 L 31 42 L 34 38 L 37 42 L 40 38 L 43 42 L 46 38"
+                            fill="#ffffff"
+                            stroke="#181425"
+                            stroke-width="1.8"
+                          />
+                        </svg>
+
+                        <!-- Cabeça Robô Cinza -->
+                        <svg
+                          v-else-if="rowIdx % 4 === 2"
+                          viewBox="0 0 64 64"
+                          class="grande-copa-avatar-svg"
+                        >
+                          <circle cx="32" cy="32" r="30" fill="#74b0e3" />
+                          <!-- Antena -->
+                          <line
+                            x1="32"
+                            y1="10"
+                            x2="32"
+                            y2="19"
+                            stroke="#181425"
+                            stroke-width="3"
+                          />
+                          <circle
+                            cx="32"
+                            cy="10"
+                            r="3.5"
+                            fill="#adb5bd"
+                            stroke="#181425"
+                            stroke-width="2.5"
+                          />
+                          <!-- Cabeça Metálica -->
+                          <rect
+                            x="15"
+                            y="19"
+                            width="34"
+                            height="28"
+                            rx="8"
+                            fill="#ced4da"
+                            stroke="#181425"
+                            stroke-width="3"
+                          />
+                          <circle
+                            cx="25"
+                            cy="31"
+                            r="4"
+                            fill="#ffffff"
+                            stroke="#181425"
+                            stroke-width="2.5"
+                          />
+                          <circle
+                            cx="39"
+                            cy="31"
+                            r="4"
+                            fill="#ffffff"
+                            stroke="#181425"
+                            stroke-width="2.5"
+                          />
+                          <rect
+                            x="23"
+                            y="39"
+                            width="18"
+                            height="4"
+                            rx="2"
+                            fill="#495057"
+                            stroke="#181425"
+                            stroke-width="2"
+                          />
+                        </svg>
+
+                        <!-- Cabeça Corvo / Mago Roxo -->
+                        <svg
+                          v-else
+                          viewBox="0 0 64 64"
+                          class="grande-copa-avatar-svg"
+                        >
+                          <circle cx="32" cy="32" r="30" fill="#9bc5ec" />
+                          <!-- Capuz Roxo -->
+                          <circle
+                            cx="30"
+                            cy="34"
+                            r="17"
+                            fill="#862e9c"
+                            stroke="#181425"
+                            stroke-width="3"
+                          />
+                          <!-- Rosto Claro -->
+                          <ellipse
+                            cx="33"
+                            cy="34"
+                            rx="10"
+                            ry="11"
+                            fill="#ffe3e3"
+                            stroke="#181425"
+                            stroke-width="2.5"
+                          />
+                          <circle cx="34" cy="30" r="2.4" fill="#181425" />
+                          <!-- Bico Rosa/Roxo -->
+                          <path
+                            d="M 38 30 L 55 36 L 38 41 Z"
+                            fill="#f06595"
+                            stroke="#181425"
+                            stroke-width="2.8"
+                            stroke-linejoin="round"
+                          />
+                        </svg>
+                      </div>
+                    </div>
+
+                    <!-- Divisória Vertical entre Avatar e Trilha de Pontos -->
+                    <div
+                      class="grande-copa-compartment-divider"
+                      aria-hidden="true"
+                    />
+
+                    <!-- Trilha de 8 Slots: Medalhas (1, 2, 3) e Pontos Vazios (•) -->
+                    <div class="grande-copa-slots-track">
+                      <div
+                        v-for="slotIdx in row.totalVisualSlots"
+                        :key="`slot-${row.key}-${slotIdx}`"
+                        class="grande-copa-slot-cell"
+                        :class="{
+                          'grande-copa-slot-cell--seam':
+                            slotIdx === 4 || slotIdx === 7,
+                        }"
+                      >
+                        <!-- Medalha Roseta Ondulada com Fitas (1 = Ouro, 2 = Prata/Roxo, 3 = Bronze) -->
+                        <div
+                          v-if="slotIdx <= row.pointMedals.length"
+                          class="grande-copa-medal-wrap"
+                          :class="[
+                            `grande-copa-medal-wrap--rank-${row.pointMedals[slotIdx - 1]}`,
+                            {
+                              'grande-copa-medal-wrap--earned-now':
+                                slotIdx > row.previousCupPoints,
+                            },
+                          ]"
+                        >
+                          <svg
+                            viewBox="0 0 68 78"
+                            class="grande-copa-medal-svg"
+                          >
+                            <!-- Fitas Inferiores em V -->
+                            <path
+                              d="M 23 44 L 12 71 L 23 66 L 29 74 L 34 48 Z"
+                              :fill="
+                                row.pointMedals[slotIdx - 1] === 1
+                                  ? '#e03131'
+                                  : row.pointMedals[slotIdx - 1] === 2
+                                    ? '#9c36b5'
+                                    : '#e8590c'
+                              "
+                              stroke="#181425"
+                              stroke-width="3.2"
+                              stroke-linejoin="round"
+                            />
+                            <path
+                              d="M 45 44 L 56 71 L 45 66 L 39 74 L 34 48 Z"
+                              :fill="
+                                row.pointMedals[slotIdx - 1] === 1
+                                  ? '#c92a2a'
+                                  : row.pointMedals[slotIdx - 1] === 2
+                                    ? '#862e9c'
+                                    : '#d9480f'
+                              "
+                              stroke="#181425"
+                              stroke-width="3.2"
+                              stroke-linejoin="round"
+                            />
+                            <!-- Borda Roseta Ondulada (12 lóbulos) -->
+                            <path
+                              d="M 34 6 C 37 6, 39 8, 42 7 C 45 7, 47 10, 50 10 C 53 11, 53 14, 56 16 C 58 18, 57 21, 58 24 C 59 27, 57 30, 58 33 C 58 36, 55 38, 55 41 C 54 44, 50 45, 49 48 C 47 50, 43 50, 41 52 C 38 53, 36 52, 34 52 C 32 52, 30 53, 27 52 C 25 50, 21 50, 19 48 C 18 45, 14 44, 13 41 C 13 38, 10 36, 10 33 C 11 30, 9 27, 10 24 C 11 21, 10 18, 12 16 C 15 14, 15 11, 18 10 C 21 10, 23 7, 26 7 C 29 8, 31 6, 34 6 Z"
+                              :fill="
+                                row.pointMedals[slotIdx - 1] === 1
+                                  ? '#fcc419'
+                                  : row.pointMedals[slotIdx - 1] === 2
+                                    ? '#d0bfff'
+                                    : '#f08c00'
+                              "
+                              stroke="#181425"
+                              stroke-width="3.5"
+                              stroke-linejoin="round"
+                            />
+                            <!-- Círculo Interno da Medalha -->
+                            <circle
+                              cx="34"
+                              cy="29"
+                              r="17"
+                              :fill="
+                                row.pointMedals[slotIdx - 1] === 1
+                                  ? '#fab005'
+                                  : row.pointMedals[slotIdx - 1] === 2
+                                    ? '#b197fc'
+                                    : '#e67700'
+                              "
+                              stroke="#181425"
+                              stroke-width="3"
+                            />
+                            <!-- Número 1, 2 ou 3 -->
+                            <text
+                              x="34"
+                              y="37"
+                              text-anchor="middle"
+                              class="grande-copa-medal-num"
+                              :fill="
+                                row.pointMedals[slotIdx - 1] === 1
+                                  ? '#fff3bf'
+                                  : row.pointMedals[slotIdx - 1] === 2
+                                    ? '#f3f0ff'
+                                    : '#ffe8cc'
+                              "
+                            >
+                              {{ row.pointMedals[slotIdx - 1] }}
+                            </text>
+                          </svg>
+                        </div>
+
+                        <!-- Ponto Vazio: Círculo Azul Escuro Suave (sem borda preta) -->
+                        <span
+                          v-else
+                          class="grande-copa-empty-dot"
+                          aria-hidden="true"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Coluna Lateral Direita de Pinos LEGO -->
+            <div
+              class="grande-copa-side-rail grande-copa-side-rail--right"
+              aria-hidden="true"
             >
-              ⚙️ Modo de Jogo
-            </button>
-            <button class="btn btn-secondary" @click="returnToMainMenu">
-              🏠 Menu Principal
-            </button>
+              <div class="grande-copa-side-plate grande-copa-side-plate--blue">
+                <span class="grande-copa-face-stud"></span>
+                <span class="grande-copa-face-stud"></span>
+                <span class="grande-copa-face-stud"></span>
+                <span class="grande-copa-face-stud"></span>
+              </div>
+              <div
+                class="grande-copa-side-plate grande-copa-side-plate--yellow"
+              >
+                <span class="grande-copa-outer-bump"></span>
+                <span class="grande-copa-outer-bump"></span>
+              </div>
+              <div
+                class="grande-copa-side-plate grande-copa-side-plate--blue grande-copa-side-plate--bottom"
+              >
+                <span class="grande-copa-face-stud"></span>
+                <span class="grande-copa-face-stud"></span>
+                <span class="grande-copa-face-stud"></span>
+              </div>
+            </div>
+          </div>
+
+          <!-- BARRA INFERIOR DE BLOCOS LEGO (IDÊNTICA À REFERÊNCIA: 4 PINOS ESQ + BARRA LISA + 4 PINOS DIR) -->
+          <div class="grande-copa-bottom-rail" aria-hidden="true">
+            <div class="grande-copa-bottom-plate">
+              <span class="grande-copa-face-stud"></span>
+              <span class="grande-copa-face-stud"></span>
+              <span class="grande-copa-face-stud"></span>
+              <span class="grande-copa-face-stud"></span>
+            </div>
+
+            <div class="grande-copa-bottom-center-bar">
+              <div class="grande-copa-bottom-seam" />
+            </div>
+
+            <div class="grande-copa-bottom-plate">
+              <span class="grande-copa-face-stud"></span>
+              <span class="grande-copa-face-stud"></span>
+              <span class="grande-copa-face-stud"></span>
+              <span class="grande-copa-face-stud"></span>
+            </div>
           </div>
         </div>
       </div>

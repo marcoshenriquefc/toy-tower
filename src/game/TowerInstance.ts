@@ -361,6 +361,7 @@ export class TowerInstance {
   /** Frozen & hidden falling piece stored during GOAL_COUNTDOWN (restored if tower slips before 0.0s, discarded on ROOF_DROP) */
   public heldActivePiece: TowerPieceEntity | null = null
   public settledPieces: TowerPieceEntity[] = []
+  private survivalFinalPiecesCount: number | null = null
   private nextEntityId: number = 1
 
   public isSoftDropping: boolean = false
@@ -738,6 +739,7 @@ export class TowerInstance {
     this.pieceRecallAnim = null
     this.heldActivePiece = null
     this.settledPieces = []
+    this.survivalFinalPiecesCount = null
     this.hasSpawnedSideIsland = false
     this.islands = []
     this.dissolvingBricks = []
@@ -1759,10 +1761,7 @@ export class TowerInstance {
 
       if (caught) {
         this.extraLifeBalloons.splice(i, 1)
-        this.lives += 1
-        if (this.lives > this.maxLives) {
-          this.maxLives = Math.min(5, this.lives)
-        }
+        this.lives = Math.min(this.maxLives, this.lives + 1)
 
         this.spawnVictoryConfetti(balloon.x, balloon.y, 26)
         this.spawnColoredBurst(balloon.x, balloon.y, '#F43F5E', 18)
@@ -4932,11 +4931,19 @@ export class TowerInstance {
 
   /**
    * Transitions the instance into `GAME_OVER` when all 3 lives are lost in `SURVIVAL` mode.
+   * All active and settled pieces dissolve/disappear cleanly.
    */
   public triggerSurvivalGameOver(): void {
     if (this.state === 'GAME_OVER' || this.state === 'VICTORY') return
 
+    this.updateSettledBlocksAndHeight()
+    const finalPieces = this.settledPieces.length
+    this.survivalFinalPiecesCount = finalPieces
+
     if (this.activePiece) {
+      const lx = this.activePiece.body.position.x - this.offsetX
+      const ly = this.activePiece.body.position.y
+      this.spawnMagicSmokePoof(lx, ly)
       World.remove(this.engine.world, this.activePiece.body)
       this.activePiece = null
     }
@@ -4944,6 +4951,29 @@ export class TowerInstance {
       World.remove(this.engine.world, this.heldActivePiece.body)
       this.heldActivePiece = null
     }
+
+    this.glueWeldLinks = []
+    this.glueVines = []
+    for (let i = this.settledPieces.length - 1; i >= 0; i--) {
+      const piece = this.settledPieces[i]
+      const body = piece.body
+      const localX = body.position.x - this.offsetX
+      body.isSensor = true
+      World.remove(this.engine.world, body)
+      this.dissolvingBricks.push({
+        body,
+        piece,
+        progress: 0,
+        ageMs: 0,
+        durationMs: 360,
+        startX: localX,
+        startY: body.position.y,
+        angle: body.angle,
+        reason: 'LATERAL',
+      })
+    }
+    this.settledPieces = []
+
     this.pieceRecallAnim = null
     this.extraLifeBalloons = []
     this.isSoftDropping = false
@@ -4951,61 +4981,66 @@ export class TowerInstance {
     this.goalCountdownMs = null
     this.state = 'GAME_OVER'
 
-    this.updateSettledBlocksAndHeight()
     this.emitSnapshotNow()
     this.onGameOver?.(
       this.elapsedTimeMs,
       this.maxTowerHeight,
-      this.settledPieces.length
+      finalPieces
     )
     this.onEventBanner?.(
-      `💀 FIM DE JOGO! Suas vidas acabaram! Peças empilhadas: ${this.settledPieces.length}/${GAME_CONSTANTS.SURVIVAL_GOAL_PIECES} • Altura Máx: ${this.maxTowerHeight.toFixed(1)}m`,
+      `💀 FIM DE JOGO! Suas vidas acabaram! Peças empilhadas: ${finalPieces}/${GAME_CONSTANTS.SURVIVAL_GOAL_PIECES} • Altura Máx: ${this.maxTowerHeight.toFixed(1)}m`,
       'danger'
     )
   }
 
   /**
-   * Triggers `VICTORY` in `SURVIVAL` mode (either when reaching `SURVIVAL_GOAL_PIECES`
-   * or when winning as the Last Player Standing in Multiplayer).
+   * Triggers the Castle Roof Climax (`ROOF_DROP`) in `SURVIVAL` mode when the player wins
+   * (either as the Last Player Standing when all opponents lose their lives, or by reaching 50 pieces).
+   * Active falling pieces and queue pieces disappear in magic smoke, existing tower blocks lock static,
+   * and the Castle Roof (`CASTLE_ROOF`) spawns on the winner's tower so they can place it to finish the game!
    */
-  public triggerSurvivalVictory(): void {
-    if (this.state === 'VICTORY') return
+  public triggerSurvivalCastleClimax(): void {
+    if (this.state === 'ROOF_DROP' || this.state === 'VICTORY') return
 
-    if (this.activePiece) {
-      World.remove(this.engine.world, this.activePiece.body)
-      this.activePiece = null
+    if (this.state === 'GAME_OVER') {
+      this.lives = Math.max(1, this.lives)
     }
-    if (this.heldActivePiece) {
-      World.remove(this.engine.world, this.heldActivePiece.body)
-      this.heldActivePiece = null
-    }
+
+    this.survivalFinalPiecesCount = this.settledPieces.length
     this.pieceRecallAnim = null
-    this.extraLifeBalloons = []
-    this.isSoftDropping = false
+    this.respawnDelayRemainingMs = 0
+    this.settlingTimerMs = 0
     this.pendingLandPiece = false
-    this.goalCountdownMs = null
+    this.extraLifeBalloons = []
+    this.blindManualRemainingMs = 0
+    this.invulnerableRemainingMs = 999999
+    this.inventoryPower = {
+      selfPower: null,
+      attackPower: null,
+      sourceCheckpoint: null,
+    }
 
+    // Lock the survivor's existing tower blocks as Static so the tower stays solid for the Castle Roof!
     for (const p of this.settledPieces) {
       Body.setVelocity(p.body, { x: 0, y: 0 })
       Body.setAngularVelocity(p.body, 0)
       Body.setStatic(p.body, true)
       p.snapped = true
     }
-
-    const u = GAME_CONSTANTS.UNIT_PX
-    const topY = -Math.max(2, this.towerHeight) * u
-    this.spawnVictoryConfetti(0, topY, 52)
-    this.spawnColoredBurst(0, topY, '#FACC15', 18)
-    this.playVictoryFanfareSound()
-
-    this.state = 'VICTORY'
     this.updateSettledBlocksAndHeight()
-    this.emitSnapshotNow()
-    this.onVictory?.(this.elapsedTimeMs, this.towerHeight)
+
+    this.spawnCastleRoof()
     this.onEventBanner?.(
-      `🏆 SOBREVIVENTE CAMPEÃO! ${this.settledPieces.length}/${GAME_CONSTANTS.SURVIVAL_GOAL_PIECES} peças empilhadas com ${this.lives} ❤️ restante(s)!`,
+      '🏰 FIM DE JOGO! Último sobrevivente — posicione o Castelo na sua torre para vencer!',
       'success'
     )
+  }
+
+  /**
+   * Triggers `VICTORY` in `SURVIVAL` mode by spawning the Castle Roof climax (`triggerSurvivalCastleClimax`).
+   */
+  public triggerSurvivalVictory(): void {
+    this.triggerSurvivalCastleClimax()
   }
 
   /**
@@ -5245,7 +5280,14 @@ export class TowerInstance {
         this.survivalPieceCheckpointsReached.push(nextPieceCp)
         const excludePositive: PowerId[] = []
         if (this.hasSpawnedSideIsland) excludePositive.push('SIDE_ISLAND')
-        if (this.lives >= 5) excludePositive.push('EXTRA_LIFE')
+        if (
+          this.lives >= this.maxLives ||
+          this.lives > 2 ||
+          this.extraLifeBalloons.length > 0 ||
+          this.inventoryPower.selfPower === 'EXTRA_LIFE'
+        ) {
+          excludePositive.push('EXTRA_LIFE')
+        }
         const rolled = rollCheckpointPowers(
           true,
           () => this.randomizer.nextFloat(),
@@ -5304,7 +5346,13 @@ export class TowerInstance {
       // Once the player has used SIDE_ISLAND (`hasSpawnedSideIsland === true`), remove SIDE_ISLAND from future Checkpoint rolls!
       const excludePositive: PowerId[] = []
       if (this.hasSpawnedSideIsland) excludePositive.push('SIDE_ISLAND')
-      if (this.gameMode !== 'SURVIVAL' || this.lives >= 5) {
+      if (
+        this.gameMode !== 'SURVIVAL' ||
+        this.lives >= this.maxLives ||
+        this.lives > 2 ||
+        this.extraLifeBalloons.length > 0 ||
+        this.inventoryPower.selfPower === 'EXTRA_LIFE'
+      ) {
         excludePositive.push('EXTRA_LIFE')
       }
       const rolled = rollCheckpointPowers(
@@ -5468,9 +5516,14 @@ export class TowerInstance {
     this.state = 'ROOF_DROP'
     this.goalCountdownMs = null
     this.isSoftDropping = false
+    this.pieceRecallAnim = null
+    this.extraLifeBalloons = []
 
-    // If called directly from Developer Mode while an activePiece was falling, remove it
+    // If called while an activePiece was falling, make it vanish in a magic smoke poof!
     if (this.activePiece) {
+      const lx = this.activePiece.body.position.x - this.offsetX
+      const ly = this.activePiece.body.position.y
+      this.spawnMagicSmokePoof(lx, ly)
       World.remove(this.engine.world, this.activePiece.body)
       this.activePiece = null
     }
@@ -5665,7 +5718,7 @@ export class TowerInstance {
       maxLives: this.maxLives,
       invulnerableRemainingMs: Math.ceil(this.invulnerableRemainingMs),
       fallFlashRemainingMs: Math.ceil(this.fallWhiteFlashMs),
-      piecesPlaced: this.settledPieces.length,
+      piecesPlaced: this.survivalFinalPiecesCount ?? this.settledPieces.length,
       survivalGoalPieces: GAME_CONSTANTS.SURVIVAL_GOAL_PIECES,
       maxTowerHeight: this.maxTowerHeight,
       basePresetId: this.currentBasePreset.id,
@@ -5695,19 +5748,24 @@ export class TowerInstance {
       blindManualRemainingMs: Math.ceil(this.blindManualRemainingMs),
       fogAnchorX: Number(this.fogAnchorX.toFixed(1)),
       fogAnchorY: Number(this.fogAnchorY.toFixed(1)),
-      nextQueue: this.randomizer.peekQueue(
-        this.gameMode === 'SURVIVAL'
-          ? Math.min(
-              3,
-              Math.max(
-                0,
-                GAME_CONSTANTS.SURVIVAL_GOAL_PIECES -
-                  this.settledPieces.length -
-                  (this.activePiece ? 1 : 0)
-              )
-            )
-          : 3
-      ),
+      nextQueue:
+        this.state === 'ROOF_DROP' ||
+        this.state === 'VICTORY' ||
+        this.state === 'GAME_OVER'
+          ? []
+          : this.randomizer.peekQueue(
+              this.gameMode === 'SURVIVAL'
+                ? Math.min(
+                    3,
+                    Math.max(
+                      0,
+                      GAME_CONSTANTS.SURVIVAL_GOAL_PIECES -
+                        this.settledPieces.length -
+                        (this.activePiece ? 1 : 0)
+                    )
+                  )
+                : 3
+            ),
       activePiece: activePieceSnap,
       settledBlocks,
       hasSpawnedSideIsland: this.hasSpawnedSideIsland,

@@ -109,6 +109,8 @@ export interface PodiumEntryDTO {
   equippedSkin: string
   towerHeight: number
   lives: number
+  eliminationOrder?: number
+  isEliminated?: boolean
   pointsEarned: number
   previousCupPoints: number
   cupPoints: number
@@ -129,6 +131,7 @@ interface InternalRoomSlot {
   silhouetteSkin: string
   lastTowerHeight: number
   lastLives: number
+  eliminationOrder: number
   cupPoints: number
   lastPointsEarned: number
 }
@@ -145,6 +148,9 @@ interface InternalRoom {
   victoryCondition: RoomVictoryCondition
   cupTargetPoints: number
   roundNumber: number
+  eliminationCounter: number
+  survivalClimaxWinnerHandle: string | null
+  survivalClimaxTimer: ReturnType<typeof setTimeout> | null
   slots: [InternalRoomSlot, InternalRoomSlot, InternalRoomSlot, InternalRoomSlot]
 }
 
@@ -256,9 +262,9 @@ function abortRoomCountdown(room: InternalRoom, reason?: string): void {
 
 function startRoomCountdownIfEligible(room: InternalRoom): void {
   const occupied = room.slots.filter((s) => Boolean(s.handle))
-  // Regra Parte 2.4: Quando houver de 2 a 4 jogadores na sala e TODOS estiverem com isReady: true
+  // Inicia contagem regressiva de 3s quando todos os jogadores presentes na sala (1 a 4) estiverem com isReady: true
   const allReady =
-    occupied.length >= 2 && occupied.every((s) => s.isReady === true)
+    occupied.length >= 1 && occupied.every((s) => s.isReady === true)
 
   if (!allReady) {
     abortRoomCountdown(room)
@@ -281,7 +287,7 @@ function startRoomCountdownIfEligible(room: InternalRoom): void {
   room.countdownTimer = setInterval(() => {
     const currentOccupied = room.slots.filter((s) => Boolean(s.handle))
     if (
-      currentOccupied.length < 2 ||
+      currentOccupied.length < 1 ||
       !currentOccupied.every((s) => s.isReady)
     ) {
       abortRoomCountdown(room)
@@ -310,6 +316,9 @@ function startRoomCountdownIfEligible(room: InternalRoom): void {
       room.countdownSeconds = null
       room.status = 'IN_MATCH'
       room.roundNumber = 1
+      room.eliminationCounter = 0
+      room.survivalClimaxWinnerHandle = null
+      clearSurvivalClimaxTimer(room)
       room.cupTargetPoints = getCupTargetPoints(room.victoryCondition)
       room.pieceSeed = generateSharedPieceSeed()
       room.activeGameMode =
@@ -322,6 +331,7 @@ function startRoomCountdownIfEligible(room: InternalRoom): void {
       for (const s of room.slots) {
         s.lastTowerHeight = 0
         s.lastLives = 3
+        s.eliminationOrder = 0
         s.cupPoints = 0
         s.lastPointsEarned = 0
       }
@@ -354,14 +364,47 @@ function startRoomCountdownIfEligible(room: InternalRoom): void {
   }, 1000)
 }
 
+function clearSurvivalClimaxTimer(room: InternalRoom): void {
+  if (room.survivalClimaxTimer) {
+    clearTimeout(room.survivalClimaxTimer)
+    room.survivalClimaxTimer = null
+  }
+}
+
+function markSlotEliminatedIfNeeded(
+  room: InternalRoom,
+  slot: InternalRoomSlot
+): void {
+  if (slot.lastLives <= 0 && slot.eliminationOrder === 0) {
+    room.eliminationCounter += 1
+    slot.eliminationOrder = room.eliminationCounter
+  }
+}
+
 async function concludeMultiplayerRound(
   room: InternalRoom,
   winnerSlot: InternalRoomSlot,
-  elapsedTimeMs: number
+  elapsedTimeMs: number,
+  clientEliminationOrders?: Record<string, number>
 ): Promise<void> {
   if (!winnerSlot.handle) return
+  clearSurvivalClimaxTimer(room)
+  room.survivalClimaxWinnerHandle = null
   room.status = 'POST_MATCH'
   const occupied = room.slots.filter((s) => Boolean(s.handle))
+
+  if (clientEliminationOrders) {
+    for (const s of occupied) {
+      if (s.handle && s.lastLives <= 0 && s.eliminationOrder === 0) {
+        const clientOrder =
+          clientEliminationOrders[s.handle.toLowerCase()] ??
+          clientEliminationOrders[s.handle]
+        if (typeof clientOrder === 'number' && clientOrder > 0) {
+          s.eliminationOrder = clientOrder
+        }
+      }
+    }
+  }
 
   const sorted = [...occupied].sort((a, b) => {
     if (a.handle === winnerSlot.handle) return -1
@@ -370,6 +413,13 @@ async function concludeMultiplayerRound(
       const aAlive = a.lastLives > 0 ? 1 : 0
       const bAlive = b.lastLives > 0 ? 1 : 0
       if (bAlive !== aAlive) return bAlive - aAlive
+      // Both eliminated: the player who died LATER (higher eliminationOrder) ranks higher;
+      // the player who died FIRST (eliminationOrder = 1) ranks last!
+      if (aAlive === 0 && bAlive === 0) {
+        const aOrder = a.eliminationOrder || 0
+        const bOrder = b.eliminationOrder || 0
+        if (aOrder !== bOrder) return bOrder - aOrder
+      }
       if (b.lastLives !== a.lastLives) return b.lastLives - a.lastLives
     }
     return b.lastTowerHeight - a.lastTowerHeight
@@ -391,6 +441,8 @@ async function concludeMultiplayerRound(
       equippedSkin: s.equippedSkin,
       towerHeight: Number(s.lastTowerHeight.toFixed(1)),
       lives: s.lastLives,
+      eliminationOrder: s.eliminationOrder,
+      isEliminated: room.activeGameMode === 'SURVIVAL' && s.lastLives <= 0,
       pointsEarned,
       previousCupPoints,
       cupPoints: nextCupPoints,
@@ -468,10 +520,9 @@ async function checkSurvivalLastPlayerStanding(
   }
 
   const occupied = room.slots.filter((s) => Boolean(s.handle))
-  if (occupied.length < 1) return
+  if (occupied.length < 2) return
 
   const alive = occupied.filter((s) => s.lastLives > 0)
-  // End match when 1 survivor remains (or 0 if simultaneous final life loss)
   if (alive.length > 1) {
     return
   }
@@ -480,11 +531,33 @@ async function checkSurvivalLastPlayerStanding(
     alive[0] ||
     [...occupied].sort((a, b) => {
       if (b.lastLives !== a.lastLives) return b.lastLives - a.lastLives
+      if (b.eliminationOrder !== a.eliminationOrder) {
+        return b.eliminationOrder - a.eliminationOrder
+      }
       return b.lastTowerHeight - a.lastTowerHeight
     })[0]
   if (!winnerSlot || !winnerSlot.handle) return
 
-  await concludeMultiplayerRound(room, winnerSlot, 0)
+  // If already triggered Castle Roof climax for this survivor, wait for them to place the Castle Roof (`match:claim_victory`)
+  if (room.survivalClimaxWinnerHandle === winnerSlot.handle) {
+    return
+  }
+
+  room.survivalClimaxWinnerHandle = winnerSlot.handle
+  ioInstance?.to(room.roomId).emit('match:survival_climax', {
+    roomId: room.roomId,
+    winnerHandle: winnerSlot.handle,
+    winnerCustomNick: winnerSlot.customNick,
+    winnerSkin: winnerSlot.equippedSkin,
+  })
+
+  // Safety fallback if the winner never places the Castle Roof or disconnects
+  clearSurvivalClimaxTimer(room)
+  room.survivalClimaxTimer = setTimeout(() => {
+    if (room.status === 'IN_MATCH') {
+      void concludeMultiplayerRound(room, winnerSlot, 0)
+    }
+  }, 15000)
 }
 
 function createEmptySlot(slotIndex: number): InternalRoomSlot {
@@ -500,6 +573,7 @@ function createEmptySlot(slotIndex: number): InternalRoomSlot {
     silhouetteSkin: DEFAULT_SILHOUETTES[slotIndex] || 'WIZARD',
     lastTowerHeight: 0,
     lastLives: 3,
+    eliminationOrder: 0,
     cupPoints: 0,
     lastPointsEarned: 0,
   }
@@ -919,9 +993,45 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
           await notifyFriendsPresence(freshUser)
         }
 
+        const reqOpts =
+          payloadOrAck && typeof payloadOrAck === 'object'
+            ? (payloadOrAck as {
+                selectedGameMode?: RoomSelectableGameMode
+                victoryCondition?: RoomVictoryCondition
+              })
+            : undefined
+
+        const initialMode: RoomSelectableGameMode =
+          reqOpts?.selectedGameMode === 'SURVIVAL' ||
+          reqOpts?.selectedGameMode === 'RANDOM'
+            ? reqOpts.selectedGameMode
+            : 'RACE'
+
+        const initialVictory: RoomVictoryCondition =
+          reqOpts?.victoryCondition === 'SINGLE_WIN' ||
+          reqOpts?.victoryCondition === 'CUP_12'
+            ? reqOpts.victoryCondition
+            : 'CUP_6'
+
         if (session.roomId) {
           const existingRoom = roomsById.get(session.roomId)
           if (existingRoom) {
+            if (
+              existingRoom.status === 'LOBBY' &&
+              existingRoom.hostHandle.toLowerCase() ===
+                session.handle.toLowerCase()
+            ) {
+              if (reqOpts?.selectedGameMode) {
+                existingRoom.selectedGameMode = initialMode
+                if (initialMode !== 'RANDOM') {
+                  existingRoom.activeGameMode = initialMode
+                }
+              }
+              if (reqOpts?.victoryCondition) {
+                existingRoom.victoryCondition = initialVictory
+                existingRoom.cupTargetPoints = getCupTargetPoints(initialVictory)
+              }
+            }
             const dto = serializeRoom(existingRoom)
             socket.emit('room:state_updated', dto)
             safeAck(payloadOrAck, maybeAck, { ok: true, room: dto })
@@ -941,11 +1051,14 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
           countdownSeconds: null,
           countdownTimer: null,
           pieceSeed: null,
-          selectedGameMode: 'RACE',
-          activeGameMode: 'RACE',
-          victoryCondition: 'CUP_6',
-          cupTargetPoints: 6,
+          selectedGameMode: initialMode,
+          activeGameMode: initialMode === 'SURVIVAL' ? 'SURVIVAL' : 'RACE',
+          victoryCondition: initialVictory,
+          cupTargetPoints: getCupTargetPoints(initialVictory),
           roundNumber: 1,
+          eliminationCounter: 0,
+          survivalClimaxWinnerHandle: null,
+          survivalClimaxTimer: null,
           slots: [
             {
               slotIndex: 0,
@@ -959,6 +1072,7 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
               silhouetteSkin: DEFAULT_SILHOUETTES[0],
               lastTowerHeight: 0,
               lastLives: 3,
+              eliminationOrder: 0,
               cupPoints: 0,
               lastPointsEarned: 0,
             },
@@ -1361,6 +1475,7 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
         mySlot.lastTowerHeight = Number(packet.towerHeight || 0)
         mySlot.lastLives = Number(packet.lives ?? 3)
         if (mySlot.lastLives <= 0) {
+          markSlotEliminatedIfNeeded(room, mySlot)
           void checkSurvivalLastPlayerStanding(room)
         }
       }
@@ -1396,10 +1511,15 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
         if (!session.roomId) return
         const room = roomsById.get(session.roomId)
         const lives = payload?.lives ?? payload?.livesRemaining ?? 0
+        let eliminationOrder = 0
         if (room) {
           const mySlot = room.slots.find((s) => s.handle === session.handle)
           if (mySlot) {
             mySlot.lastLives = lives
+            if (lives <= 0) {
+              markSlotEliminatedIfNeeded(room, mySlot)
+              eliminationOrder = mySlot.eliminationOrder
+            }
           }
         }
         socket.to(session.roomId).emit('match:life_lost', {
@@ -1408,6 +1528,7 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
           lives,
           livesRemaining: lives,
           isEliminated: lives <= 0,
+          eliminationOrder,
         })
         if (room && lives <= 0) {
           void checkSurvivalLastPlayerStanding(room)
@@ -1490,7 +1611,11 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
     // Fim de Jogo e Pódio (match:claim_victory -> match:game_over)
     socket.on(
       'match:claim_victory',
-      async (payload: { towerHeight?: number; elapsedTimeMs?: number }) => {
+      async (payload: {
+        towerHeight?: number
+        elapsedTimeMs?: number
+        eliminationOrderByHandle?: Record<string, number>
+      }) => {
         if (!session.roomId) return
         const room = roomsById.get(session.roomId)
         if (!room || room.status === 'POST_MATCH') return
@@ -1504,7 +1629,8 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
         await concludeMultiplayerRound(
           room,
           mySlot,
-          payload?.elapsedTimeMs ?? 0
+          payload?.elapsedTimeMs ?? 0,
+          payload?.eliminationOrderByHandle
         )
       }
     )
@@ -1520,6 +1646,9 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
         room.slots.some((s) => Boolean(s.handle) && s.cupPoints >= cupTargetPoints)
       if (hasCupWinner) return
 
+      clearSurvivalClimaxTimer(room)
+      room.survivalClimaxWinnerHandle = null
+      room.eliminationCounter = 0
       room.status = 'IN_MATCH'
       room.roundNumber += 1
       room.cupTargetPoints = cupTargetPoints
@@ -1534,6 +1663,7 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
       for (const s of room.slots) {
         s.lastTowerHeight = 0
         s.lastLives = 3
+        s.eliminationOrder = 0
         s.lastPointsEarned = 0
       }
 
@@ -1568,6 +1698,9 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
       const room = roomsById.get(session.roomId)
       if (!room) return
 
+      clearSurvivalClimaxTimer(room)
+      room.survivalClimaxWinnerHandle = null
+      room.eliminationCounter = 0
       room.status = 'LOBBY'
       room.countdownSeconds = null
       room.roundNumber = 1
@@ -1577,6 +1710,7 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
         s.lastPointsEarned = 0
         s.lastTowerHeight = 0
         s.lastLives = 3
+        s.eliminationOrder = 0
       }
 
       const dto = serializeRoom(room)
