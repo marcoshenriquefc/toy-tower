@@ -637,15 +637,7 @@ function buildInitialLocalParticipants(): LocalCupParticipant[] {
     'Rick The Hank'
   const myHandle = authStore.state.user?.handle || '@voce'
   const mySkin = activePlayerSkinId.value || 'player_mage'
-  const otherSkins = DEFAULT_SILHOUETTE_SKINS.filter((s) => s !== mySkin)
-  while (otherSkins.length < 3) {
-    otherSkins.push('player_dino', 'player_pirate', 'player_shadow')
-  }
-  const rivals = [
-    { nick: 'Heitir', handle: '@heitir', skin: otherSkins[0] },
-    { nick: 'RaFiTa', handle: '@rafita', skin: otherSkins[1] },
-    { nick: 'Ratto', handle: '@ratto', skin: otherSkins[2] },
-  ]
+
   return [
     {
       slotIndex: 0,
@@ -663,22 +655,6 @@ function buildInitialLocalParticipants(): LocalCupParticipant[] {
       pointMedals: [],
       isCupWinner: false,
     },
-    ...rivals.map((r, idx) => ({
-      slotIndex: idx + 1,
-      isLocalPlayer: false,
-      customNick: r.nick,
-      handle: r.handle,
-      skinSpriteId: r.skin,
-      rank: idx + 2,
-      towerHeight: 0,
-      lives: 3,
-      eliminationOrder: 0,
-      pointsEarned: 0,
-      previousCupPoints: 0,
-      cupPoints: 0,
-      pointMedals: [],
-      isCupWinner: false,
-    })),
   ]
 }
 
@@ -724,29 +700,6 @@ function recordLocalRoundResult(snap: TowerSnapshot) {
   const myHandle = authStore.state.user?.handle || '@voce'
   const mySkin = activePlayerSkinId.value || 'player_mage'
 
-  // Determine ranks for the 3 rivals (slots 1, 2, 3) rotated by roundNumber
-  const rivalOrder = [1, 2, 3]
-  const shift = (roundNum - 1) % 3
-  const rotatedRivals = [
-    ...rivalOrder.slice(shift),
-    ...rivalOrder.slice(0, shift),
-  ]
-
-  const rankBySlot: Record<number, number> = {}
-  if (playerWon) {
-    rankBySlot[0] = 1
-    rankBySlot[rotatedRivals[0]] = 2
-    rankBySlot[rotatedRivals[1]] = 3
-    rankBySlot[rotatedRivals[2]] = 4
-  } else {
-    rankBySlot[rotatedRivals[0]] = 1
-    rankBySlot[rotatedRivals[1]] = 2
-    rankBySlot[rotatedRivals[2]] = 3
-    rankBySlot[0] = 4
-  }
-
-  const pointsByRank: Record<number, number> = { 1: 3, 2: 2, 3: 1, 4: 0 }
-
   for (const p of localCupState.value.participants) {
     if (p.isLocalPlayer) {
       p.customNick = myNick
@@ -755,26 +708,16 @@ function recordLocalRoundResult(snap: TowerSnapshot) {
       p.towerHeight = snap.towerHeight || snap.maxTowerHeight || 0
       p.lives = snap.lives
       p.eliminationOrder = playerWon ? 0 : 1
-    } else {
-      const rRank = rankBySlot[p.slotIndex] || 2
-      p.towerHeight = Math.max(
-        4,
-        Number(((30 - rRank * 4.2) + ((roundNum * p.slotIndex) % 3)).toFixed(1))
-      )
-      p.lives = snap.gameMode === 'SURVIVAL' ? (rRank === 1 ? 2 : 0) : 3
-      p.eliminationOrder =
-        snap.gameMode === 'SURVIVAL' && rRank > 1 ? 5 - rRank : 0
     }
 
-    const r = rankBySlot[p.slotIndex] || 4
-    const earned = pointsByRank[r] ?? 0
+    const r = playerWon ? 1 : 4
+    const earned = playerWon ? 3 : 0
     p.rank = r
     p.previousCupPoints = p.cupPoints
     p.pointsEarned = earned
     p.cupPoints = p.previousCupPoints + earned
-    const medalRank: 1 | 2 | 3 = r === 1 ? 1 : r === 2 ? 2 : 3
     for (let i = 0; i < earned; i++) {
-      p.pointMedals.push(medalRank)
+      p.pointMedals.push(1)
     }
     p.isCupWinner = false
   }
@@ -881,62 +824,6 @@ const grandeCopaScoreboard = computed<{
         }
       }
     )
-
-    // Ensure the Grande Copa board always shows 4 player rows (pad remaining slots with rivals)
-    const defaultRivals: Array<{
-      nick: string
-      handle: string
-      skin: string
-      presetMedals: Array<1 | 2 | 3>
-    }> = [
-      {
-        nick: 'Heitir',
-        handle: '@heitir',
-        skin: 'player_dino',
-        presetMedals: roundNum >= 2 ? [3, 2] : [3],
-      },
-      {
-        nick: 'RaFiTa',
-        handle: '@rafita',
-        skin: 'player_shadow',
-        presetMedals: roundNum >= 2 ? [2, 2, 1] : [2, 2],
-      },
-      {
-        nick: 'Ratto',
-        handle: '@ratto',
-        skin: 'player_mage',
-        presetMedals: roundNum >= 2 ? [1, 1, 1, 3] : [3],
-      },
-    ]
-
-    let rivalIdx = 0
-    while (rows.length < 4 && rivalIdx < defaultRivals.length) {
-      const r = defaultRivals[rivalIdx]
-      rivalIdx += 1
-      const slotIdx = rows.length
-      const rRank = slotIdx + 1
-      const earned = rRank === 2 ? 2 : rRank === 3 ? 1 : 0
-      const medals = [...r.presetMedals]
-      rows.push({
-        key: `pad-${r.handle}`,
-        slotIndex: slotIdx,
-        rank: rRank,
-        customNick: r.nick,
-        handle: r.handle,
-        skinSpriteId: r.skin,
-        towerHeight: Math.max(6, 26 - slotIdx * 4),
-        lives: 0,
-        eliminationOrder: slotIdx,
-        pointsEarned: earned,
-        previousCupPoints: Math.max(0, medals.length - earned),
-        cupPoints: medals.length,
-        cupTargetPoints: targetPts,
-        totalVisualSlots: Math.max(8, targetPts, medals.length),
-        pointMedals: medals,
-        isCupWinner: false,
-        isLocalPlayer: false,
-      })
-    }
 
     return {
       isOnline: true,
