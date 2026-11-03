@@ -583,6 +583,7 @@ interface GrandeCopaScoreboardRow {
   rank: number
   customNick: string
   handle: string
+  avatarUrl: string
   skinSpriteId: string
   towerHeight: number
   lives: number
@@ -602,6 +603,7 @@ interface LocalCupParticipant {
   isLocalPlayer: boolean
   customNick: string
   handle: string
+  avatarUrl: string
   skinSpriteId: string
   rank: number
   towerHeight: number
@@ -614,9 +616,54 @@ interface LocalCupParticipant {
   isCupWinner: boolean
 }
 
+const brokenAvatarByKey = ref<Record<string, boolean>>({})
+
+function markAvatarBroken(key: string) {
+  brokenAvatarByKey.value = {
+    ...brokenAvatarByKey.value,
+    [key]: true,
+  }
+}
+
+function resolvePlayerAvatarUrl(
+  handle: string,
+  isLocalPlayer: boolean,
+  explicitUrl?: string
+): string {
+  if (explicitUrl && explicitUrl.trim()) {
+    return explicitUrl.trim()
+  }
+  if (isLocalPlayer && authStore.state.user?.avatarUrl) {
+    return authStore.state.user.avatarUrl
+  }
+  const norm = normalizePlayerHandle(handle)
+  if (norm) {
+    if (
+      normalizePlayerHandle(authStore.state.user?.handle) === norm &&
+      authStore.state.user?.avatarUrl
+    ) {
+      return authStore.state.user.avatarUrl
+    }
+    const roomSlot = multiplayerClient.state.room?.slots.find(
+      (s) => s && normalizePlayerHandle(s.handle) === norm && s.avatarUrl
+    )
+    if (roomSlot?.avatarUrl) return roomSlot.avatarUrl
+    const matchPlayer = multiplayerClient.state.activeMatch?.players.find(
+      (p) => normalizePlayerHandle(p.handle) === norm && p.avatarUrl
+    )
+    if (matchPlayer?.avatarUrl) return matchPlayer.avatarUrl
+    const friend = authStore.state.user?.friends?.find(
+      (f) => normalizePlayerHandle(f.handle) === norm && f.avatarUrl
+    )
+    if (friend?.avatarUrl) return friend.avatarUrl
+  }
+  return ''
+}
+
 const localCupState = ref<{
   roundNumber: number
   lastProcessedRound: number
+  lastProcessedState: 'NONE' | 'GAME_OVER' | 'VICTORY'
   isCupFinished: boolean
   cupWinnerNick: string
   roundWinnerNick: string
@@ -624,6 +671,7 @@ const localCupState = ref<{
 }>({
   roundNumber: 1,
   lastProcessedRound: 0,
+  lastProcessedState: 'NONE',
   isCupFinished: false,
   cupWinnerNick: '',
   roundWinnerNick: '',
@@ -636,6 +684,7 @@ function buildInitialLocalParticipants(): LocalCupParticipant[] {
     fallbackLobbySlots.value[0]?.customNick ||
     'Rick The Hank'
   const myHandle = authStore.state.user?.handle || '@voce'
+  const myAvatar = authStore.state.user?.avatarUrl || ''
   const mySkin = activePlayerSkinId.value || 'player_mage'
 
   return [
@@ -644,6 +693,7 @@ function buildInitialLocalParticipants(): LocalCupParticipant[] {
       isLocalPlayer: true,
       customNick: myNick,
       handle: myHandle,
+      avatarUrl: myAvatar,
       skinSpriteId: mySkin,
       rank: 1,
       towerHeight: 0,
@@ -662,6 +712,7 @@ function resetLocalCupState() {
   localCupState.value = {
     roundNumber: 1,
     lastProcessedRound: 0,
+    lastProcessedState: 'NONE',
     isCupFinished: false,
     cupWinnerNick: '',
     roundWinnerNick: '',
@@ -676,34 +727,59 @@ function recordLocalRoundResult(snap: TowerSnapshot) {
   ) {
     return
   }
-  if (
-    localCupState.value.participants.length === 0 ||
-    localCupState.value.isCupFinished
-  ) {
-    if (localCupState.value.participants.length === 0) {
-      resetLocalCupState()
-    }
+
+  const mpResult = multiplayerClient.state.gameOverResult
+  const myHandleNorm = normalizePlayerHandle(authStore.state.user?.handle)
+  const mpLocalWon = Boolean(
+    mpResult?.podium?.some(
+      (e) =>
+        (e.isWinner || (e.rank === 1 && !e.isEliminated)) &&
+        (!myHandleNorm ||
+          normalizePlayerHandle(e.handle) === myHandleNorm ||
+          (mpResult.podium?.length ?? 0) === 1)
+    )
+  )
+  const playerWon = snap.state === 'VICTORY' || mpLocalWon
+  const playerLost = snap.state === 'GAME_OVER' && !playerWon
+
+  if (!playerWon && !playerLost && !mpResult) {
+    return
   }
+
+  if (localCupState.value.participants.length === 0) {
+    resetLocalCupState()
+  }
+
+  const roundNum = localCupState.value.roundNumber
+  const alreadyProcessedThisRound =
+    localCupState.value.lastProcessedRound >= roundNum
+
+  // Se já processou esta rodada, só permite reprocessar caso tenha sido registrada como derrota
+  // antes da vitória (ex: telhado de castelo pousando ou teste de vitória no dev mode)
   if (
-    localCupState.value.lastProcessedRound >= localCupState.value.roundNumber
+    alreadyProcessedThisRound &&
+    (!playerWon || localCupState.value.lastProcessedState === 'VICTORY')
   ) {
     return
   }
 
   const targetPts = currentLobbyVictoryInfo.value.targetPoints || 6
-  const playerWon = snap.state === 'VICTORY'
-  const roundNum = localCupState.value.roundNumber
   const myNick =
     authStore.state.user?.customNick ||
     fallbackLobbySlots.value[0]?.customNick ||
     'Rick The Hank'
   const myHandle = authStore.state.user?.handle || '@voce'
+  const myAvatar = authStore.state.user?.avatarUrl || ''
   const mySkin = activePlayerSkinId.value || 'player_mage'
 
   for (const p of localCupState.value.participants) {
+    const basePrevPts = alreadyProcessedThisRound
+      ? p.previousCupPoints
+      : p.cupPoints
     if (p.isLocalPlayer) {
       p.customNick = myNick
       p.handle = myHandle
+      p.avatarUrl = myAvatar
       p.skinSpriteId = mySkin
       p.towerHeight = snap.towerHeight || snap.maxTowerHeight || 0
       p.lives = snap.lives
@@ -713,9 +789,10 @@ function recordLocalRoundResult(snap: TowerSnapshot) {
     const r = playerWon ? 1 : 4
     const earned = playerWon ? 3 : 0
     p.rank = r
-    p.previousCupPoints = p.cupPoints
+    p.previousCupPoints = basePrevPts
     p.pointsEarned = earned
-    p.cupPoints = p.previousCupPoints + earned
+    p.cupPoints = basePrevPts + earned
+    p.pointMedals = p.pointMedals.slice(0, basePrevPts)
     for (let i = 0; i < earned; i++) {
       p.pointMedals.push(1)
     }
@@ -743,6 +820,7 @@ function recordLocalRoundResult(snap: TowerSnapshot) {
   }
 
   localCupState.value.lastProcessedRound = roundNum
+  localCupState.value.lastProcessedState = playerWon ? 'VICTORY' : 'GAME_OVER'
 }
 
 function handleLocalNextCupRound() {
@@ -767,46 +845,63 @@ const grandeCopaScoreboard = computed<{
   rows: GrandeCopaScoreboardRow[]
 }>(() => {
   const mpResult = multiplayerClient.state.gameOverResult
-  const hasRealOpponents =
-    Object.keys(multiplayerClient.state.remoteLanes).length > 0 ||
-    (mpResult?.podium?.length ?? 0) > 1
+  const myHandle = normalizePlayerHandle(authStore.state.user?.handle)
 
-  if (mpResult && hasRealOpponents) {
+  if (mpResult && (mpResult.podium?.length ?? 0) > 0) {
     const vc = mpResult.victoryCondition || currentLobbyVictoryCondition.value
     const targetPts =
       mpResult.cupTargetPoints ||
       (vc === 'SINGLE_WIN' ? 3 : vc === 'CUP_12' ? 12 : 6)
     const roundNum = mpResult.roundNumber || 1
-    const myHandle = normalizePlayerHandle(authStore.state.user?.handle)
     const rows: GrandeCopaScoreboardRow[] = (mpResult.podium || []).map(
       (entry, idx) => {
-        const earned =
+        const isLocal =
+          (Boolean(myHandle) &&
+            normalizePlayerHandle(entry.handle) === myHandle) ||
+          (mpResult.podium?.length ?? 0) === 1
+        const isEntryWinner =
+          Boolean(entry.isWinner) ||
+          (!entry.isEliminated && entry.rank === 1) ||
+          (isLocal && snapshot.value.state === 'VICTORY')
+        const rawEarned =
           entry.pointsEarned ??
-          (entry.rank === 1
+          (entry.rank === 1 && !entry.isEliminated
             ? 3
-            : entry.rank === 2
+            : entry.rank === 2 && !entry.isEliminated
               ? 2
-              : entry.rank === 3
+              : entry.rank === 3 && !entry.isEliminated
                 ? 1
                 : 0)
-        const prevPts =
+        const earned = isEntryWinner ? Math.max(3, rawEarned) : rawEarned
+        const rawPrevPts =
           entry.previousCupPoints ??
           Math.max(0, (entry.cupPoints ?? earned) - earned)
-        const totalPts = entry.cupPoints ?? prevPts + earned
-        let medals = entry.pointMedals ? [...entry.pointMedals] : []
-        if (medals.length < totalPts) {
-          const fallbackMedal: 1 | 2 | 3 =
-            entry.rank === 1 ? 1 : entry.rank === 2 ? 2 : 3
-          while (medals.length < prevPts) medals.push(1)
-          while (medals.length < totalPts) medals.push(fallbackMedal)
-        }
+        const totalPts = Math.max(entry.cupPoints ?? 0, rawPrevPts + earned)
+        const prevPts =
+          earned > 0
+            ? Math.min(rawPrevPts, Math.max(0, totalPts - earned))
+            : rawPrevPts
+
+        const medals: Array<1 | 2 | 3> = entry.pointMedals
+          ? [...entry.pointMedals]
+          : []
+        const fallbackMedal: 1 | 2 | 3 =
+          isEntryWinner || entry.rank === 1 ? 1 : entry.rank === 2 ? 2 : 3
+        while (medals.length < prevPts) medals.push(1)
+        while (medals.length < totalPts) medals.push(fallbackMedal)
+
         const rowTarget = entry.cupTargetPoints || targetPts
         return {
           key: entry.handle || entry.userId || `mp-${idx}`,
           slotIndex: entry.slotIndex ?? idx,
-          rank: entry.rank || idx + 1,
+          rank: isEntryWinner ? 1 : entry.rank || idx + 1,
           customNick: entry.customNick || entry.handle || `Jogador ${idx + 1}`,
           handle: entry.handle || '',
+          avatarUrl: resolvePlayerAvatarUrl(
+            entry.handle || '',
+            isLocal,
+            entry.avatarUrl
+          ),
           skinSpriteId: dbSkinToSpriteId(entry.equippedSkin),
           towerHeight: entry.towerHeight ?? 0,
           lives: entry.lives ?? 0,
@@ -818,9 +913,7 @@ const grandeCopaScoreboard = computed<{
           totalVisualSlots: Math.max(8, rowTarget, medals.length),
           pointMedals: medals,
           isCupWinner: Boolean(entry.isCupWinner),
-          isLocalPlayer:
-            Boolean(myHandle) &&
-            normalizePlayerHandle(entry.handle) === myHandle,
+          isLocalPlayer: isLocal,
         }
       }
     )
@@ -844,11 +937,67 @@ const grandeCopaScoreboard = computed<{
     }
   }
 
+  // Caso esteja em partida Multiplayer Online com outros jogadores e a vitória local
+  // tenha disparado alguns milissegundos antes do pacote match:game_over chegar do servidor:
+  if (
+    isOnlineMultiplayerMatch.value &&
+    Object.keys(multiplayerClient.state.remoteLanes).length > 0 &&
+    (snapshot.value.state === 'VICTORY' || snapshot.value.state === 'GAME_OVER')
+  ) {
+    const vc = currentLobbyVictoryCondition.value
+    const targetPts = currentLobbyVictoryInfo.value.targetPoints || 6
+    const activePlayers = multiplayerClient.state.activeMatch?.players || []
+    if (activePlayers.length > 0) {
+      const localWon = snapshot.value.state === 'VICTORY'
+      const rows: GrandeCopaScoreboardRow[] = activePlayers.map((p, idx) => {
+        const isLocal =
+          Boolean(myHandle) && normalizePlayerHandle(p.handle) === myHandle
+        const prevPts = p.cupPoints ?? 0
+        const earned = isLocal && localWon ? 3 : 0
+        const totalPts = prevPts + earned
+        const medals: Array<1 | 2 | 3> = []
+        while (medals.length < prevPts) medals.push(1)
+        while (medals.length < totalPts) medals.push(1)
+        return {
+          key: p.handle || `mp-${idx}`,
+          slotIndex: p.slotIndex ?? idx,
+          rank: isLocal && localWon ? 1 : idx + 2,
+          customNick: p.customNick || p.handle || `Jogador ${idx + 1}`,
+          handle: p.handle || '',
+          avatarUrl: resolvePlayerAvatarUrl(p.handle || '', isLocal, p.avatarUrl),
+          skinSpriteId: dbSkinToSpriteId(p.equippedSkin),
+          towerHeight: isLocal ? snapshot.value.towerHeight : 0,
+          lives: isLocal ? snapshot.value.lives : 0,
+          eliminationOrder: 0,
+          pointsEarned: earned,
+          previousCupPoints: prevPts,
+          cupPoints: totalPts,
+          cupTargetPoints: targetPts,
+          totalVisualSlots: Math.max(8, targetPts, medals.length),
+          pointMedals: medals,
+          isCupWinner: totalPts >= targetPts,
+          isLocalPlayer: isLocal,
+        }
+      })
+      return {
+        isOnline: true,
+        roundNumber: multiplayerClient.state.activeMatch?.roundNumber || 1,
+        isCupFinished: rows.some((r) => r.isCupWinner),
+        victoryCondition: vc,
+        cupTargetPoints: targetPts,
+        cupTitle: 'GRANDE COPA',
+        winnerNick: rows[0]?.customNick || 'VOCÊ',
+        roundWinnerNick: rows[0]?.customNick || 'VOCÊ',
+        gameMode: snapshot.value.gameMode,
+        rows,
+      }
+    }
+  }
+
   // Local / Solo Cup Scoreboard
   if (
     snapshot.value.state === 'VICTORY' ||
-    snapshot.value.state === 'GAME_OVER' ||
-    mpResult !== null
+    snapshot.value.state === 'GAME_OVER'
   ) {
     recordLocalRoundResult(snapshot.value)
   }
@@ -860,25 +1009,42 @@ const grandeCopaScoreboard = computed<{
       ? localCupState.value.participants
       : buildInitialLocalParticipants()
 
-  const rows: GrandeCopaScoreboardRow[] = participants.map((p) => ({
-    key: p.handle || `local-${p.slotIndex}`,
-    slotIndex: p.slotIndex,
-    rank: p.rank,
-    customNick: p.customNick,
-    handle: p.handle,
-    skinSpriteId: p.skinSpriteId,
-    towerHeight: p.towerHeight,
-    lives: p.lives,
-    eliminationOrder: p.eliminationOrder,
-    pointsEarned: p.pointsEarned,
-    previousCupPoints: p.previousCupPoints,
-    cupPoints: p.cupPoints,
-    cupTargetPoints: targetPts,
-    totalVisualSlots: Math.max(8, targetPts, p.pointMedals.length),
-    pointMedals: [...p.pointMedals],
-    isCupWinner: p.isCupWinner,
-    isLocalPlayer: p.isLocalPlayer,
-  }))
+  const localWonNow = snapshot.value.state === 'VICTORY'
+  const rows: GrandeCopaScoreboardRow[] = participants.map((p) => {
+    const forceWinMedals = p.isLocalPlayer && localWonNow && p.pointsEarned < 3
+    const earned = forceWinMedals ? 3 : p.pointsEarned
+    const prevPts = forceWinMedals ? p.previousCupPoints : p.previousCupPoints
+    const totalPts = forceWinMedals ? prevPts + 3 : p.cupPoints
+    const medals: Array<1 | 2 | 3> = [...p.pointMedals]
+    if (forceWinMedals || medals.length < totalPts) {
+      while (medals.length < prevPts) medals.push(1)
+      while (medals.length < totalPts) medals.push(1)
+    }
+    return {
+      key: p.handle || `local-${p.slotIndex}`,
+      slotIndex: p.slotIndex,
+      rank: forceWinMedals ? 1 : p.rank,
+      customNick: p.customNick,
+      handle: p.handle,
+      avatarUrl: resolvePlayerAvatarUrl(
+        p.handle,
+        p.isLocalPlayer,
+        p.avatarUrl
+      ),
+      skinSpriteId: p.skinSpriteId,
+      towerHeight: p.towerHeight,
+      lives: p.lives,
+      eliminationOrder: p.eliminationOrder,
+      pointsEarned: earned,
+      previousCupPoints: prevPts,
+      cupPoints: totalPts,
+      cupTargetPoints: targetPts,
+      totalVisualSlots: Math.max(8, targetPts, medals.length),
+      pointMedals: medals,
+      isCupWinner: p.isCupWinner || totalPts >= targetPts,
+      isLocalPlayer: p.isLocalPlayer,
+    }
+  })
 
   return {
     isOnline: isOnlineMultiplayerMatch.value,
@@ -904,11 +1070,7 @@ function handleNextCupRound() {
 }
 
 function handleGrandeCopaContinue() {
-  const hasRealOpponents =
-    Object.keys(multiplayerClient.state.remoteLanes).length > 0 ||
-    (multiplayerClient.state.gameOverResult?.podium?.length ?? 0) > 1
-
-  if (isOnlineMultiplayerMatch.value && hasRealOpponents) {
+  if (isOnlineMultiplayerMatch.value && multiplayerClient.state.room) {
     if (!grandeCopaScoreboard.value.isCupFinished) {
       handleNextCupRound()
     } else {
@@ -2218,6 +2380,28 @@ function restartMatch(
   } else if (isSoloOrOffline && selectedGameMode.value !== 'RANDOM') {
     activeMatchGameMode.value = selectedGameMode.value
     towerInstance.setGameMode(selectedGameMode.value)
+  }
+
+  if (isSoloOrOffline) {
+    multiplayerClient.state.gameOverResult = null
+    if (
+      localCupState.value.lastProcessedRound >=
+      localCupState.value.roundNumber
+    ) {
+      for (const p of localCupState.value.participants) {
+        p.cupPoints = p.previousCupPoints
+        p.pointsEarned = 0
+        p.pointMedals = p.pointMedals.slice(0, p.previousCupPoints)
+        p.isCupWinner = false
+      }
+      localCupState.value.isCupFinished = false
+      localCupState.value.cupWinnerNick = ''
+      localCupState.value.lastProcessedRound = Math.max(
+        0,
+        localCupState.value.roundNumber - 1
+      )
+      localCupState.value.lastProcessedState = 'NONE'
+    }
   }
 
   localPlayerLives.value = GAME_CONSTANTS.SURVIVAL_INITIAL_LIVES
@@ -5453,7 +5637,7 @@ onUnmounted(() => {
               <!-- LISTA DE 4 JOGADORES COM SUAS CARTELAS E MEDALHAS -->
               <div class="grande-copa-rows-list">
                 <div
-                  v-for="(row, rowIdx) in grandeCopaScoreboard.rows"
+                  v-for="row in grandeCopaScoreboard.rows"
                   :key="row.key"
                   class="grande-copa-player-block"
                 >
@@ -5466,389 +5650,41 @@ onUnmounted(() => {
 
                   <!-- BARRA HORIZONTAL AZUL-CLARO LEGO (CARTELA DO JOGADOR) -->
                   <div class="grande-copa-track-bar">
-                    <!-- Compartimento Esquerdo: Foto Quadrada + Ícone Redondo do Personagem -->
+                    <!-- Compartimento Esquerdo: Foto Google/Conta Quadrada + Ícone Redondo do Personagem -->
                     <div class="grande-copa-avatar-compartment">
-                      <!-- 1. Foto Quadrada do Jogador -->
+                      <!-- 1. Foto Quadrada do Google / Conta do Jogador -->
                       <div class="grande-copa-portrait-square">
-                        <!-- Slot 0 / Pirata -->
-                        <svg
-                          v-if="rowIdx % 4 === 0"
-                          viewBox="0 0 64 64"
-                          class="grande-copa-avatar-svg"
-                        >
-                          <rect width="64" height="64" fill="#74b0e3" />
-                          <!-- Chapéu Pirata -->
-                          <path
-                            d="M 8 28 C 12 10, 52 10, 56 28 Z"
-                            fill="#2b2d42"
-                            stroke="#181425"
-                            stroke-width="3"
-                          />
-                          <rect
-                            x="12"
-                            y="24"
-                            width="40"
-                            height="6"
-                            rx="2"
-                            fill="#c1121f"
-                            stroke="#181425"
-                            stroke-width="2.5"
-                          />
-                          <!-- Caveirinha no chapéu -->
-                          <circle cx="32" cy="18" r="4.5" fill="#ffffff" />
-                          <!-- Rosto e Barba Ruiva -->
-                          <circle
-                            cx="32"
-                            cy="38"
-                            r="14"
-                            fill="#f8cfa9"
-                            stroke="#181425"
-                            stroke-width="2.8"
-                          />
-                          <!-- Tapa-olho -->
-                          <path
-                            d="M 19 32 L 45 36"
-                            stroke="#181425"
-                            stroke-width="2.5"
-                          />
-                          <circle cx="26" cy="35" r="4.2" fill="#181425" />
-                          <circle cx="38" cy="36" r="2.3" fill="#181425" />
-                          <!-- Barba -->
-                          <path
-                            d="M 16 40 C 14 56, 50 56, 48 40 C 42 44, 22 44, 16 40 Z"
-                            fill="#a84320"
-                            stroke="#181425"
-                            stroke-width="2.8"
-                          />
-                          <path
-                            d="M 28 45 Q 32 48 36 45"
-                            fill="none"
-                            stroke="#ffffff"
-                            stroke-width="2.5"
-                            stroke-linecap="round"
-                          />
-                        </svg>
-
-                        <!-- Slot 1 / Heitir (Máscara Branca) -->
-                        <svg
-                          v-else-if="rowIdx % 4 === 1"
-                          viewBox="0 0 64 64"
-                          class="grande-copa-avatar-svg"
-                        >
-                          <rect width="64" height="64" fill="#4ea8de" />
-                          <path d="M 0 0 L 28 0 L 14 64 L 0 64 Z" fill="#e63946" />
-                          <!-- Casaco Escuro -->
-                          <path
-                            d="M 10 64 C 12 46, 52 46, 54 64 Z"
-                            fill="#1d1e2c"
-                            stroke="#181425"
-                            stroke-width="3"
-                          />
-                          <!-- Cabeça / Máscara Branca -->
-                          <ellipse
-                            cx="34"
-                            cy="30"
-                            rx="14"
-                            ry="16"
-                            fill="#ffffff"
-                            stroke="#181425"
-                            stroke-width="3"
-                          />
-                          <path
-                            d="M 25 27 L 31 29 M 37 29 L 43 27"
-                            stroke="#181425"
-                            stroke-width="3"
-                            stroke-linecap="round"
-                          />
-                          <path
-                            d="M 27 37 Q 34 41 41 37"
-                            fill="none"
-                            stroke="#181425"
-                            stroke-width="2.5"
-                          />
-                        </svg>
-
-                        <!-- Slot 2 / RaFiTa (Bloco Pixel P&B Inclinado) -->
-                        <svg
-                          v-else-if="rowIdx % 4 === 2"
-                          viewBox="0 0 64 64"
-                          class="grande-copa-avatar-svg"
-                        >
-                          <rect width="64" height="64" fill="#212529" />
-                          <g transform="rotate(26 32 34)">
-                            <rect
-                              x="12"
-                              y="14"
-                              width="40"
-                              height="40"
-                              rx="3"
-                              fill="#f8f9fa"
-                              stroke="#181425"
-                              stroke-width="3.5"
-                            />
-                            <rect
-                              x="18"
-                              y="24"
-                              width="9"
-                              height="6"
-                              fill="#181425"
-                            />
-                            <rect
-                              x="35"
-                              y="24"
-                              width="9"
-                              height="6"
-                              fill="#181425"
-                            />
-                            <rect
-                              x="26"
-                              y="36"
-                              width="10"
-                              height="5"
-                              fill="#181425"
-                            />
-                          </g>
-                        </svg>
-
-                        <!-- Slot 3 / Ratto (Lobo/Cachorro Escuro no Fundo Menta) -->
-                        <svg
+                        <img
+                          v-if="row.avatarUrl && !brokenAvatarByKey[row.key]"
+                          :src="row.avatarUrl"
+                          :alt="row.customNick"
+                          class="grande-copa-google-avatar-img"
+                          referrerpolicy="no-referrer"
+                          draggable="false"
+                          @error="markAvatarBroken(row.key)"
+                        />
+                        <div
                           v-else
-                          viewBox="0 0 64 64"
-                          class="grande-copa-avatar-svg"
+                          class="grande-copa-google-avatar-fallback"
+                          aria-hidden="true"
                         >
-                          <rect width="64" height="64" fill="#63e6be" />
-                          <!-- Orelhas -->
-                          <path
-                            d="M 16 26 L 14 10 L 28 18 Z"
-                            fill="#343a40"
-                            stroke="#181425"
-                            stroke-width="2.8"
-                          />
-                          <path
-                            d="M 48 26 L 50 10 L 36 18 Z"
-                            fill="#343a40"
-                            stroke="#181425"
-                            stroke-width="2.8"
-                          />
-                          <!-- Cabeça -->
-                          <circle
-                            cx="32"
-                            cy="34"
-                            r="16"
-                            fill="#343a40"
-                            stroke="#181425"
-                            stroke-width="3"
-                          />
-                          <!-- Focinho Claro -->
-                          <ellipse cx="32" cy="40" rx="11" ry="8" fill="#f1faee" />
-                          <!-- Bigode -->
-                          <path
-                            d="M 22 40 Q 32 35 42 40"
-                            fill="none"
-                            stroke="#181425"
-                            stroke-width="3"
-                            stroke-linecap="round"
-                          />
-                          <!-- Olhos -->
-                          <circle cx="25" cy="30" r="2.5" fill="#ffffff" />
-                          <circle cx="39" cy="30" r="2.5" fill="#ffffff" />
-                        </svg>
+                          <span>
+                            {{
+                              (row.customNick || 'J').charAt(0).toUpperCase()
+                            }}
+                          </span>
+                        </div>
                       </div>
 
-                      <!-- 2. Medalhão Circular da Cabeça do Personagem -->
+                      <!-- 2. Medalhão Circular do Personagem Equipado -->
                       <div class="grande-copa-character-circle">
-                        <!-- Cabeça Pirata (Fundo Amarelo) -->
-                        <svg
-                          v-if="rowIdx % 4 === 0"
-                          viewBox="0 0 64 64"
-                          class="grande-copa-avatar-svg"
-                        >
-                          <circle cx="32" cy="32" r="30" fill="#ffd43b" />
-                          <path
-                            d="M 10 27 C 14 10, 50 10, 54 27 Z"
-                            fill="#2b2d42"
-                            stroke="#181425"
-                            stroke-width="3"
-                          />
-                          <rect
-                            x="14"
-                            y="24"
-                            width="36"
-                            height="5"
-                            rx="2"
-                            fill="#c1121f"
-                            stroke="#181425"
-                            stroke-width="2.4"
-                          />
-                          <circle cx="32" cy="18" r="4" fill="#ffffff" />
-                          <circle
-                            cx="32"
-                            cy="37"
-                            r="13"
-                            fill="#f8cfa9"
-                            stroke="#181425"
-                            stroke-width="2.8"
-                          />
-                          <path
-                            d="M 20 32 L 44 35"
-                            stroke="#181425"
-                            stroke-width="2.4"
-                          />
-                          <circle cx="26" cy="34" r="3.8" fill="#181425" />
-                          <circle cx="38" cy="35" r="2.2" fill="#181425" />
-                          <path
-                            d="M 17 39 C 16 55, 48 55, 47 39 C 41 43, 23 43, 17 39 Z"
-                            fill="#a84320"
-                            stroke="#181425"
-                            stroke-width="2.8"
-                          />
-                        </svg>
-
-                        <!-- Cabeça Dino Verde -->
-                        <svg
-                          v-else-if="rowIdx % 4 === 1"
-                          viewBox="0 0 64 64"
-                          class="grande-copa-avatar-svg"
-                        >
-                          <circle cx="32" cy="32" r="30" fill="#74c69d" />
-                          <!-- Chifres Amarelos -->
-                          <path
-                            d="M 18 18 L 22 10 L 26 18 Z"
-                            fill="#ffd43b"
-                            stroke="#181425"
-                            stroke-width="2.5"
-                          />
-                          <path
-                            d="M 28 16 L 32 8 L 36 16 Z"
-                            fill="#ffd43b"
-                            stroke="#181425"
-                            stroke-width="2.5"
-                          />
-                          <!-- Cabeça Dino -->
-                          <ellipse
-                            cx="33"
-                            cy="35"
-                            rx="18"
-                            ry="16"
-                            fill="#40c057"
-                            stroke="#181425"
-                            stroke-width="3"
-                          />
-                          <circle cx="39" cy="28" r="2.6" fill="#181425" />
-                          <!-- Boca Sorridente com Dentes -->
-                          <path
-                            d="M 25 38 C 28 48, 46 48, 48 38 Z"
-                            fill="#f06595"
-                            stroke="#181425"
-                            stroke-width="2.6"
-                          />
-                          <path
-                            d="M 28 38 L 31 42 L 34 38 L 37 42 L 40 38 L 43 42 L 46 38"
-                            fill="#ffffff"
-                            stroke="#181425"
-                            stroke-width="1.8"
-                          />
-                        </svg>
-
-                        <!-- Cabeça Robô Cinza -->
-                        <svg
-                          v-else-if="rowIdx % 4 === 2"
-                          viewBox="0 0 64 64"
-                          class="grande-copa-avatar-svg"
-                        >
-                          <circle cx="32" cy="32" r="30" fill="#74b0e3" />
-                          <!-- Antena -->
-                          <line
-                            x1="32"
-                            y1="10"
-                            x2="32"
-                            y2="19"
-                            stroke="#181425"
-                            stroke-width="3"
-                          />
-                          <circle
-                            cx="32"
-                            cy="10"
-                            r="3.5"
-                            fill="#adb5bd"
-                            stroke="#181425"
-                            stroke-width="2.5"
-                          />
-                          <!-- Cabeça Metálica -->
-                          <rect
-                            x="15"
-                            y="19"
-                            width="34"
-                            height="28"
-                            rx="8"
-                            fill="#ced4da"
-                            stroke="#181425"
-                            stroke-width="3"
-                          />
-                          <circle
-                            cx="25"
-                            cy="31"
-                            r="4"
-                            fill="#ffffff"
-                            stroke="#181425"
-                            stroke-width="2.5"
-                          />
-                          <circle
-                            cx="39"
-                            cy="31"
-                            r="4"
-                            fill="#ffffff"
-                            stroke="#181425"
-                            stroke-width="2.5"
-                          />
-                          <rect
-                            x="23"
-                            y="39"
-                            width="18"
-                            height="4"
-                            rx="2"
-                            fill="#495057"
-                            stroke="#181425"
-                            stroke-width="2"
-                          />
-                        </svg>
-
-                        <!-- Cabeça Corvo / Mago Roxo -->
-                        <svg
-                          v-else
-                          viewBox="0 0 64 64"
-                          class="grande-copa-avatar-svg"
-                        >
-                          <circle cx="32" cy="32" r="30" fill="#9bc5ec" />
-                          <!-- Capuz Roxo -->
-                          <circle
-                            cx="30"
-                            cy="34"
-                            r="17"
-                            fill="#862e9c"
-                            stroke="#181425"
-                            stroke-width="3"
-                          />
-                          <!-- Rosto Claro -->
-                          <ellipse
-                            cx="33"
-                            cy="34"
-                            rx="10"
-                            ry="11"
-                            fill="#ffe3e3"
-                            stroke="#181425"
-                            stroke-width="2.5"
-                          />
-                          <circle cx="34" cy="30" r="2.4" fill="#181425" />
-                          <!-- Bico Rosa/Roxo -->
-                          <path
-                            d="M 38 30 L 55 36 L 38 41 Z"
-                            fill="#f06595"
-                            stroke="#181425"
-                            stroke-width="2.8"
-                            stroke-linejoin="round"
-                          />
-                        </svg>
+                        <img
+                          v-if="getSkinSpriteUrl(row.skinSpriteId)"
+                          :src="getSkinSpriteUrl(row.skinSpriteId)"
+                          :alt="row.customNick"
+                          class="grande-copa-skin-circle-img"
+                          draggable="false"
+                        />
                       </div>
                     </div>
 
@@ -5880,6 +5716,20 @@ onUnmounted(() => {
                                 slotIdx > row.previousCupPoints,
                             },
                           ]"
+                          :style="
+                            slotIdx > row.previousCupPoints
+                              ? {
+                                  animationDelay: `${
+                                    Math.max(
+                                      0,
+                                      slotIdx - row.previousCupPoints - 1
+                                    ) *
+                                      230 +
+                                    160
+                                  }ms`,
+                                }
+                              : undefined
+                          "
                         >
                           <svg
                             viewBox="0 0 68 78"

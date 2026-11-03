@@ -6156,8 +6156,31 @@ kbd {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #3b4252;
+  background: #4ea8de;
   flex-shrink: 0;
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.35);
+}
+
+.grande-copa-google-avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.grande-copa-google-avatar-fallback {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #339af0 0%, #1971c2 100%);
+  color: #ffffff;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-weight: 900;
+  font-size: 24px;
+  -webkit-text-stroke: 2.5px #181425;
+  paint-order: stroke fill;
 }
 
 .grande-copa-character-circle {
@@ -6169,7 +6192,17 @@ kbd {
   display: flex;
   align-items: center;
   justify-content: center;
+  background: radial-gradient(circle at 35% 30%, #ffe066 0%, #fcc419 100%);
   flex-shrink: 0;
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.45);
+}
+
+.grande-copa-skin-circle-img {
+  width: 92%;
+  height: 92%;
+  object-fit: contain;
+  display: block;
+  filter: drop-shadow(0 2px 0 rgba(24, 20, 37, 0.4));
 }
 
 .grande-copa-avatar-svg {
@@ -6220,6 +6253,7 @@ kbd {
 
 /* Medalha Roseta Ondulada com Fitas (1 = Ouro, 2 = Prata/Roxo, 3 = Bronze) */
 .grande-copa-medal-wrap {
+  position: relative;
   width: 54px;
   height: 64px;
   margin-top: 6px;
@@ -6231,21 +6265,57 @@ kbd {
 }
 
 .grande-copa-medal-wrap--earned-now {
-  animation: grandeCopaMedalPop 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  animation: grandeCopaMedalPop 0.65s cubic-bezier(0.22, 1.45, 0.36, 1) both;
+}
+
+.grande-copa-medal-wrap--earned-now::after {
+  content: '';
+  position: absolute;
+  width: 48px;
+  height: 48px;
+  top: 4px;
+  border-radius: 50%;
+  border: 3px solid #ffe066;
+  pointer-events: none;
+  opacity: 0;
+  animation: grandeCopaMedalBurst 0.65s ease-out both;
+  animation-delay: inherit;
 }
 
 @keyframes grandeCopaMedalPop {
   0% {
     opacity: 0;
-    transform: scale(0.25) rotate(-14deg);
+    transform: translateY(-28px) scale(0.15) rotate(-22deg);
+    filter: brightness(1.85) drop-shadow(0 0 18px rgba(255, 224, 102, 0.95));
   }
-  70% {
+  58% {
     opacity: 1;
-    transform: scale(1.14) rotate(3deg);
+    transform: translateY(3px) scale(1.28) rotate(6deg);
+    filter: brightness(1.3) drop-shadow(0 0 14px rgba(255, 212, 59, 0.85));
+  }
+  80% {
+    opacity: 1;
+    transform: translateY(-2px) scale(0.93) rotate(-3deg);
   }
   100% {
     opacity: 1;
-    transform: scale(1) rotate(0deg);
+    transform: translateY(0) scale(1) rotate(0deg);
+    filter: drop-shadow(0 2px 2px rgba(0, 0, 0, 0.25));
+  }
+}
+
+@keyframes grandeCopaMedalBurst {
+  0% {
+    opacity: 0;
+    transform: scale(0.35);
+  }
+  35% {
+    opacity: 0.95;
+    transform: scale(0.9);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.75);
   }
 }
 

@@ -135,6 +135,7 @@ export interface MatchGameOverPodiumEntry {
   handle: string
   customNick: string
   equippedSkin: string
+  avatarUrl?: string
   slotIndex: number
   towerHeight: number
   lives: number

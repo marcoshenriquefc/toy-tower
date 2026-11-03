@@ -668,6 +668,7 @@ async function concludeMultiplayerRound(
   const isSoloEliminated =
     soloEliminated ||
     (presentPlayers.length === 1 &&
+      room.activeGameMode === 'SURVIVAL' &&
       ((winnerState?.lives ?? 3) <= 0 || Boolean(winnerState?.isEliminated)))
 
   const podium = sorted.map((p, idx) => {
@@ -688,6 +689,7 @@ async function concludeMultiplayerRound(
       handle: p.handle,
       customNick: p.customNick,
       equippedSkin: p.equippedSkin,
+      avatarUrl: p.avatarUrl || '',
       slotIndex: p.slotIndex,
       towerHeight: st?.towerHeight ?? 0,
       lives: st?.lives ?? 3,

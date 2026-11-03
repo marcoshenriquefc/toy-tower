@@ -104,9 +104,11 @@ export interface MatchLaneSyncPayload {
 
 export interface PodiumEntryDTO {
   rank: number // 1..4
+  slotIndex?: number
   handle: string
   customNick: string
   equippedSkin: string
+  avatarUrl?: string
   towerHeight: number
   lives: number
   eliminationOrder?: number
@@ -444,9 +446,11 @@ async function concludeMultiplayerRound(
     s.lastPointsEarned = pointsEarned
     return {
       rank: effectiveRank,
+      slotIndex: s.slotIndex,
       handle: s.handle!,
       customNick: s.customNick,
       equippedSkin: s.equippedSkin,
+      avatarUrl: s.avatarUrl || '',
       towerHeight: Number(s.lastTowerHeight.toFixed(1)),
       lives: s.lastLives,
       eliminationOrder: s.eliminationOrder,
@@ -1709,6 +1713,8 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
         if (typeof payload?.towerHeight === 'number') {
           mySlot.lastTowerHeight = payload.towerHeight
         }
+        mySlot.lastLives = Math.max(1, mySlot.lastLives)
+        mySlot.eliminationOrder = 0
 
         await concludeMultiplayerRound(
           room,
