@@ -6,7 +6,15 @@ import {
   FriendRequestEntry,
   UserAccount,
 } from './authStore'
-import { ActivePieceSnapshot, SettledBlockSnapshot } from '../types/game'
+import {
+  ActivePieceSnapshot,
+  FloatingIslandSnapshot,
+  GAME_CONSTANTS,
+  GameMode,
+  SelectableGameMode,
+  SettledBlockSnapshot,
+  VictoryCondition,
+} from '../types/game'
 import { PowerId } from '../game/PowersCatalog'
 
 export interface RoomSlotPlayerDTO {
@@ -19,6 +27,8 @@ export interface RoomSlotPlayerDTO {
   isHost: boolean
   isReady: boolean
   slotIndex: number // 0, 1, 2, 3
+  cupPoints?: number
+  lastPointsEarned?: number
 }
 
 export interface RoomStateDTO {
@@ -27,6 +37,11 @@ export interface RoomStateDTO {
   status: 'LOBBY' | 'COUNTDOWN' | 'PLAYING' | 'FINISHED'
   countdownSeconds: number | null
   pieceSeed: string | null
+  selectedGameMode?: SelectableGameMode
+  activeGameMode?: GameMode
+  victoryCondition?: VictoryCondition
+  cupTargetPoints?: number
+  roundNumber?: number
   slots: Array<RoomSlotPlayerDTO | null>
 }
 
@@ -50,6 +65,10 @@ export interface MatchPlayerRealtimeState {
   lives: number
   mana: number
   activeDebuffs: string[]
+  blindManualRemainingMs?: number
+  fogAnchorX?: number
+  fogAnchorY?: number
+  islands?: FloatingIslandSnapshot[]
   isEliminated: boolean
   updatedAt: number
 }
@@ -59,6 +78,8 @@ export interface RemoteLaneInterpolatedState extends MatchPlayerRealtimeState {
   renderActivePiece: ActivePieceSnapshot | null
   /** Smoothly interpolated settled blocks for 60fps canvas rendering */
   renderSettledBlocks: SettledBlockSnapshot[]
+  /** Remaining duration of BLIND_MANUAL ("Nuvem Fog") on this opponent's tower */
+  blindManualRemainingMs: number
   /** Recent piece settled flash timestamp */
   lastPieceSettledAtMs: number
   /** Recent life lost flash timestamp */
@@ -83,6 +104,11 @@ export interface SynchronizedPowerVfx {
 export interface MatchStartPayload {
   roomId: string
   pieceSeed: string
+  gameMode?: GameMode
+  selectedGameMode?: SelectableGameMode
+  victoryCondition?: VictoryCondition
+  cupTargetPoints?: number
+  roundNumber?: number
   startedAt: string
   players: Array<{
     handle: string
@@ -90,6 +116,8 @@ export interface MatchStartPayload {
     equippedSkin: string
     slotIndex: number
     isHost: boolean
+    cupPoints?: number
+    lastPointsEarned?: number
   }>
 }
 
@@ -102,12 +130,26 @@ export interface MatchGameOverPodiumEntry {
   slotIndex: number
   towerHeight: number
   lives: number
+  pointsEarned?: number
+  previousCupPoints?: number
+  cupPoints?: number
+  cupTargetPoints?: number
   isEliminated: boolean
   isWinner: boolean
+  isCupWinner?: boolean
 }
 
 export interface MatchGameOverPayload {
   roomId: string
+  gameMode?: GameMode
+  selectedGameMode?: SelectableGameMode
+  victoryCondition?: VictoryCondition
+  cupTargetPoints?: number
+  roundNumber?: number
+  isCupFinished?: boolean
+  roundWinnerHandle?: string
+  roundWinnerNick?: string
+  roundWinnerSkin?: string
   winnerId: string
   winnerHandle: string
   winnerNick: string
@@ -412,6 +454,10 @@ function connect(): void {
         lives: 3,
         mana: 0,
         activeDebuffs: [],
+        blindManualRemainingMs: 0,
+        fogAnchorX: 0,
+        fogAnchorY: -1.2 * GAME_CONSTANTS.UNIT_PX,
+        islands: [],
         isEliminated: false,
         updatedAt: performance.now(),
         lastPieceSettledAtMs: 0,
@@ -437,6 +483,9 @@ function connect(): void {
 
       const existing = state.remoteLanes[h]
       if (!existing) {
+        const hasBlind =
+          (remoteState.blindManualRemainingMs ?? 0) > 0 ||
+          (remoteState.activeDebuffs || []).includes('BLIND_MANUAL')
         state.remoteLanes[h] = {
           ...remoteState,
           handle: h,
@@ -446,6 +495,14 @@ function connect(): void {
           renderSettledBlocks: (remoteState.settledBlocks || []).map((b) => ({
             ...b,
           })),
+          blindManualRemainingMs:
+            remoteState.blindManualRemainingMs ?? (hasBlind ? 20000 : 0),
+          fogAnchorX: remoteState.fogAnchorX ?? 0,
+          fogAnchorY:
+            remoteState.fogAnchorY ??
+            -Math.max(1.2, remoteState.towerHeight || 0) *
+              GAME_CONSTANTS.UNIT_PX,
+          islands: remoteState.islands || [],
           lastPieceSettledAtMs: 0,
           lastLifeLostAtMs: 0,
           mascotCastAnimMs: 0,
@@ -460,11 +517,51 @@ function connect(): void {
       existing.activePiece = remoteState.activePiece
       existing.settledBlocks = remoteState.settledBlocks || []
       existing.towerHeight = remoteState.towerHeight
+      if (
+        typeof remoteState.lives === 'number' &&
+        remoteState.lives < existing.lives &&
+        performance.now() - existing.lastLifeLostAtMs > 500
+      ) {
+        existing.lastLifeLostAtMs = performance.now()
+      }
       existing.lives = remoteState.lives
       existing.mana = remoteState.mana
-      existing.activeDebuffs = remoteState.activeDebuffs || []
       existing.isEliminated = remoteState.isEliminated
       existing.updatedAt = performance.now()
+      if (remoteState.islands) {
+        existing.islands = remoteState.islands
+      }
+      if (typeof remoteState.fogAnchorX === 'number') {
+        existing.fogAnchorX = remoteState.fogAnchorX
+      }
+      if (typeof remoteState.fogAnchorY === 'number') {
+        existing.fogAnchorY = remoteState.fogAnchorY
+      }
+
+      const incomingDebuffs = remoteState.activeDebuffs || []
+      const incomingBlindMs = remoteState.blindManualRemainingMs ?? 0
+      if (incomingBlindMs > 0) {
+        existing.blindManualRemainingMs = incomingBlindMs
+      } else if (incomingDebuffs.includes('BLIND_MANUAL')) {
+        if (existing.blindManualRemainingMs <= 0) {
+          existing.blindManualRemainingMs = 20000
+          existing.fogAnchorY =
+            -Math.max(1.2, remoteState.towerHeight || 0) *
+            GAME_CONSTANTS.UNIT_PX
+        }
+      } else if (existing.blindManualRemainingMs < 18000) {
+        // Only clear if not freshly triggered within the last 2s (avoids in-flight packet flicker)
+        existing.blindManualRemainingMs = 0
+      }
+
+      if (
+        existing.blindManualRemainingMs > 0 &&
+        !incomingDebuffs.includes('BLIND_MANUAL')
+      ) {
+        existing.activeDebuffs = [...incomingDebuffs, 'BLIND_MANUAL']
+      } else {
+        existing.activeDebuffs = incomingDebuffs
+      }
 
       if (!remoteState.activePiece) {
         existing.renderActivePiece = null
@@ -497,9 +594,12 @@ function connect(): void {
       const h = normalizeHandle(payload.handle)
       const lane = state.remoteLanes[h]
       if (lane) {
+        const lostLife = payload.lives < lane.lives
         lane.lives = payload.lives
         lane.isEliminated = payload.isEliminated
-        lane.lastLifeLostAtMs = performance.now()
+        if (lostLife) {
+          lane.lastLifeLostAtMs = performance.now()
+        }
       }
     }
   )
@@ -516,6 +616,9 @@ function connect(): void {
     }) => {
       const now = performance.now()
       const powerType = payload.powerType as PowerId
+      const targetHandles = (payload.targetHandles || []).map((t) =>
+        normalizeHandle(t)
+      )
       const vfx: SynchronizedPowerVfx = {
         id: `${now}_${Math.random().toString(36).slice(2, 6)}`,
         casterHandle: normalizeHandle(payload.casterHandle),
@@ -523,9 +626,7 @@ function connect(): void {
         casterSlotIndex: payload.casterSlotIndex,
         category: payload.category,
         powerType,
-        targetHandles: (payload.targetHandles || []).map((t) =>
-          normalizeHandle(t)
-        ),
+        targetHandles,
         createdAtMs: now,
         durationMs: payload.category === 'NEGATIVE' ? 1450 : 950,
       }
@@ -537,11 +638,20 @@ function connect(): void {
         casterLane.mascotCastCategory = payload.category
       }
 
+      if (payload.category === 'NEGATIVE') {
+        for (const targetH of targetHandles) {
+          const targetLane = state.remoteLanes[targetH]
+          if (targetLane) {
+            applyNegativePowerVisualToRemoteLane(targetLane, powerType)
+          }
+        }
+      }
+
       const myHandle = normalizeHandle(authStore.state.user?.handle || '')
       if (
         payload.category === 'NEGATIVE' &&
         vfx.casterHandle !== myHandle &&
-        vfx.targetHandles.includes(myHandle)
+        targetHandles.includes(myHandle)
       ) {
         if (onReceiveNegativePowerCallback) {
           onReceiveNegativePowerCallback(powerType, payload.casterNick)
@@ -646,6 +756,52 @@ function toggleReady(forceReady?: boolean): Promise<RoomStateDTO> {
           resolve(res.room)
         } else {
           reject(new Error(res?.error || 'Falha ao atualizar estado Pronto.'))
+        }
+      }
+    )
+  })
+}
+
+function setRoomGameMode(gameMode: SelectableGameMode): Promise<RoomStateDTO> {
+  return new Promise((resolve, reject) => {
+    if (!socket) {
+      reject(new Error('Sem conexão com o servidor.'))
+      return
+    }
+    socket.emit(
+      'room:set_game_mode',
+      { gameMode },
+      (res: { ok?: boolean; room?: RoomStateDTO; error?: string }) => {
+        if (res?.ok && res.room) {
+          state.room = res.room
+          resolve(res.room)
+        } else {
+          reject(new Error(res?.error || 'Falha ao alterar modo de jogo.'))
+        }
+      }
+    )
+  })
+}
+
+function setRoomVictoryCondition(
+  victoryCondition: VictoryCondition
+): Promise<RoomStateDTO> {
+  return new Promise((resolve, reject) => {
+    if (!socket) {
+      reject(new Error('Sem conexão com o servidor.'))
+      return
+    }
+    socket.emit(
+      'room:set_victory_condition',
+      { victoryCondition },
+      (res: { ok?: boolean; room?: RoomStateDTO; error?: string }) => {
+        if (res?.ok && res.room) {
+          state.room = res.room
+          resolve(res.room)
+        } else {
+          reject(
+            new Error(res?.error || 'Falha ao alterar condição de vitória.')
+          )
         }
       }
     )
@@ -808,6 +964,50 @@ function updateEquippedSkin(equippedSkin: string): void {
   }
 }
 
+function applyNegativePowerVisualToRemoteLane(
+  lane: RemoteLaneInterpolatedState,
+  powerType: PowerId
+): void {
+  if (!lane.activeDebuffs.includes(powerType)) {
+    lane.activeDebuffs = [...lane.activeDebuffs, powerType]
+  }
+  if (powerType === 'BLIND_MANUAL') {
+    lane.blindManualRemainingMs = 20000
+    lane.fogAnchorX = lane.fogAnchorX ?? 0
+    lane.fogAnchorY =
+      -Math.max(1.2, lane.towerHeight || 0) * GAME_CONSTANTS.UNIT_PX
+  } else if (
+    powerType === 'SLICK_BRICK' ||
+    powerType === 'LOCK_ROTATE' ||
+    powerType === 'TURBO_DROP'
+  ) {
+    if (
+      lane.activePiece &&
+      (!lane.activePiece.powerEffect || lane.activePiece.powerEffect === 'NONE')
+    ) {
+      lane.activePiece.powerEffect = powerType
+    }
+    if (
+      lane.renderActivePiece &&
+      (!lane.renderActivePiece.powerEffect ||
+        lane.renderActivePiece.powerEffect === 'NONE')
+    ) {
+      lane.renderActivePiece.powerEffect = powerType
+    }
+  } else if (powerType === 'GIANT_PIECE') {
+    if (
+      lane.activePiece &&
+      lane.activePiece.variant !== 'GIANT' &&
+      lane.activePiece.y >= lane.towerHeight + 2.0
+    ) {
+      lane.activePiece.variant = 'GIANT'
+      if (lane.renderActivePiece) {
+        lane.renderActivePiece.variant = 'GIANT'
+      }
+    }
+  }
+}
+
 function emitMatchSyncState(payload: {
   activePiece: ActivePieceSnapshot | null
   settledBlocks: SettledBlockSnapshot[]
@@ -815,6 +1015,10 @@ function emitMatchSyncState(payload: {
   lives: number
   mana: number
   activeDebuffs: string[]
+  blindManualRemainingMs?: number
+  fogAnchorX?: number
+  fogAnchorY?: number
+  islands?: FloatingIslandSnapshot[]
   isEliminated: boolean
 }): void {
   if (!socket || !socket.connected || !state.activeMatch) return
@@ -837,6 +1041,21 @@ function emitUsePositivePower(powerType: PowerId): void {
 }
 
 function emitUseNegativePower(powerType: PowerId, targetId?: string): void {
+  // Optimistically apply the visual effect to the target opponent lane immediately
+  const remoteList = Object.values(state.remoteLanes).filter(
+    (l) => !l.isEliminated
+  )
+  if (remoteList.length > 0) {
+    const sorted = [...remoteList].sort(
+      (a, b) => b.towerHeight - a.towerHeight
+    )
+    const targetLane =
+      (targetId && state.remoteLanes[normalizeHandle(targetId)]) || sorted[0]
+    if (targetLane) {
+      applyNegativePowerVisualToRemoteLane(targetLane, powerType)
+    }
+  }
+
   if (!socket || !socket.connected || !state.activeMatch) return
   socket.emit('match:use_negative_power', { powerType, targetId })
 }
@@ -849,6 +1068,11 @@ function emitClaimVictory(towerHeight: number, elapsedTimeMs: number): void {
 function emitReturnToLobby(): void {
   if (!socket || !socket.connected) return
   socket.emit('match:return_to_lobby')
+}
+
+function emitNextCupRound(): void {
+  if (!socket || !socket.connected) return
+  socket.emit('match:next_cup_round')
 }
 
 function lerpNumber(current: number, target: number, alpha: number): number {
@@ -881,6 +1105,18 @@ function stepInterpolation(dtMs: number): void {
       }
     }
 
+    if (lane.blindManualRemainingMs > 0) {
+      lane.blindManualRemainingMs = Math.max(
+        0,
+        lane.blindManualRemainingMs - dtMs
+      )
+      if (lane.blindManualRemainingMs <= 0) {
+        lane.activeDebuffs = lane.activeDebuffs.filter(
+          (d) => d !== 'BLIND_MANUAL'
+        )
+      }
+    }
+
     // Interpolate active falling piece
     if (!lane.activePiece) {
       lane.renderActivePiece = null
@@ -892,6 +1128,9 @@ function stepInterpolation(dtMs: number): void {
       lane.renderActivePiece.powerEffect = lane.activePiece.powerEffect
       lane.renderActivePiece.colorPaletteIndex =
         lane.activePiece.colorPaletteIndex
+      lane.renderActivePiece.recallTransformProgress =
+        lane.activePiece.recallTransformProgress
+      lane.renderActivePiece.recallPowerId = lane.activePiece.recallPowerId
       lane.renderActivePiece.x = lerpNumber(
         lane.renderActivePiece.x,
         lane.activePiece.x,
@@ -976,6 +1215,8 @@ export const multiplayerClient = {
   enterLobby,
   leaveRoom,
   toggleReady,
+  setRoomGameMode,
+  setRoomVictoryCondition,
   inviteFriend,
   acceptRoomInvite,
   declineRoomInvite,
@@ -990,6 +1231,7 @@ export const multiplayerClient = {
   emitUseNegativePower,
   emitClaimVictory,
   emitReturnToLobby,
+  emitNextCupRound,
   stepInterpolation,
   registerCallbacks,
 }

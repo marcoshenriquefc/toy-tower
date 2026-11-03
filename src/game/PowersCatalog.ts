@@ -5,6 +5,7 @@ export type PowerId =
   | 'STATIC_BRICK'
   | 'BRICK_REMOVER'
   | 'SIDE_ISLAND'
+  | 'EXTRA_LIFE'
   | 'GIANT_PIECE'
   | 'SLICK_BRICK'
   | 'LOCK_ROTATE'
@@ -87,6 +88,20 @@ export const POWERS_REGISTRY: PowerConfig[] = [
     description:
       'Invoca uma estrutura estática 2.5×1.5 unidades (μ=0.8 e Snap de Pinos) na lateral da torre (±5.25u) na altura do topo para escorar inclinações, criar pontes em arco ou recomeçar a subida!',
     accentColor: '#22C55E',
+  },
+  {
+    id: 'EXTRA_LIFE',
+    name: 'Vida Extra (Balão Flutuante)',
+    shortName: 'Vida Extra (Balão)',
+    icon: '🎈',
+    category: 'POSITIVE',
+    durationPieces: 1,
+    weight: 28,
+    shortDescription:
+      'Solta um Balão de Vida Extra flutuando que vai embora: pegue-o com a peça que está controlando para ganhar +1 ❤️!',
+    description:
+      'Não é de graça! Ao utilizar, um Balão de Vida Extra surge flutuando e indo embora. Para conseguir a vida extra (+1 ❤️), você deve alcançá-lo e encostar nele com a peça que está controlando!',
+    accentColor: '#F43F5E',
   },
 
   // =========================================================================

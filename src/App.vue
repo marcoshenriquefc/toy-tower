@@ -3,9 +3,12 @@ import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { TowerInstance } from './game/TowerInstance'
 import {
   GAME_CONSTANTS,
+  GameMode,
   PieceType,
   PieceVariant,
+  SelectableGameMode,
   TowerSnapshot,
+  VictoryCondition,
 } from './types/game'
 import { ALL_PIECE_TYPES, PIECE_CATALOG } from './game/PieceCatalog'
 import {
@@ -69,6 +72,7 @@ type ScreenFlowState =
   | 'TITLE_SCREEN'
   | 'TRANSITIONING'
   | 'MAIN_MENU'
+  | 'LOCAL_LOBBY'
   | 'MULTIPLAYER_LOBBY'
   | 'IN_GAME'
 const screenFlow = ref<ScreenFlowState>('TITLE_SCREEN')
@@ -76,6 +80,15 @@ const selectedMenuCard = ref<'LOCAL' | 'MULTIPLAYER'>('LOCAL')
 const isAuthModalOpen = ref<boolean>(false)
 const isOnlineMultiplayerMatch = ref<boolean>(false)
 const localPlayerLives = ref<number>(3)
+
+/** Selected game mode in Local / Multiplayer lobby ('RACE' | 'SURVIVAL' | 'RANDOM') */
+const selectedGameMode = ref<SelectableGameMode>('RACE')
+/** Resolved active game mode for the current match ('RACE' | 'SURVIVAL') */
+const activeMatchGameMode = ref<GameMode>('RACE')
+/** Selected Victory Condition (valid only for Multiplayer mode: 'SINGLE_WIN' | 'CUP_6' | 'CUP_12') */
+const selectedVictoryCondition = ref<VictoryCondition>('CUP_6')
+/** Controls the "Selecione o Modo de Jogo / Condição de Vitória" popup opened via the Gear button */
+const isGameModeModalOpen = ref<boolean>(false)
 
 const isEditingCustomNick = ref<boolean>(false)
 const customNickInput = ref<string>('')
@@ -91,6 +104,7 @@ interface LobbySlotInfo {
   handle: string
   skinSpriteId: string
   silhouetteSkinId: string
+  cupPoints: number
 }
 
 const DEFAULT_SILHOUETTE_SKINS = [
@@ -109,6 +123,7 @@ const fallbackLobbySlots = ref<LobbySlotInfo[]>([
     handle: '@lucas_042',
     skinSpriteId: 'player_shadow',
     silhouetteSkinId: 'player_shadow',
+    cupPoints: 0,
   },
   {
     slotIndex: 1,
@@ -118,6 +133,7 @@ const fallbackLobbySlots = ref<LobbySlotInfo[]>([
     handle: '',
     skinSpriteId: 'player_dino',
     silhouetteSkinId: 'player_dino',
+    cupPoints: 0,
   },
   {
     slotIndex: 2,
@@ -127,6 +143,7 @@ const fallbackLobbySlots = ref<LobbySlotInfo[]>([
     handle: '',
     skinSpriteId: 'player_pirate',
     silhouetteSkinId: 'player_pirate',
+    cupPoints: 0,
   },
   {
     slotIndex: 3,
@@ -136,6 +153,7 @@ const fallbackLobbySlots = ref<LobbySlotInfo[]>([
     handle: '',
     skinSpriteId: 'player_mage',
     silhouetteSkinId: 'player_mage',
+    cupPoints: 0,
   },
 ])
 
@@ -157,6 +175,7 @@ const lobbySlots = computed<LobbySlotInfo[]>(() => {
         handle: '',
         skinSpriteId: silhouetteSkinId,
         silhouetteSkinId,
+        cupPoints: 0,
       }
     }
     const isMe =
@@ -169,6 +188,7 @@ const lobbySlots = computed<LobbySlotInfo[]>(() => {
       handle: slotPlayer.handle,
       skinSpriteId: dbSkinToSpriteId(slotPlayer.equippedSkin),
       silhouetteSkinId,
+      cupPoints: slotPlayer.cupPoints ?? 0,
     }
   })
 })
@@ -236,6 +256,12 @@ const snapshot = ref<TowerSnapshot>({
   playerId: 'player_1',
   matchSeed: initialRandomSeed,
   isSinglePlayer: true,
+  gameMode: 'RACE',
+  lives: GAME_CONSTANTS.SURVIVAL_INITIAL_LIVES,
+  maxLives: GAME_CONSTANTS.SURVIVAL_INITIAL_LIVES,
+  piecesPlaced: 0,
+  survivalGoalPieces: GAME_CONSTANTS.SURVIVAL_GOAL_PIECES,
+  maxTowerHeight: 0,
   basePresetId: initialBasePreset.id,
   basePresetName: initialBasePreset.name,
   baseElevations: [...initialBasePreset.elevations],
@@ -259,6 +285,244 @@ const snapshot = ref<TowerSnapshot>({
   activePiece: null,
   settledBlocks: [],
 })
+
+interface GameModeOptionCard {
+  id: SelectableGameMode
+  title: string
+  shortTitle: string
+  badge: string
+  icon: string
+  accentColor: string
+  description: string
+  rulesSummary: string[]
+}
+
+const GAME_MODE_OPTIONS: GameModeOptionCard[] = [
+  {
+    id: 'RACE',
+    title: 'MODO CORRIDA',
+    shortTitle: 'Corrida (30m)',
+    badge: 'CLÁSSICO',
+    icon: '🏁',
+    accentColor: '#3B82F6',
+    description:
+      'Corra até a linha de chegada em 30m, estabilize sua torre por 3 segundos e encaixe o Telhado do Castelo para vencer!',
+    rulesSummary: [
+      '🏁 Meta: Alcançar 30m de altura primeiro',
+      '🏰 Clímax: Segure 3s e solde o Telhado 3×3',
+      '🌊 Quedas na água aplicam apenas penalidade de tempo (1,5s)',
+    ],
+  },
+  {
+    id: 'SURVIVAL',
+    title: 'MODO SOBREVIVÊNCIA',
+    shortTitle: 'Sobrevivência (3 Vidas • 50 Peças)',
+    badge: '3 VIDAS • 50 PEÇAS',
+    icon: '❤️',
+    accentColor: '#EF4444',
+    description:
+      'Você tem 50 peças e 3 Vidas (❤️❤️❤️). Coloque todas as 50 peças sem perder suas vidas! Quem terminar primeiro (ou for o último sobrevivente) vence!',
+    rulesSummary: [
+      '🧱 Meta de 50 Peças: Coloque todas as 50 peças primeiro mantendo suas vidas para vencer!',
+      '❤️❤️❤️ 3 Vidas + 3s Invulnerável: Ao cair uma peça, seu mago pisca invulnerável por 3s',
+      '🎈 Poder Vida Extra: Solta um balão flutuante — pegue-o com a peça controlada antes que fuja!',
+    ],
+  },
+  {
+    id: 'RANDOM',
+    title: 'ALEATÓRIO',
+    shortTitle: 'Aleatório',
+    badge: 'SORTEIO',
+    icon: '🎲',
+    accentColor: '#A855F7',
+    description:
+      'Não consegue decidir? O jogo sorteia automaticamente entre Modo Corrida e Modo Sobrevivência no início da partida!',
+    rulesSummary: [
+      '🎲 Sorteia 50/50 entre Corrida (30m) e Sobrevivência (3 Vidas)',
+      '✨ Revela o modo sorteado assim que a partida começa',
+      '🔄 Novo sorteio a cada revanche ou reinício',
+    ],
+  },
+]
+
+interface VictoryConditionOptionCard {
+  id: VictoryCondition
+  title: string
+  shortTitle: string
+  badge: string
+  icon: string
+  accentColor: string
+  targetPoints: number
+  description: string
+  rulesSummary: string[]
+}
+
+const VICTORY_CONDITION_OPTIONS: VictoryConditionOptionCard[] = [
+  {
+    id: 'SINGLE_WIN',
+    title: 'COPA 1 VITÓRIA',
+    shortTitle: 'Copa 1 Vitória',
+    badge: '1 RODADA',
+    icon: '🥇',
+    accentColor: '#10B981',
+    targetPoints: 3,
+    description:
+      'Partida rápida de rodada única! Quem vencer em 1º lugar recebe os 3 pontos da vitória e conquista o troféu imediatamente.',
+    rulesSummary: [
+      '🥇 1º Lugar conquista a vitória imediata (+3 pts)',
+      '⚡ Ideal para duelos rápidos de 1 rodada',
+      '📋 Cartela rápida de 3 áreas (1 vitória = 3/3)',
+    ],
+  },
+  {
+    id: 'CUP_6',
+    title: 'COPA 6 PONTOS',
+    shortTitle: 'Copa 6 Pontos',
+    badge: 'CARTELA 6 PTS',
+    icon: '🏆',
+    accentColor: '#F59E0B',
+    targetPoints: 6,
+    description:
+      'Torneio clássico estilo Tricky Towers! A cada rodada os jogadores preenchem sua Cartela de 6 áreas conforme a colocação.',
+    rulesSummary: [
+      '🥇 1º = 3 pts • 🥈 2º = 2 pts • 🥉 3º = 1 pt • 4º = 0 pts',
+      '📋 Cada ponto preenche 1 área da Cartela (total de 6 áreas)',
+      '🏆 O primeiro jogador a preencher todas as 6 áreas vence a Copa!',
+    ],
+  },
+  {
+    id: 'CUP_12',
+    title: 'COPA 12 PONTOS',
+    shortTitle: 'Copa 12 Pontos',
+    badge: 'CARTELA 12 PTS',
+    icon: '👑',
+    accentColor: '#EC4899',
+    targetPoints: 12,
+    description:
+      'Grande Copa Maratona! Disputa épica em múltiplas rodadas onde vence quem preencher primeiro todas as 12 áreas da Cartela!',
+    rulesSummary: [
+      '🥇 1º = 3 pts • 🥈 2º = 2 pts • 🥉 3º = 1 pt • 4º = 0 pts',
+      '📋 Cada ponto preenche 1 área da Cartela (total de 12 áreas)',
+      '👑 Exige consistência máxima até completar as 12 áreas!',
+    ],
+  },
+]
+
+const currentLobbySelectableMode = computed<SelectableGameMode>(() => {
+  if (
+    screenFlow.value === 'MULTIPLAYER_LOBBY' &&
+    multiplayerClient.state.room?.selectedGameMode
+  ) {
+    return multiplayerClient.state.room.selectedGameMode
+  }
+  return selectedGameMode.value
+})
+
+const currentLobbyModeInfo = computed<GameModeOptionCard>(() => {
+  const mode = currentLobbySelectableMode.value
+  return (
+    GAME_MODE_OPTIONS.find((opt) => opt.id === mode) || GAME_MODE_OPTIONS[0]
+  )
+})
+
+const currentLobbyVictoryCondition = computed<VictoryCondition>(() => {
+  if (
+    screenFlow.value === 'MULTIPLAYER_LOBBY' &&
+    multiplayerClient.state.room?.victoryCondition
+  ) {
+    return multiplayerClient.state.room.victoryCondition
+  }
+  return selectedVictoryCondition.value
+})
+
+const currentLobbyVictoryInfo = computed<VictoryConditionOptionCard>(() => {
+  const vc = currentLobbyVictoryCondition.value
+  return (
+    VICTORY_CONDITION_OPTIONS.find((opt) => opt.id === vc) ||
+    VICTORY_CONDITION_OPTIONS[1]
+  )
+})
+
+function openGameModeModal() {
+  isBurgerMenuOpen.value = false
+  isGameModeModalOpen.value = true
+}
+
+function closeGameModeModal() {
+  isGameModeModalOpen.value = false
+}
+
+async function selectGameModeOption(mode: SelectableGameMode) {
+  selectedGameMode.value = mode
+  const chosen =
+    GAME_MODE_OPTIONS.find((opt) => opt.id === mode) || GAME_MODE_OPTIONS[0]
+
+  if (
+    screenFlow.value === 'MULTIPLAYER_LOBBY' &&
+    multiplayerClient.state.room
+  ) {
+    try {
+      await multiplayerClient.setRoomGameMode(mode)
+      triggerBanner(
+        `⚙️ Modo da sala alterado para: ${chosen.icon} ${chosen.title}!`,
+        'success'
+      )
+    } catch (err) {
+      triggerBanner(
+        err instanceof Error ? err.message : 'Erro ao alterar modo da sala.',
+        'danger'
+      )
+    }
+  } else {
+    triggerBanner(
+      `⚙️ Modo selecionado: ${chosen.icon} ${chosen.title}!`,
+      'success'
+    )
+  }
+}
+
+async function selectVictoryConditionOption(vc: VictoryCondition) {
+  selectedVictoryCondition.value = vc
+  const chosen =
+    VICTORY_CONDITION_OPTIONS.find((opt) => opt.id === vc) ||
+    VICTORY_CONDITION_OPTIONS[1]
+
+  if (
+    screenFlow.value === 'MULTIPLAYER_LOBBY' &&
+    multiplayerClient.state.room
+  ) {
+    try {
+      await multiplayerClient.setRoomVictoryCondition(vc)
+      triggerBanner(
+        `🏆 Condição de Vitória da Sala: ${chosen.icon} ${chosen.title}!`,
+        'success'
+      )
+    } catch (err) {
+      triggerBanner(
+        err instanceof Error
+          ? err.message
+          : 'Erro ao alterar condição de vitória.',
+        'danger'
+      )
+    }
+  } else {
+    triggerBanner(
+      `🏆 Condição de Vitória (Multiplayer): ${chosen.icon} ${chosen.title}!`,
+      'info'
+    )
+  }
+}
+
+function handleNextCupRound() {
+  multiplayerClient.emitNextCupRound()
+}
+
+function resolveEffectiveGameMode(mode: SelectableGameMode): GameMode {
+  if (mode === 'RANDOM') {
+    return Math.random() < 0.5 ? 'SURVIVAL' : 'RACE'
+  }
+  return mode
+}
 
 const currentSelfPower = computed(() =>
   getPowerConfig(snapshot.value.inventoryPower.selfPower)
@@ -412,6 +676,7 @@ async function enterMultiplayerLobby() {
       handle: user?.handle || '@lucas_042',
       skinSpriteId: hostSkin,
       silhouetteSkinId: 'player_shadow',
+      cupPoints: 0,
     },
     {
       slotIndex: 1,
@@ -421,6 +686,7 @@ async function enterMultiplayerLobby() {
       handle: '',
       skinSpriteId: 'player_dino',
       silhouetteSkinId: 'player_dino',
+      cupPoints: 0,
     },
     {
       slotIndex: 2,
@@ -430,6 +696,7 @@ async function enterMultiplayerLobby() {
       handle: '',
       skinSpriteId: 'player_pirate',
       silhouetteSkinId: 'player_pirate',
+      cupPoints: 0,
     },
     {
       slotIndex: 3,
@@ -439,6 +706,7 @@ async function enterMultiplayerLobby() {
       handle: '',
       skinSpriteId: 'player_mage',
       silhouetteSkinId: 'player_mage',
+      cupPoints: 0,
     },
   ]
   lobbyCountdownMs.value = null
@@ -448,7 +716,23 @@ async function enterMultiplayerLobby() {
   screenFlow.value = 'MULTIPLAYER_LOBBY'
 
   try {
-    await multiplayerClient.enterLobby()
+    const room = await multiplayerClient.enterLobby()
+    if (
+      room &&
+      room.selectedGameMode !== selectedGameMode.value &&
+      room.hostHandle?.toLowerCase() === (user?.handle || '').toLowerCase()
+    ) {
+      await multiplayerClient.setRoomGameMode(selectedGameMode.value)
+    }
+    if (
+      room &&
+      room.victoryCondition !== selectedVictoryCondition.value &&
+      room.hostHandle?.toLowerCase() === (user?.handle || '').toLowerCase()
+    ) {
+      await multiplayerClient.setRoomVictoryCondition(
+        selectedVictoryCondition.value
+      )
+    }
   } catch {
     // Fallback local lobby if offline
   }
@@ -731,30 +1015,80 @@ function handleDeclineIncomingRoomInvite() {
   multiplayerClient.declineRoomInvite(invite.roomId)
 }
 
-function startGame(sharedPieceSeed?: string, isOnlineMatch: boolean = false) {
+function openLocalBattleLobby() {
+  selectedMenuCard.value = 'LOCAL'
+  isBurgerMenuOpen.value = false
+  isAuthModalOpen.value = false
+  isFriendsModalOpen.value = false
+  isGameModeModalOpen.value = false
+  screenFlow.value = 'LOCAL_LOBBY'
+}
+
+function startGame(
+  sharedPieceSeed?: string,
+  isOnlineMatch: boolean = false,
+  onlineResolvedMode?: GameMode,
+  onlineSelectedMode?: SelectableGameMode
+) {
   isSkinPickerOpen.value = false
   isAuthModalOpen.value = false
   isFriendsModalOpen.value = false
   isBurgerMenuOpen.value = false
+  isGameModeModalOpen.value = false
   lobbyCountdownMs.value = null
   isOnlineMultiplayerMatch.value = isOnlineMatch
-  localPlayerLives.value = 3
+  localPlayerLives.value = GAME_CONSTANTS.SURVIVAL_INITIAL_LIVES
+
+  const selectableMode: SelectableGameMode = isOnlineMatch
+    ? onlineSelectedMode ||
+      multiplayerClient.state.room?.selectedGameMode ||
+      selectedGameMode.value
+    : selectedGameMode.value
+
+  const resolvedMode: GameMode =
+    isOnlineMatch && onlineResolvedMode
+      ? onlineResolvedMode
+      : resolveEffectiveGameMode(selectableMode)
+
+  activeMatchGameMode.value = resolvedMode
+  if (towerInstance) {
+    towerInstance.setGameMode(resolvedMode)
+  }
+
   screenFlow.value = 'IN_GAME'
   if (sharedPieceSeed) {
     seedInput.value = sharedPieceSeed
     if (towerInstance) {
       towerInstance.setSinglePlayerMode(!isOnlineMatch)
+      if (isOnlineMatch) {
+        computeLaneLayoutAndRanks(performance.now())
+      } else {
+        towerInstance.localSlotIndex = null
+        towerInstance.setLaneOffsetX(0)
+      }
     }
-    restartMatch(false)
+    restartMatch(false, false)
   } else {
     if (towerInstance) {
       towerInstance.setSinglePlayerMode(true)
       towerInstance.rankBadge = null
+      towerInstance.localSlotIndex = null
       towerInstance.remoteLanesToRender = []
       towerInstance.activePowerVfxToRender = []
-      towerInstance.offsetX = 0
+      towerInstance.setLaneOffsetX(0)
     }
-    restartMatch(true)
+    restartMatch(true, false)
+  }
+
+  if (selectableMode === 'RANDOM') {
+    triggerBanner(
+      `🎲 Modo Aleatório sorteou: ${
+        resolvedMode === 'SURVIVAL'
+          ? '❤️ MODO SOBREVIVÊNCIA (3 VIDAS)'
+          : '🏁 MODO CORRIDA (30m)'
+      }!`,
+      'info'
+    )
   }
 }
 
@@ -763,9 +1097,10 @@ function handleReturnToLobbyFromMatch() {
   isOnlineMultiplayerMatch.value = false
   if (towerInstance) {
     towerInstance.rankBadge = null
+    towerInstance.localSlotIndex = null
     towerInstance.remoteLanesToRender = []
     towerInstance.activePowerVfxToRender = []
-    towerInstance.offsetX = 0
+    towerInstance.setLaneOffsetX(0)
   }
   screenFlow.value = 'MULTIPLAYER_LOBBY'
 }
@@ -773,6 +1108,7 @@ function handleReturnToLobbyFromMatch() {
 function handleMultiplayerCardClick() {
   selectedMenuCard.value = 'MULTIPLAYER'
   isBurgerMenuOpen.value = false
+  isGameModeModalOpen.value = false
   pendingFriendsOpenAfterLogin.value = null
   if (authStore.isAuthenticated.value) {
     isAuthModalOpen.value = false
@@ -829,6 +1165,7 @@ async function handleLogout() {
   isAuthModalOpen.value = false
   isFriendsModalOpen.value = false
   isBurgerMenuOpen.value = false
+  isGameModeModalOpen.value = false
   lobbyCountdownMs.value = null
   if (screenFlow.value === 'MULTIPLAYER_LOBBY') {
     screenFlow.value = 'MAIN_MENU'
@@ -845,12 +1182,14 @@ function returnToMainMenu() {
   isSkinPickerOpen.value = false
   isAuthModalOpen.value = false
   isFriendsModalOpen.value = false
+  isGameModeModalOpen.value = false
   lobbyCountdownMs.value = null
   if (towerInstance) {
     towerInstance.rankBadge = null
+    towerInstance.localSlotIndex = null
     towerInstance.remoteLanesToRender = []
     towerInstance.activePowerVfxToRender = []
-    towerInstance.offsetX = 0
+    towerInstance.setLaneOffsetX(0)
   }
   const [leftSkin, rightSkin] = spriteRegistry.pickTwoRandomPlayerSkins()
   menuLeftSkinId.value = leftSkin
@@ -874,6 +1213,8 @@ function pollMenuGamepad() {
     if (screenFlow.value === 'TITLE_SCREEN') {
       transitionToMainMenu()
     } else if (screenFlow.value === 'MAIN_MENU') {
+      openLocalBattleLobby()
+    } else if (screenFlow.value === 'LOCAL_LOBBY' && !isGameModeModalOpen.value) {
       startGame()
     }
   }
@@ -884,6 +1225,7 @@ function computeLaneLayoutAndRanks(now: number) {
   if (!towerInstance) return
   if (!isOnlineMultiplayerMatch.value || !multiplayerClient.state.activeMatch) {
     towerInstance.rankBadge = null
+    towerInstance.localSlotIndex = null
     towerInstance.remoteLanesToRender = []
     towerInstance.activePowerVfxToRender = []
     return
@@ -894,16 +1236,33 @@ function computeLaneLayoutAndRanks(now: number) {
   const laneSpacingPx =
     totalPlayers >= 4 ? 360 : totalPlayers === 3 ? 400 : 440
 
-  // Compute live rank (1ST, 2ND, 3RD, 4TH) sorted by towerHeight descending
+  // Compute live rank (1ST, 2ND, 3RD, 4TH)
   const myHandle = (authStore.state.user?.handle || '@voce').toLowerCase()
   const myNick = authStore.state.user?.customNick || 'VOCÊ'
+  const isSurvivalMode = snapshot.value.gameMode === 'SURVIVAL'
   const allHeights = [
-    { handle: myHandle, height: snapshot.value.towerHeight },
+    {
+      handle: myHandle,
+      height: snapshot.value.towerHeight,
+      lives: snapshot.value.lives,
+      pieces: snapshot.value.piecesPlaced,
+    },
     ...remoteEntries.map((r) => ({
       handle: r.handle.toLowerCase(),
       height: r.towerHeight,
+      lives: r.lives,
+      pieces: r.settledBlocks?.length ?? 0,
     })),
-  ].sort((a, b) => b.height - a.height)
+  ].sort((a, b) => {
+    if (isSurvivalMode) {
+      const aAlive = a.lives > 0 ? 1 : 0
+      const bAlive = b.lives > 0 ? 1 : 0
+      if (bAlive !== aAlive) return bAlive - aAlive
+      if (b.pieces !== a.pieces) return b.pieces - a.pieces
+      if (b.lives !== a.lives) return b.lives - a.lives
+    }
+    return b.height - a.height
+  })
 
   const rankLabels: Array<'1ST' | '2ND' | '3RD' | '4TH'> = [
     '1ST',
@@ -916,35 +1275,67 @@ function computeLaneLayoutAndRanks(now: number) {
     rankByHandle.set(entry.handle, rankLabels[Math.min(3, idx)])
   })
 
+  // Determine each player's fixed Lobby slotIndex (0 = P1, 1 = P2, 2 = P3, 3 = P4)
+  const myMatchPlayer = multiplayerClient.state.activeMatch.players.find(
+    (p) => p.handle.toLowerCase() === myHandle
+  )
+  const myRoomSlot = multiplayerClient.state.room?.slots.find(
+    (s) => s && s.handle.toLowerCase() === myHandle
+  )
+  const mySlotIndex = myMatchPlayer?.slotIndex ?? myRoomSlot?.slotIndex ?? 0
+
+  // Sort all players by slotIndex ascending so Player 1 is at Position 1 (leftmost),
+  // Player 2 is at Position 2, Player 3 at Position 3, and Player 4 at Position 4.
+  const orderedParticipants = [
+    { handle: myHandle, slotIndex: mySlotIndex },
+    ...remoteEntries.map((r) => ({
+      handle: r.handle.toLowerCase(),
+      slotIndex: r.slotIndex ?? 1,
+    })),
+  ].sort((a, b) =>
+    a.slotIndex !== b.slotIndex
+      ? a.slotIndex - b.slotIndex
+      : a.handle.localeCompare(b.handle)
+  )
+
+  const laneOffsetByHandle = new Map<string, number>()
+  orderedParticipants.forEach((entry, posIdx) => {
+    const xOffset = (posIdx - (totalPlayers - 1) / 2) * laneSpacingPx
+    laneOffsetByHandle.set(entry.handle, xOffset)
+  })
+
+  const myTargetOffsetX = laneOffsetByHandle.get(myHandle) ?? 0
+  towerInstance.setLaneOffsetX(myTargetOffsetX)
+  towerInstance.localSlotIndex = mySlotIndex
   towerInstance.rankBadge = rankByHandle.get(myHandle) || '1ST'
   towerInstance.playerNick = myNick
 
-  const laneOffsetByHandle = new Map<string, number>()
-  laneOffsetByHandle.set(myHandle, towerInstance.offsetX)
-
-  const remoteRenderList: RemoteLaneRenderData[] = remoteEntries.map(
-    (r, idx) => {
-      // Place opponents alternating to the right and left of the local player's lane
-      const side = idx % 2 === 0 ? 1 : -1
-      const tier = Math.floor(idx / 2) + 1
-      const laneOffsetX = towerInstance!.offsetX + side * tier * laneSpacingPx
-      laneOffsetByHandle.set(r.handle.toLowerCase(), laneOffsetX)
-      return {
-        laneOffsetX,
-        handle: r.handle,
-        customNick: r.customNick,
-        skinSpriteId: dbSkinToSpriteId(r.equippedSkin),
-        rankBadge: rankByHandle.get(r.handle.toLowerCase()) || '2ND',
-        towerHeight: r.towerHeight,
-        lives: r.lives,
-        isEliminated: r.isEliminated,
-        activePiece: r.renderActivePiece,
-        settledBlocks: r.renderSettledBlocks,
-        mascotCastAnimMs: r.mascotCastAnimMs,
-        mascotCastCategory: r.mascotCastCategory,
-      }
+  const remoteRenderList: RemoteLaneRenderData[] = remoteEntries.map((r) => {
+    const laneOffsetX =
+      laneOffsetByHandle.get(r.handle.toLowerCase()) ??
+      towerInstance!.offsetX + laneSpacingPx
+    return {
+      laneOffsetX,
+      slotIndex: r.slotIndex ?? 1,
+      handle: r.handle,
+      customNick: r.customNick,
+      skinSpriteId: dbSkinToSpriteId(r.equippedSkin),
+      rankBadge: rankByHandle.get(r.handle.toLowerCase()) || '2ND',
+      towerHeight: r.towerHeight,
+      lives: r.lives,
+      isEliminated: r.isEliminated,
+      activePiece: r.renderActivePiece,
+      settledBlocks: r.renderSettledBlocks,
+      mascotCastAnimMs: r.mascotCastAnimMs,
+      mascotCastCategory: r.mascotCastCategory,
+      activeDebuffs: r.activeDebuffs || [],
+      blindManualRemainingMs: r.blindManualRemainingMs || 0,
+      fogAnchorX: r.fogAnchorX ?? 0,
+      fogAnchorY: r.fogAnchorY ?? 2.2,
+      islands: r.islands || [],
+      lastLifeLostAtMs: r.lastLifeLostAtMs || 0,
     }
-  )
+  })
 
   towerInstance.remoteLanesToRender = remoteRenderList
 
@@ -1012,27 +1403,48 @@ function startLoop() {
               if (snap.blindManualRemainingMs > 0) {
                 activeDebuffs.push('BLIND_MANUAL')
               }
-              if (towerInstance.slickBrickRemaining > 0) {
+              if (
+                towerInstance.slickBrickRemaining > 0 ||
+                snap.activePiece?.powerEffect === 'SLICK_BRICK'
+              ) {
                 activeDebuffs.push('SLICK_BRICK')
               }
-              if (towerInstance.lockRotateRemaining > 0) {
+              if (
+                towerInstance.lockRotateRemaining > 0 ||
+                snap.activePiece?.powerEffect === 'LOCK_ROTATE'
+              ) {
                 activeDebuffs.push('LOCK_ROTATE')
               }
-              if (towerInstance.turboDropRemaining > 0) {
+              if (
+                towerInstance.turboDropRemaining > 0 ||
+                snap.activePiece?.powerEffect === 'TURBO_DROP'
+              ) {
                 activeDebuffs.push('TURBO_DROP')
               }
+              if (
+                towerInstance.giantPieceRemaining > 0 ||
+                snap.activePiece?.variant === 'GIANT'
+              ) {
+                activeDebuffs.push('GIANT_PIECE')
+              }
+              localPlayerLives.value = snap.lives
               multiplayerClient.emitMatchSyncState({
                 activePiece: snap.activePiece,
                 settledBlocks: snap.settledBlocks,
                 towerHeight: snap.towerHeight,
-                lives: localPlayerLives.value,
+                lives: snap.lives,
                 mana:
                   snap.inventoryPower.selfPower ||
                   snap.inventoryPower.attackPower
                     ? 100
                     : 0,
                 activeDebuffs,
-                isEliminated: localPlayerLives.value <= 0,
+                blindManualRemainingMs: snap.blindManualRemainingMs,
+                fogAnchorX: snap.fogAnchorX,
+                fogAnchorY: snap.fogAnchorY,
+                islands: snap.islands,
+                isEliminated:
+                  snap.gameMode === 'SURVIVAL' && snap.lives <= 0,
               })
             }
           }
@@ -1061,7 +1473,9 @@ function startLoop() {
               leftSkinId: menuLeftSkinId.value,
               rightSkinId: menuRightSkinId.value,
               towerAlpha: titleTowerAlpha.value,
-              showSideMascots: screenFlow.value !== 'MULTIPLAYER_LOBBY',
+              showSideMascots:
+                screenFlow.value !== 'MULTIPLAYER_LOBBY' &&
+                screenFlow.value !== 'LOCAL_LOBBY',
             }
           )
         }
@@ -1098,6 +1512,14 @@ function handleKeyDown(e: KeyboardEvent) {
     return
   }
 
+  if (isGameModeModalOpen.value) {
+    if (e.code === 'Escape') {
+      e.preventDefault()
+      closeGameModeModal()
+    }
+    return
+  }
+
   // Menu 1: TITLE_SCREEN — any key triggers the 300ms transition to MAIN_MENU
   if (screenFlow.value === 'TITLE_SCREEN') {
     e.preventDefault()
@@ -1110,6 +1532,18 @@ function handleKeyDown(e: KeyboardEvent) {
     if (e.code === 'Escape') {
       e.preventDefault()
       closeAuthModal()
+    }
+    return
+  }
+
+  // Tela de Preparação Batalha Local (LOCAL_LOBBY)
+  if (screenFlow.value === 'LOCAL_LOBBY') {
+    if (e.code === 'Escape') {
+      e.preventDefault()
+      returnToMainMenu()
+    } else if (e.code === 'Enter' || e.code === 'Space') {
+      e.preventDefault()
+      startGame()
     }
     return
   }
@@ -1140,7 +1574,7 @@ function handleKeyDown(e: KeyboardEvent) {
       if (selectedMenuCard.value === 'MULTIPLAYER') {
         handleMultiplayerCardClick()
       } else {
-        startGame()
+        openLocalBattleLobby()
       }
     } else if (e.code === 'Escape') {
       e.preventDefault()
@@ -1162,7 +1596,9 @@ function handleKeyDown(e: KeyboardEvent) {
 
   if (e.code === 'KeyR') {
     e.preventDefault()
-    restartMatch(true)
+    if (!isOnlineMultiplayerMatch.value) {
+      restartMatch(true)
+    }
     return
   }
 
@@ -1220,8 +1656,33 @@ function handleKeyUp(e: KeyboardEvent) {
   }
 }
 
-function restartMatch(generateNewRandomSeed: boolean = true) {
+function restartMatch(
+  generateNewRandomSeed: boolean = true,
+  reRollRandomMode: boolean = true
+) {
   if (!towerInstance) return
+  if (
+    reRollRandomMode &&
+    !isOnlineMultiplayerMatch.value &&
+    selectedGameMode.value === 'RANDOM'
+  ) {
+    const nextMode = resolveEffectiveGameMode('RANDOM')
+    activeMatchGameMode.value = nextMode
+    towerInstance.setGameMode(nextMode)
+    triggerBanner(
+      `🎲 Modo Aleatório sorteou: ${
+        nextMode === 'SURVIVAL'
+          ? '❤️ MODO SOBREVIVÊNCIA (3 VIDAS)'
+          : '🏁 MODO CORRIDA (30m)'
+      }!`,
+      'info'
+    )
+  } else if (!isOnlineMultiplayerMatch.value && selectedGameMode.value !== 'RANDOM') {
+    activeMatchGameMode.value = selectedGameMode.value
+    towerInstance.setGameMode(selectedGameMode.value)
+  }
+
+  localPlayerLives.value = GAME_CONSTANTS.SURVIVAL_INITIAL_LIVES
   if (generateNewRandomSeed || !seedInput.value.trim()) {
     seedInput.value = generateRandomMatchSeed()
   }
@@ -1391,9 +1852,18 @@ onMounted(() => {
 
   multiplayerClient.registerCallbacks({
     onMatchStart: (payload) => {
-      startGame(payload.pieceSeed, true)
+      startGame(
+        payload.pieceSeed,
+        true,
+        payload.gameMode,
+        payload.selectedGameMode
+      )
+      const modeTitle =
+        payload.gameMode === 'SURVIVAL'
+          ? '❤️ Modo Sobrevivência (3 Vidas)'
+          : '🏁 Modo Corrida (30m)'
       triggerBanner(
-        `🏁 Partida Online Iniciada! Seed compartilhada: ${payload.pieceSeed}`,
+        `${modeTitle} Iniciado! Seed compartilhada: ${payload.pieceSeed}`,
         'success'
       )
     },
@@ -1416,9 +1886,10 @@ onMounted(() => {
       isOnlineMultiplayerMatch.value = false
       if (towerInstance) {
         towerInstance.rankBadge = null
+        towerInstance.localSlotIndex = null
         towerInstance.remoteLanesToRender = []
         towerInstance.activePowerVfxToRender = []
-        towerInstance.offsetX = 0
+        towerInstance.setLaneOffsetX(0)
       }
       screenFlow.value = 'MULTIPLAYER_LOBBY'
       triggerBanner('Vocês voltaram juntos para a Sala Multiplayer!', 'info')
@@ -1436,6 +1907,7 @@ onMounted(() => {
     id: 'player_1',
     offsetX: 0,
     matchSeed: seedInput.value,
+    gameMode: activeMatchGameMode.value,
     onSnapshot: (snap) => {
       snapshot.value = snap
     },
@@ -1455,8 +1927,10 @@ onMounted(() => {
       multiplayerClient.emitPieceSettled(towerHeight, settledCount)
     },
     onLifeLost: () => {
+      localPlayerLives.value = towerInstance
+        ? towerInstance.lives
+        : Math.max(0, localPlayerLives.value - 1)
       if (!isOnlineMultiplayerMatch.value) return
-      localPlayerLives.value = Math.max(0, localPlayerLives.value - 1)
       multiplayerClient.emitLifeLost(localPlayerLives.value)
     },
     onVictory: (elapsedTimeMs, towerHeight) => {
@@ -1522,7 +1996,11 @@ onUnmounted(() => {
     <!-- =================================================================== -->
     <transition name="menu-fade-300">
       <div
-        v-if="screenFlow === 'MAIN_MENU' || screenFlow === 'MULTIPLAYER_LOBBY'"
+        v-if="
+          screenFlow === 'MAIN_MENU' ||
+          screenFlow === 'LOCAL_LOBBY' ||
+          screenFlow === 'MULTIPLAYER_LOBBY'
+        "
         class="top-right-menu-cluster"
       >
         <!-- Crachá compacto da conta Google (quando logado) -->
@@ -1683,7 +2161,7 @@ onUnmounted(() => {
             }"
             @mouseenter="selectedMenuCard = 'LOCAL'"
             @focus="selectedMenuCard = 'LOCAL'"
-            @click="startGame"
+            @click="openLocalBattleLobby"
           >
             <!-- 4 Cantoneiras Amarelas estilo Bloco de Montar -->
             <svg
@@ -1807,6 +2285,21 @@ onUnmounted(() => {
               />
               <span class="menu-brick-card-title">BATALHA LOCAL</span>
             </div>
+
+            <!-- Botão de Engrenagem (Modo de Jogo) direto no cartão Batalha Local -->
+            <span
+              class="menu-card-gear-pill"
+              role="button"
+              tabindex="0"
+              title="Selecionar Modo de Jogo antes de iniciar"
+              @click.stop="openGameModeModal"
+              @keydown.enter.stop.prevent="openGameModeModal"
+            >
+              <span class="menu-card-gear-icon" aria-hidden="true">⚙️</span>
+              <span class="menu-card-gear-text">
+                {{ currentLobbyModeInfo.icon }} {{ currentLobbyModeInfo.shortTitle }}
+              </span>
+            </span>
           </button>
 
           <!-- BLOCO 2: MULTIPLAYER (ATIVO — AUTENTICAÇÃO GOOGLE + MONGODB) -->
@@ -1942,6 +2435,36 @@ onUnmounted(() => {
               />
               <span class="menu-brick-card-title">MULTIPLAYER</span>
             </div>
+
+            <!-- Botões de Modo de Jogo + Condição de Vitória (ao lado) direto no cartão Multiplayer -->
+            <div class="menu-card-pills-row">
+              <span
+                class="menu-card-gear-pill"
+                role="button"
+                tabindex="0"
+                title="Selecionar Modo de Jogo e Condição de Vitória antes de iniciar"
+                @click.stop="openGameModeModal"
+                @keydown.enter.stop.prevent="openGameModeModal"
+              >
+                <span class="menu-card-gear-icon" aria-hidden="true">⚙️</span>
+                <span class="menu-card-gear-text">
+                  {{ currentLobbyModeInfo.icon }} {{ currentLobbyModeInfo.shortTitle }}
+                </span>
+              </span>
+
+              <span
+                class="menu-card-gear-pill menu-card-gear-pill--cup"
+                role="button"
+                tabindex="0"
+                title="Selecionar Condição de Vitória (Copa Multiplayer)"
+                @click.stop="openGameModeModal"
+                @keydown.enter.stop.prevent="openGameModeModal"
+              >
+                <span class="menu-card-gear-text">
+                  {{ currentLobbyVictoryInfo.icon }} {{ currentLobbyVictoryInfo.shortTitle }}
+                </span>
+              </span>
+            </div>
           </button>
 
           <!-- BLOCO 3: SKINS (BLOQUEADO) -->
@@ -1983,6 +2506,149 @@ onUnmounted(() => {
             </div>
             <div class="menu-coming-soon-ribbon">
               <span>EM BREVE</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </transition>
+
+    <!-- =================================================================== -->
+    <!-- TELA DE PREPARAÇÃO BATALHA LOCAL (LOCAL_LOBBY + ENGRENAGEM ⚙️)      -->
+    <!-- =================================================================== -->
+    <transition name="menu-fade-300">
+      <div v-if="screenFlow === 'LOCAL_LOBBY'" class="local-lobby-screen">
+        <!-- Botão superior esquerdo para voltar ao Menu Principal -->
+        <button
+          type="button"
+          class="mp-lobby-back-btn"
+          title="Voltar ao Menu Principal (Esc)"
+          @click="returnToMainMenu"
+        >
+          <img
+            :src="menuSprites.button_x"
+            alt="Voltar"
+            draggable="false"
+          />
+        </button>
+
+        <div class="local-lobby-card">
+          <div class="local-lobby-studs" aria-hidden="true">
+            <span class="local-lobby-stud"></span>
+            <span class="local-lobby-stud"></span>
+            <span class="local-lobby-stud"></span>
+            <span class="local-lobby-stud"></span>
+            <span class="local-lobby-stud"></span>
+            <span class="local-lobby-stud"></span>
+          </div>
+
+          <header class="local-lobby-header">
+            <span class="local-lobby-kicker">PREPARAÇÃO DA PARTIDA</span>
+            <h2 class="local-lobby-title">BATALHA LOCAL</h2>
+          </header>
+
+          <div class="local-lobby-body">
+            <!-- Coluna Esquerda: Personagem Selecionado (clicável para trocar skin) -->
+            <div class="local-lobby-char-box">
+              <div
+                class="local-lobby-char-stage"
+                title="Clique para trocar de personagem"
+                @click="cycleLocalLobbySkin"
+              >
+                <img
+                  :src="menuSprites.area_ready"
+                  alt=""
+                  class="local-lobby-char-bg"
+                  draggable="false"
+                />
+                <img
+                  v-if="activePlayerSkin"
+                  :src="activePlayerSkin.url"
+                  :alt="activePlayerSkin.name"
+                  class="local-lobby-char-sprite"
+                  draggable="false"
+                />
+              </div>
+              <button
+                type="button"
+                class="local-lobby-skin-cycle-btn"
+                @click="cycleLocalLobbySkin"
+              >
+                🎭 {{ activePlayerSkin ? activePlayerSkin.name : 'Personagem' }} ↻
+              </button>
+            </div>
+
+            <!-- Coluna Direita: Modo de Jogo Selecionado + Botão de Engrenagem ⚙️ -->
+            <div class="local-lobby-mode-panel">
+              <div class="local-lobby-mode-top">
+                <div class="local-lobby-mode-label-col">
+                  <span class="local-lobby-mode-caption">MODO DE JOGO ATUAL</span>
+                  <div class="local-lobby-mode-current">
+                    <span class="local-lobby-mode-icon">
+                      {{ currentLobbyModeInfo.icon }}
+                    </span>
+                    <span class="local-lobby-mode-name">
+                      {{ currentLobbyModeInfo.title }}
+                    </span>
+                    <span
+                      class="local-lobby-mode-badge"
+                      :style="{ backgroundColor: currentLobbyModeInfo.accentColor }"
+                    >
+                      {{ currentLobbyModeInfo.badge }}
+                    </span>
+                  </div>
+                </div>
+
+                <!-- BOTÃO DE ENGRENAGEM (SELECIONE O MODO DE JOGO) -->
+                <button
+                  type="button"
+                  class="mode-gear-btn"
+                  title="Selecionar o Modo de Jogo"
+                  aria-label="Selecionar o Modo de Jogo"
+                  @click="openGameModeModal"
+                >
+                  <span class="mode-gear-btn-icon" aria-hidden="true">⚙️</span>
+                  <span class="mode-gear-btn-text">MODO DE JOGO</span>
+                </button>
+              </div>
+
+              <p class="local-lobby-mode-desc">
+                {{ currentLobbyModeInfo.description }}
+              </p>
+
+              <ul class="local-lobby-mode-rules">
+                <li
+                  v-for="(rule, rIdx) in currentLobbyModeInfo.rulesSummary"
+                  :key="rIdx"
+                >
+                  {{ rule }}
+                </li>
+              </ul>
+
+              <div class="local-lobby-actions">
+                <button
+                  type="button"
+                  class="local-lobby-ChangeMode-btn"
+                  @click="openGameModeModal"
+                >
+                  ⚙️ SELECIONE O MODO DE JOGO
+                </button>
+
+                <button
+                  type="button"
+                  class="mp-clean-brick-btn mp-clean-brick-btn--local-start"
+                  @click="startGame()"
+                >
+                  <img
+                    :src="
+                      menuSprites.button_clean_green || menuSprites.button_clean
+                    "
+                    alt=""
+                    aria-hidden="true"
+                    draggable="false"
+                  />
+                  <span class="mp-clean-brick-btn-label">INICIAR PARTIDA</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -2084,7 +2750,7 @@ onUnmounted(() => {
           />
         </button>
 
-        <!-- 1. Cabeçalho Superior: text_multiplayer.png ("SALA MULTIPLAYER") -->
+        <!-- 1. Cabeçalho Superior: text_multiplayer.png ("SALA MULTIPLAYER") + MODO DE JOGO AO LADO DE CONDIÇÃO DE VITÓRIA -->
         <header class="mp-lobby-top-banner">
           <img
             :src="menuSprites.text_multiplayer"
@@ -2092,6 +2758,67 @@ onUnmounted(() => {
             class="mp-lobby-banner-img"
             draggable="false"
           />
+
+          <!-- Barra Dupla Lado a Lado: Modo de Jogo + Condição de Vitória (Copa) -->
+          <div class="mp-lobby-settings-row">
+            <!-- Bloco 1: Modo de Jogo -->
+            <div class="mp-lobby-mode-bar">
+              <div class="mp-lobby-mode-status">
+                <span class="mp-lobby-mode-kicker">MODO DE JOGO:</span>
+                <span class="mp-lobby-mode-value">
+                  {{ currentLobbyModeInfo.icon }} {{ currentLobbyModeInfo.title }}
+                </span>
+                <span
+                  class="mp-lobby-mode-tag"
+                  :style="{ backgroundColor: currentLobbyModeInfo.accentColor }"
+                >
+                  {{ currentLobbyModeInfo.badge }}
+                </span>
+              </div>
+
+              <button
+                type="button"
+                class="mode-gear-btn mode-gear-btn--mp"
+                title="Selecionar o Modo de Jogo da Sala"
+                aria-label="Selecionar o Modo de Jogo da Sala"
+                @click="openGameModeModal"
+              >
+                <span class="mode-gear-btn-icon" aria-hidden="true">⚙️</span>
+                <span class="mode-gear-btn-text">MODO DE JOGO</span>
+              </button>
+            </div>
+
+            <!-- Bloco 2 (AO LADO): Condição de Vitória (Copa Multiplayer + Cartela) -->
+            <div class="mp-lobby-mode-bar mp-lobby-mode-bar--victory">
+              <div class="mp-lobby-mode-status">
+                <span class="mp-lobby-mode-kicker">CONDIÇÃO DE VITÓRIA:</span>
+                <span class="mp-lobby-mode-value">
+                  {{ currentLobbyVictoryInfo.icon }} {{ currentLobbyVictoryInfo.title }}
+                </span>
+                <div
+                  class="cartela-mini-preview"
+                  :title="`Cartela de ${currentLobbyVictoryInfo.targetPoints} áreas (1º=3pts, 2º=2pts, 3º=1pt, 4º=0pts)`"
+                >
+                  <span
+                    v-for="cell in currentLobbyVictoryInfo.targetPoints"
+                    :key="cell"
+                    class="cartela-mini-cell"
+                  ></span>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                class="mode-gear-btn mode-gear-btn--mp mode-gear-btn--cup"
+                title="Selecionar Condição de Vitória da Copa Multiplayer"
+                aria-label="Selecionar Condição de Vitória"
+                @click="openGameModeModal"
+              >
+                <span class="mode-gear-btn-icon" aria-hidden="true">🏆</span>
+                <span class="mode-gear-btn-text">CONDIÇÃO DE VITÓRIA</span>
+              </button>
+            </div>
+          </div>
         </header>
 
         <!-- 2. Grid Central de 4 Slots Horizontais (Máximo de 4 Players) -->
@@ -2156,6 +2883,34 @@ onUnmounted(() => {
                   class="mp-slot-ready-bg"
                   draggable="false"
                 />
+
+                <!-- Cartela de Pontos da Copa no topo do Slot do Jogador -->
+                <div
+                  class="mp-slot-cartela-badge"
+                  :title="`Cartela da Copa: ${slot.cupPoints} / ${currentLobbyVictoryInfo.targetPoints} pontos`"
+                >
+                  <div class="mp-slot-cartela-header">
+                    <span class="mp-slot-cartela-title">
+                      {{ currentLobbyVictoryInfo.icon }} CARTELA
+                    </span>
+                    <span class="mp-slot-cartela-score mono">
+                      {{ slot.cupPoints }}/{{ currentLobbyVictoryInfo.targetPoints }}
+                    </span>
+                  </div>
+                  <div
+                    class="mp-slot-cartela-grid"
+                    :class="`mp-slot-cartela-grid--${currentLobbyVictoryInfo.targetPoints}`"
+                  >
+                    <span
+                      v-for="cellIdx in currentLobbyVictoryInfo.targetPoints"
+                      :key="cellIdx"
+                      class="mp-slot-cartela-cell"
+                      :class="{
+                        'mp-slot-cartela-cell--filled': cellIdx <= slot.cupPoints,
+                      }"
+                    ></span>
+                  </div>
+                </div>
 
                 <!-- Personagem equipado sobre a nuvem de blocos brancos -->
                 <img
@@ -2311,6 +3066,259 @@ onUnmounted(() => {
             </div>
           </footer>
         </transition>
+      </div>
+    </transition>
+
+    <!-- =================================================================== -->
+    <!-- MENU POPUP: "SELECIONE O MODO DE JOGO" + AO LADO "CONDIÇÃO DE VITÓRIA" -->
+    <!-- =================================================================== -->
+    <transition name="menu-fade-300">
+      <div
+        v-if="isGameModeModalOpen"
+        class="gamemode-modal-backdrop"
+        @click.self="closeGameModeModal"
+      >
+        <div
+          class="gamemode-lego-modal gamemode-lego-modal--wide"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="gamemode-modal-title"
+        >
+          <div class="gamemode-modal-studs" aria-hidden="true">
+            <span class="gamemode-modal-stud"></span>
+            <span class="gamemode-modal-stud"></span>
+            <span class="gamemode-modal-stud"></span>
+            <span class="gamemode-modal-stud"></span>
+            <span class="gamemode-modal-stud"></span>
+            <span class="gamemode-modal-stud"></span>
+            <span class="gamemode-modal-stud"></span>
+            <span class="gamemode-modal-stud"></span>
+          </div>
+
+          <button
+            type="button"
+            class="gamemode-modal-close-x"
+            title="Fechar configurações da partida (Esc)"
+            aria-label="Fechar configurações da partida"
+            @click="closeGameModeModal"
+          >
+            <img
+              :src="menuSprites.button_x"
+              alt="Fechar"
+              draggable="false"
+            />
+          </button>
+
+          <!-- DUAS COLUNAS LADO A LADO: MODO DE JOGO (ESQUERDA) + CONDIÇÃO DE VITÓRIA (DIREITA - MULTIPLAYER) -->
+          <div class="gamemode-dual-columns">
+            <!-- COLUNA 1: SELECIONE O MODO DE JOGO -->
+            <section class="gamemode-column-panel">
+              <header class="gamemode-modal-header">
+                <div class="gamemode-modal-gear-badge" aria-hidden="true">⚙️</div>
+                <div>
+                  <h2 id="gamemode-modal-title" class="gamemode-modal-title">
+                    SELECIONE O MODO DE JOGO
+                  </h2>
+                  <p class="gamemode-modal-subtitle">
+                    Válido para Batalha Local e Multiplayer (ou deixe no Aleatório!)
+                  </p>
+                </div>
+              </header>
+
+              <div class="gamemode-options-grid">
+                <button
+                  v-for="opt in GAME_MODE_OPTIONS"
+                  :key="opt.id"
+                  type="button"
+                  class="gamemode-option-card"
+                  :class="{
+                    'gamemode-option-card--selected':
+                      currentLobbySelectableMode === opt.id,
+                  }"
+                  :style="{ '--mode-accent': opt.accentColor }"
+                  @click="selectGameModeOption(opt.id)"
+                >
+                  <div class="gamemode-option-top">
+                    <span class="gamemode-option-icon">{{ opt.icon }}</span>
+                    <span
+                      class="gamemode-option-badge"
+                      :style="{ backgroundColor: opt.accentColor }"
+                    >
+                      {{ opt.badge }}
+                    </span>
+                  </div>
+
+                  <h3 class="gamemode-option-title">{{ opt.title }}</h3>
+                  <p class="gamemode-option-desc">{{ opt.description }}</p>
+
+                  <ul class="gamemode-option-rules">
+                    <li v-for="(rule, rIdx) in opt.rulesSummary" :key="rIdx">
+                      {{ rule }}
+                    </li>
+                  </ul>
+
+                  <div class="gamemode-option-footer">
+                    <span
+                      class="gamemode-option-cta"
+                      :class="{
+                        'gamemode-option-cta--active':
+                          currentLobbySelectableMode === opt.id,
+                      }"
+                    >
+                      {{
+                        currentLobbySelectableMode === opt.id
+                          ? '✓ MODO SELECIONADO'
+                          : 'SELECIONAR MODO'
+                      }}
+                    </span>
+                  </div>
+                </button>
+              </div>
+            </section>
+
+            <!-- COLUNA 2 (AO LADO): CONDIÇÃO DE VITÓRIA (VÁLIDO APENAS PARA O MODO MULTIPLAYER) -->
+            <section
+              class="gamemode-column-panel gamemode-column-panel--victory"
+              :class="{
+                'gamemode-column-panel--local-hint':
+                  screenFlow === 'LOCAL_LOBBY' ||
+                  (screenFlow === 'MAIN_MENU' && selectedMenuCard === 'LOCAL'),
+              }"
+            >
+              <header class="gamemode-modal-header">
+                <div
+                  class="gamemode-modal-gear-badge gamemode-modal-gear-badge--cup"
+                  aria-hidden="true"
+                >
+                  🏆
+                </div>
+                <div class="gamemode-victory-header-copy">
+                  <div class="gamemode-victory-title-row">
+                    <h2 class="gamemode-modal-title">CONDIÇÃO DE VITÓRIA</h2>
+                    <span class="gamemode-mp-only-pill">
+                      🌐 APENAS MULTIPLAYER
+                    </span>
+                  </div>
+                  <p class="gamemode-modal-subtitle">
+                    Pontuação Tricky Towers:
+                    <strong>1º = 3 pts</strong> •
+                    <strong>2º = 2 pts</strong> •
+                    <strong>3º = 1 pt</strong> •
+                    <strong>4º = 0 pts</strong>
+                    (cada ponto preenche 1 área da cartela!)
+                  </p>
+                </div>
+              </header>
+
+              <div class="gamemode-options-grid">
+                <button
+                  v-for="vcOpt in VICTORY_CONDITION_OPTIONS"
+                  :key="vcOpt.id"
+                  type="button"
+                  class="gamemode-option-card gamemode-option-card--victory"
+                  :class="{
+                    'gamemode-option-card--selected':
+                      currentLobbyVictoryCondition === vcOpt.id,
+                  }"
+                  :style="{ '--mode-accent': vcOpt.accentColor }"
+                  @click="selectVictoryConditionOption(vcOpt.id)"
+                >
+                  <div class="gamemode-option-top">
+                    <span class="gamemode-option-icon">{{ vcOpt.icon }}</span>
+                    <span
+                      class="gamemode-option-badge"
+                      :style="{ backgroundColor: vcOpt.accentColor }"
+                    >
+                      {{ vcOpt.badge }}
+                    </span>
+                  </div>
+
+                  <h3 class="gamemode-option-title">{{ vcOpt.title }}</h3>
+
+                  <!-- CARTELA VISUAL DE DEMONSTRAÇÃO (CADA PONTO PREENCHE UMA ÁREA) -->
+                  <div class="victory-card-cartela-box">
+                    <div class="victory-card-cartela-top">
+                      <span class="victory-card-cartela-label">
+                        📋 CARTELA DE {{ vcOpt.targetPoints }} ÁREAS:
+                      </span>
+                      <span class="victory-card-cartela-pts mono">
+                        {{ vcOpt.targetPoints }} PTS
+                      </span>
+                    </div>
+                    <div
+                      class="victory-card-cartela-slots"
+                      :class="`victory-card-cartela-slots--${vcOpt.targetPoints}`"
+                    >
+                      <span
+                        v-for="slotNum in vcOpt.targetPoints"
+                        :key="slotNum"
+                        class="victory-card-cartela-slot"
+                        :class="{
+                          'victory-card-cartela-slot--sample-1st': slotNum <= 3,
+                          'victory-card-cartela-slot--sample-2nd':
+                            slotNum > 3 && slotNum <= 5,
+                        }"
+                      >
+                        {{ slotNum }}
+                      </span>
+                    </div>
+                  </div>
+
+                  <p class="gamemode-option-desc">{{ vcOpt.description }}</p>
+
+                  <ul class="gamemode-option-rules">
+                    <li v-for="(rule, rIdx) in vcOpt.rulesSummary" :key="rIdx">
+                      {{ rule }}
+                    </li>
+                  </ul>
+
+                  <div class="gamemode-option-footer">
+                    <span
+                      class="gamemode-option-cta"
+                      :class="{
+                        'gamemode-option-cta--active':
+                          currentLobbyVictoryCondition === vcOpt.id,
+                      }"
+                    >
+                      {{
+                        currentLobbyVictoryCondition === vcOpt.id
+                          ? '✓ COPA SELECIONADA'
+                          : 'SELECIONAR COPA'
+                      }}
+                    </span>
+                  </div>
+                </button>
+              </div>
+            </section>
+          </div>
+
+          <footer class="gamemode-modal-bottom-bar">
+            <div class="gamemode-modal-summary">
+              <span>
+                ⚙️ Modo:
+                <strong>
+                  {{ currentLobbyModeInfo.icon }} {{ currentLobbyModeInfo.title }}
+                </strong>
+              </span>
+              <span class="gamemode-modal-summary-sep">•</span>
+              <span>
+                🏆 Copa Multiplayer:
+                <strong>
+                  {{ currentLobbyVictoryInfo.icon }}
+                  {{ currentLobbyVictoryInfo.title }}
+                  ({{ currentLobbyVictoryInfo.targetPoints }} áreas na cartela)
+                </strong>
+              </span>
+            </div>
+            <button
+              type="button"
+              class="gamemode-modal-confirm-btn"
+              @click="closeGameModeModal"
+            >
+              ✓ CONFIRMAR E VOLTAR
+            </button>
+          </footer>
+        </div>
       </div>
     </transition>
 
@@ -2839,18 +3847,82 @@ onUnmounted(() => {
     <!-- IN-GAME HUD & MATCH OVERLAYS                                        -->
     <!-- =================================================================== -->
     <template v-if="screenFlow === 'IN_GAME'">
-      <!-- MINIMAL FLOATING TOP-LEFT HUD (RACE INFO & WIND) -->
+      <!-- MINIMAL FLOATING TOP-LEFT HUD (MODE, LIVES, RACE/SURVIVAL INFO & WIND) -->
       <div class="floating-hud-left">
+        <div
+          class="hud-pill"
+          :class="
+            snapshot.gameMode === 'SURVIVAL'
+              ? 'hud-pill--survival-mode'
+              : 'hud-pill--race-mode'
+          "
+        >
+          <span class="hud-pill-label">MODO</span>
+          <span class="hud-pill-value">
+            {{
+              snapshot.gameMode === 'SURVIVAL'
+                ? '❤️ SOBREVIVÊNCIA'
+                : '🏁 CORRIDA'
+            }}
+          </span>
+        </div>
+
+        <div
+          v-if="snapshot.gameMode === 'SURVIVAL'"
+          class="hud-pill hud-pill--lives"
+          :class="{
+            'hud-pill--lives-danger': snapshot.lives <= 1,
+            'hud-pill--lives-invulnerable':
+              (snapshot.invulnerableRemainingMs || 0) > 0,
+            'hud-pill--lives-flash': (snapshot.fallFlashRemainingMs || 0) > 0,
+          }"
+        >
+          <span class="hud-pill-label">VIDAS</span>
+          <span class="hud-pill-value hud-lives-hearts">
+            <span
+              v-for="idx in snapshot.maxLives"
+              :key="`heart-${idx}`"
+              class="hud-heart-icon"
+              :class="{ 'hud-heart-icon--lost': idx > snapshot.lives }"
+            >
+              {{ idx <= snapshot.lives ? '❤️' : '🖤' }}
+            </span>
+          </span>
+          <span
+            v-if="(snapshot.invulnerableRemainingMs || 0) > 0"
+            class="hud-invulnerable-badge mono"
+            title="Invulnerável por 3 segundos para estabilizar a torre!"
+          >
+            🛡️ {{ ((snapshot.invulnerableRemainingMs || 0) / 1000).toFixed(1) }}s
+          </span>
+        </div>
+
         <div class="hud-pill">
           <span class="hud-pill-label">TEMPO</span>
           <span class="hud-pill-value mono">{{ formattedTime }}</span>
         </div>
+
+        <div v-if="snapshot.gameMode === 'SURVIVAL'" class="hud-pill">
+          <span class="hud-pill-label">🧱 PEÇAS</span>
+          <span class="hud-pill-value mono">
+            {{ snapshot.piecesPlaced }}<small>/{{ snapshot.survivalGoalPieces }}</small>
+            <small style="margin-left: 4px; color: #fde047">
+              • FALTAM {{ Math.max(0, snapshot.survivalGoalPieces - snapshot.piecesPlaced) }}
+            </small>
+          </span>
+        </div>
+
         <div class="hud-pill">
           <span class="hud-pill-label">ALTURA</span>
-          <span class="hud-pill-value mono">
+          <span v-if="snapshot.gameMode === 'SURVIVAL'" class="hud-pill-value mono">
+            {{ snapshot.towerHeight.toFixed(1) }}m
+            <small>MÁX {{ snapshot.maxTowerHeight.toFixed(1) }}m</small>
+          </span>
+          <span v-else class="hud-pill-value mono">
             {{ snapshot.towerHeight.toFixed(1) }}<small>/30m</small>
           </span>
         </div>
+
         <div
           class="hud-pill"
           :title="`Elevação [Col 0..7]: [${snapshot.baseElevations.join(', ')}]`"
@@ -2952,6 +4024,13 @@ onUnmounted(() => {
             :size="54"
           />
         </div>
+
+        <div
+          v-if="snapshot.gameMode === 'SURVIVAL'"
+          class="survival-remaining-pieces-tag mono"
+        >
+          🧱 RESTAM {{ Math.max(0, snapshot.survivalGoalPieces - snapshot.piecesPlaced) }}
+        </div>
       </div>
 
       <!-- MINIMAL FLOATING TOP-RIGHT HUD (SINGLE-SLOT POWER + DEV MODE) -->
@@ -3000,7 +4079,14 @@ onUnmounted(() => {
             </button>
           </template>
           <div v-else class="power-slot-empty">
-            Estabilize 0.5s em <strong>8m, 16m ou 24m</strong>
+            Estabilize 0.5s em
+            <strong>
+              {{
+                snapshot.gameMode === 'SURVIVAL'
+                  ? '8m, 16m, 24m+ ou 10/20/30 peças'
+                  : '8m, 16m ou 24m'
+              }}
+            </strong>
           </div>
         </div>
 
@@ -3063,6 +4149,15 @@ onUnmounted(() => {
             </div>
           </transition>
         </div>
+
+        <button
+          v-if="!isOnlineMultiplayerMatch"
+          class="hud-action-btn"
+          title="Selecionar o Modo de Jogo"
+          @click="openGameModeModal"
+        >
+          ⚙️ Modo
+        </button>
 
         <button
           v-if="!isOnlineMultiplayerMatch"
@@ -3132,8 +4227,33 @@ onUnmounted(() => {
         v-if="snapshot.state === 'RESPAWN_DELAY'"
         class="penalty-overlay"
       >
-        <div class="penalty-box">
-          <div class="penalty-title">⚠️ CAIU NA ÁGUA!</div>
+        <div
+          class="penalty-box"
+          :class="{
+            'penalty-box--survival': snapshot.gameMode === 'SURVIVAL',
+            'penalty-box--flash': (snapshot.fallFlashRemainingMs || 0) > 0,
+          }"
+        >
+          <div class="penalty-title">
+            {{
+              snapshot.gameMode === 'SURVIVAL'
+                ? `💔 PERDEU 1 VIDA! (${snapshot.lives}/${snapshot.maxLives})`
+                : '⚠️ CAIU NA ÁGUA!'
+            }}
+          </div>
+          <div
+            v-if="
+              snapshot.gameMode === 'SURVIVAL' &&
+              (snapshot.invulnerableRemainingMs || 0) > 0
+            "
+            class="penalty-shield-pill"
+          >
+            🛡️ INVULNERÁVEL POR
+            <strong>
+              {{ ((snapshot.invulnerableRemainingMs || 0) / 1000).toFixed(1) }}s
+            </strong>
+            (ESTABILIZE SUA TORRE!)
+          </div>
           <div class="penalty-sub">
             Respawn em
             <strong>
@@ -3157,6 +4277,81 @@ onUnmounted(() => {
         </div>
       </div>
 
+      <!-- SURVIVAL ELIMINATED SPECTATOR BANNER IN ONLINE MULTIPLAYER -->
+      <div
+        v-if="
+          snapshot.state === 'GAME_OVER' &&
+          isOnlineMultiplayerMatch &&
+          multiplayerClient.state.gameOverResult === null
+        "
+        class="goal-countdown-banner goal-countdown-banner--eliminated"
+      >
+        <div class="goal-countdown-label">
+          💀 VOCÊ PERDEU AS 3 VIDAS E FOI ELIMINADO!
+        </div>
+        <div class="goal-countdown-sub">
+          Assistindo os sobreviventes até o fim da partida...
+        </div>
+      </div>
+
+      <!-- SURVIVAL SINGLE-PLAYER GAME OVER OVERLAY -->
+      <div
+        v-if="
+          snapshot.state === 'GAME_OVER' &&
+          !isOnlineMultiplayerMatch &&
+          multiplayerClient.state.gameOverResult === null
+        "
+        class="winner-screen-overlay winner-screen-overlay--gameover"
+      >
+        <div class="tricky-winner-text tricky-winner-text--gameover">
+          FIM DE JOGO!
+        </div>
+        <div class="winner-subcard winner-subcard--gameover">
+          <div class="survival-gameover-badge">
+            💔 SUAS 3 VIDAS ACABARAM!
+          </div>
+
+          <div class="survival-stats-grid">
+            <div class="survival-stat-box">
+              <span class="survival-stat-label">🧱 PEÇAS EMPILHADAS</span>
+              <strong class="survival-stat-value mono">
+                {{ snapshot.piecesPlaced }} / {{ snapshot.survivalGoalPieces }}
+              </strong>
+            </div>
+            <div class="survival-stat-box">
+              <span class="survival-stat-label">📏 ALTURA MÁXIMA</span>
+              <strong class="survival-stat-value mono">
+                {{ snapshot.maxTowerHeight.toFixed(1) }}m
+              </strong>
+            </div>
+            <div class="survival-stat-box">
+              <span class="survival-stat-label">⏱️ TEMPO SOBREVIVIDO</span>
+              <strong class="survival-stat-value mono">
+                {{ formattedTime }}
+              </strong>
+            </div>
+          </div>
+
+          <div class="winner-actions">
+            <button
+              class="btn btn-primary"
+              @click="restartMatch(true)"
+            >
+              🔄 Tentar Novamente (R)
+            </button>
+            <button
+              class="btn btn-secondary"
+              @click="openGameModeModal"
+            >
+              ⚙️ Modo de Jogo
+            </button>
+            <button class="btn btn-secondary" @click="returnToMainMenu">
+              🏠 Menu Principal
+            </button>
+          </div>
+        </div>
+      </div>
+
       <!-- TRICKY TOWERS STYLE "WINNER!" & 4-PLAYER PODIUM OVERLAY -->
       <div
         v-if="
@@ -3169,58 +4364,241 @@ onUnmounted(() => {
         <div class="tricky-winner-text">
           {{
             multiplayerClient.state.gameOverResult
-              ? `${multiplayerClient.state.gameOverResult.winnerCustomNick} VENCEU!`
-              : 'WINNER!'
+              ? multiplayerClient.state.gameOverResult.isCupFinished === false
+                ? `RODADA ${multiplayerClient.state.gameOverResult.roundNumber || 1}: ${multiplayerClient.state.gameOverResult.roundWinnerNick || multiplayerClient.state.gameOverResult.winnerCustomNick}!`
+                : `🏆 ${multiplayerClient.state.gameOverResult.winnerCustomNick} VENCEU A COPA!`
+              : snapshot.gameMode === 'SURVIVAL'
+                ? 'SOBREVIVEU!'
+                : 'WINNER!'
           }}
         </div>
-        <div class="winner-subcard">
-          <!-- Pódio Multiplayer Online (até 4 jogadores) -->
+        <div class="winner-subcard winner-subcard--cup">
+          <!-- Cabeçalho da Copa Multiplayer e Regras da Cartela -->
+          <div
+            v-if="multiplayerClient.state.gameOverResult"
+            class="mp-cup-banner"
+          >
+            <div class="mp-cup-banner-top">
+              <span class="mp-cup-banner-title">
+                {{
+                  multiplayerClient.state.gameOverResult.victoryCondition ===
+                  'SINGLE_WIN'
+                    ? '🥇 COPA 1 VITÓRIA'
+                    : multiplayerClient.state.gameOverResult
+                          .victoryCondition === 'CUP_12'
+                      ? '👑 COPA 12 PONTOS'
+                      : '🏆 COPA 6 PONTOS'
+                }}
+                • RODADA {{ multiplayerClient.state.gameOverResult.roundNumber || 1 }}
+              </span>
+              <span
+                class="mp-cup-banner-status"
+                :class="{
+                  'mp-cup-banner-status--done':
+                    multiplayerClient.state.gameOverResult.isCupFinished !==
+                    false,
+                }"
+              >
+                {{
+                  multiplayerClient.state.gameOverResult.isCupFinished === false
+                    ? `EM DISPUTA (META: ${multiplayerClient.state.gameOverResult.cupTargetPoints || 6} ÁREAS)`
+                    : '🏆 COPA FINALIZADA!'
+                }}
+              </span>
+            </div>
+            <div class="mp-cup-banner-rules">
+              <span>🥇 1º = +3 pts</span>
+              <span>🥈 2º = +2 pts</span>
+              <span>🥉 3º = +1 pt</span>
+              <span>4º = +0 pts</span>
+            </div>
+          </div>
+
+          <!-- Pódio Multiplayer Online com CARTELA DE PONTOS (até 4 jogadores) -->
           <div
             v-if="multiplayerClient.state.gameOverResult"
             class="mp-podium-list"
           >
             <div
               v-for="entry in multiplayerClient.state.gameOverResult.podium"
-              :key="entry.userId"
-              class="mp-podium-row"
-              :class="`mp-podium-row--rank-${entry.rank}`"
+              :key="entry.handle || entry.userId"
+              class="mp-podium-row mp-podium-row--with-cartela"
+              :class="[
+                `mp-podium-row--rank-${entry.rank}`,
+                { 'mp-podium-row--cup-champion': entry.isCupWinner },
+              ]"
             >
-              <span class="mp-podium-rank">{{ entry.rank }}º</span>
-              <img
-                :src="getFriendSkinSpriteUrl(entry.equippedSkin)"
-                :alt="entry.customNick"
-                class="mp-podium-skin"
-              />
-              <div class="mp-podium-identity">
-                <strong>{{ entry.customNick }}</strong>
-                <small>{{ entry.handle }}</small>
+              <div class="mp-podium-row-main">
+                <span class="mp-podium-rank">{{ entry.rank }}º</span>
+                <img
+                  :src="getFriendSkinSpriteUrl(entry.equippedSkin)"
+                  :alt="entry.customNick"
+                  class="mp-podium-skin"
+                />
+                <div class="mp-podium-identity">
+                  <strong>
+                    {{ entry.customNick }}
+                    <span
+                      v-if="entry.isCupWinner"
+                      class="mp-podium-cup-crown"
+                      title="Campeão da Copa!"
+                    >
+                      👑 CAMPEÃO
+                    </span>
+                  </strong>
+                  <small>
+                    {{ entry.handle }} • {{ entry.towerHeight.toFixed(1) }}m
+                    <template
+                      v-if="
+                        multiplayerClient.state.gameOverResult.gameMode ===
+                          'SURVIVAL' || snapshot.gameMode === 'SURVIVAL'
+                      "
+                    >
+                      •
+                      {{
+                        entry.lives > 0
+                          ? '❤️'.repeat(Math.min(3, entry.lives))
+                          : '💀 Eliminado'
+                      }}
+                    </template>
+                  </small>
+                </div>
+
+                <!-- Pontos Ganhos na Rodada (+3, +2, +1, +0) -->
+                <span
+                  class="mp-podium-round-pts"
+                  :class="`mp-podium-round-pts--rank-${entry.rank}`"
+                >
+                  +{{
+                    entry.pointsEarned ??
+                    (entry.rank === 1
+                      ? 3
+                      : entry.rank === 2
+                        ? 2
+                        : entry.rank === 3
+                          ? 1
+                          : 0)
+                  }}
+                  {{
+                    (entry.pointsEarned ??
+                      (entry.rank === 1
+                        ? 3
+                        : entry.rank === 2
+                          ? 2
+                          : entry.rank === 3
+                            ? 1
+                            : 0)) === 1
+                      ? 'PT'
+                      : 'PTS'
+                  }}
+                </span>
               </div>
-              <span class="mp-podium-height mono">
-                {{ entry.towerHeight.toFixed(1) }}m
-              </span>
+
+              <!-- CARTELA DE PONTOS DO JOGADOR (CADA PONTO PREENCHE UMA ÁREA) -->
+              <div class="mp-podium-cartela-wrap">
+                <div
+                  class="mp-podium-cartela-grid"
+                  :class="`mp-podium-cartela-grid--${entry.cupTargetPoints || multiplayerClient.state.gameOverResult.cupTargetPoints || 6}`"
+                >
+                  <span
+                    v-for="cellIdx in entry.cupTargetPoints ||
+                    multiplayerClient.state.gameOverResult.cupTargetPoints ||
+                    6"
+                    :key="cellIdx"
+                    class="mp-podium-cartela-cell"
+                    :class="{
+                      'mp-podium-cartela-cell--filled':
+                        cellIdx <= (entry.previousCupPoints ?? 0),
+                      'mp-podium-cartela-cell--earned-now':
+                        cellIdx > (entry.previousCupPoints ?? 0) &&
+                        cellIdx <= (entry.cupPoints ?? entry.pointsEarned ?? 0),
+                    }"
+                  >
+                    <span class="mp-podium-cartela-cell-num">{{ cellIdx }}</span>
+                  </span>
+                </div>
+                <span class="mp-podium-cartela-total mono">
+                  {{ entry.cupPoints ?? entry.pointsEarned ?? 0 }}/{{
+                    entry.cupTargetPoints ||
+                    multiplayerClient.state.gameOverResult.cupTargetPoints ||
+                    6
+                  }}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div
+            v-else-if="snapshot.gameMode === 'SURVIVAL'"
+            class="survival-stats-grid"
+          >
+            <div class="survival-stat-box">
+              <span class="survival-stat-label">❤️ VIDAS RESTANTES</span>
+              <strong class="survival-stat-value">
+                {{ '❤️'.repeat(Math.max(0, snapshot.lives)) }} ({{ snapshot.lives }}/3)
+              </strong>
+            </div>
+            <div class="survival-stat-box">
+              <span class="survival-stat-label">🧱 PEÇAS EMPILHADAS</span>
+              <strong class="survival-stat-value mono">
+                {{ snapshot.piecesPlaced }}
+              </strong>
+            </div>
+            <div class="survival-stat-box">
+              <span class="survival-stat-label">📏 ALTURA MÁXIMA</span>
+              <strong class="survival-stat-value mono">
+                {{ snapshot.maxTowerHeight.toFixed(1) }}m
+              </strong>
             </div>
           </div>
 
           <p class="winner-time">
-            Tempo da Corrida: <strong>{{ formattedTime }}</strong>
+            Tempo da Partida: <strong>{{ formattedTime }}</strong>
           </p>
           <div class="winner-actions">
-            <button
+            <template
               v-if="
                 isOnlineMultiplayerMatch ||
                 multiplayerClient.state.gameOverResult
               "
-              class="btn btn-primary"
-              @click="handleReturnToLobbyFromMatch"
             >
-              🎉 VOLTAR PARA A SALA
-            </button>
+              <button
+                v-if="
+                  multiplayerClient.state.gameOverResult &&
+                  multiplayerClient.state.gameOverResult.isCupFinished === false
+                "
+                class="btn btn-primary"
+                @click="handleNextCupRound"
+              >
+                ⏭️ PRÓXIMA RODADA DA COPA (RODADA
+                {{ (multiplayerClient.state.gameOverResult.roundNumber || 1) + 1 }})
+              </button>
+              <button
+                class="btn"
+                :class="
+                  multiplayerClient.state.gameOverResult &&
+                  multiplayerClient.state.gameOverResult.isCupFinished === false
+                    ? 'btn-secondary'
+                    : 'btn-primary'
+                "
+                @click="handleReturnToLobbyFromMatch"
+              >
+                🎉 VOLTAR PARA A SALA
+              </button>
+            </template>
             <button
               v-else
               class="btn btn-primary"
               @click="restartMatch(true)"
             >
               🎲 Nova Partida
+            </button>
+            <button
+              v-if="!isOnlineMultiplayerMatch"
+              class="btn btn-secondary"
+              @click="openGameModeModal"
+            >
+              ⚙️ Modo de Jogo
             </button>
             <button class="btn btn-secondary" @click="returnToMainMenu">
               🏠 Menu Principal

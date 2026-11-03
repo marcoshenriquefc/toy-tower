@@ -14,6 +14,12 @@ export type PiecePowerEffect =
   | 'TURBO_DROP'
   | 'CASTLE_ROOF'
 
+export type GameMode = 'RACE' | 'SURVIVAL'
+
+export type SelectableGameMode = 'RACE' | 'SURVIVAL' | 'RANDOM'
+
+export type VictoryCondition = 'SINGLE_WIN' | 'CUP_6' | 'CUP_12'
+
 export type MatchState =
   | 'COUNTDOWN'
   | 'SPAWNING'
@@ -23,6 +29,7 @@ export type MatchState =
   | 'GOAL_COUNTDOWN'
   | 'ROOF_DROP'
   | 'VICTORY'
+  | 'GAME_OVER'
 
 export const GAME_CONSTANTS = {
   /** 1 unit = 32x32 pixels */
@@ -43,6 +50,12 @@ export const GAME_CONSTANTS = {
   ISLAND_FRICTION: 0.8,
   /** Finish Line height in units above the top of the base plate */
   GOAL_HEIGHT_UNITS: 30,
+  /** Initial lives in Survival Mode (3 Hearts) */
+  SURVIVAL_INITIAL_LIVES: 3,
+  /** Target number of stabilized pieces to win Survival Mode */
+  SURVIVAL_GOAL_PIECES: 50,
+  /** Invulnerability duration in ms after losing a life in Survival Mode (3 seconds = 3000ms blinking stabilization window) */
+  SURVIVAL_LIFE_LOSS_COOLDOWN_MS: 3000,
   /** Wind activation threshold in units above the base plate */
   WIND_START_HEIGHT_UNITS: 15,
   /** Checkpoint height interval in units (8m, 16m, 24m) */
@@ -105,6 +118,9 @@ export interface ActivePieceSnapshot {
   x: number
   y: number
   angle: number
+  /** 0.0 to 1.0 progress of the recall-to-spawn & transform animation when hit by GIANT_PIECE / SLICK_BRICK / TURBO_DROP / LOCK_ROTATE */
+  recallTransformProgress?: number
+  recallPowerId?: PowerId
 }
 
 export interface SettledBlockSnapshot {
@@ -146,6 +162,14 @@ export interface TowerSnapshot {
   playerId: string
   matchSeed: string
   isSinglePlayer: boolean
+  gameMode: GameMode
+  lives: number
+  maxLives: number
+  invulnerableRemainingMs?: number
+  fallFlashRemainingMs?: number
+  piecesPlaced: number
+  survivalGoalPieces: number
+  maxTowerHeight: number
   elapsedTimeMs: number
   towerHeight: number
   state: MatchState
@@ -161,6 +185,8 @@ export interface TowerSnapshot {
   } | null
   inventoryPower: InventoryPowerSlot
   blindManualRemainingMs: number
+  fogAnchorX?: number
+  fogAnchorY?: number
   nextQueue: QueuedPieceSpec[]
   activePiece: ActivePieceSnapshot | null
   settledBlocks: SettledBlockSnapshot[]

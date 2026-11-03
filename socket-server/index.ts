@@ -1237,6 +1237,10 @@ io.on('connection', async (socket) => {
       activeDebuffs: Array.isArray(payload?.activeDebuffs)
         ? payload.activeDebuffs
         : [],
+      blindManualRemainingMs: Number(payload?.blindManualRemainingMs || 0),
+      fogAnchorX: Number(payload?.fogAnchorX || 0),
+      fogAnchorY: Number(payload?.fogAnchorY ?? 2.2),
+      islands: Array.isArray(payload?.islands) ? payload.islands : [],
       isEliminated,
       updatedAt: Date.now(),
     })

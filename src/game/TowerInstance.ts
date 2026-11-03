@@ -1,7 +1,9 @@
 import Matter from 'matter-js'
 import {
   ActivePieceSnapshot,
+  FloatingIslandSnapshot,
   GAME_CONSTANTS,
+  GameMode,
   InventoryPowerSlot,
   MatchState,
   PiecePowerEffect,
@@ -61,6 +63,7 @@ export interface TowerPieceEntity {
 
 export interface RemoteLaneRenderData {
   laneOffsetX: number
+  slotIndex: number
   handle: string
   customNick: string
   skinSpriteId: string
@@ -70,8 +73,41 @@ export interface RemoteLaneRenderData {
   isEliminated: boolean
   activePiece: ActivePieceSnapshot | null
   settledBlocks: SettledBlockSnapshot[]
+  activeDebuffs: string[]
+  blindManualRemainingMs: number
+  fogAnchorX?: number
+  fogAnchorY?: number
+  islands?: FloatingIslandSnapshot[]
   mascotCastAnimMs: number
   mascotCastCategory: 'POSITIVE' | 'NEGATIVE' | null
+  lastLifeLostAtMs?: number
+}
+
+export interface FallFeedbackCallout {
+  x: number
+  y: number
+  startY: number
+  title: string
+  subtitle: string
+  tone:
+    | 'LIFE_LOSS'
+    | 'SHIELD_PROTECTED'
+    | 'PIECE_DROP'
+    | 'EXTRA_LIFE_CAUGHT'
+    | 'EXTRA_LIFE_ESCAPED'
+  ageMs: number
+  maxAgeMs: number
+}
+
+export interface ExtraLifeBalloonEntity {
+  id: number
+  x: number
+  y: number
+  vx: number
+  vy: number
+  swayPhase: number
+  ageMs: number
+  maxAgeMs: number
 }
 
 export interface PowerVfxRenderData {
@@ -88,12 +124,14 @@ export interface TowerInstanceConfig {
   matchSeed?: string
   /** Optional global BasePresetId chosen by host/server in Multiplayer (otherwise deterministically rolled from matchSeed) */
   basePresetId?: BasePresetId
+  gameMode?: GameMode
   onSnapshot?: (snapshot: TowerSnapshot) => void
   onEventBanner?: (message: string, tone: 'info' | 'warning' | 'success' | 'danger') => void
   onPowerCast?: (category: 'POSITIVE' | 'NEGATIVE', powerId: PowerId) => void
   onPieceSettled?: (towerHeight: number, settledCount: number) => void
   onLifeLost?: () => void
   onVictory?: (elapsedTimeMs: number, towerHeight: number) => void
+  onGameOver?: (elapsedTimeMs: number, maxTowerHeight: number, piecesPlaced: number) => void
 }
 
 export interface ImpactParticle {
@@ -184,6 +222,34 @@ export interface DissolvingBrick {
   reason: 'LATERAL' | 'WATER'
 }
 
+export type PieceAlteringPowerId =
+  | 'GIANT_PIECE'
+  | 'SLICK_BRICK'
+  | 'TURBO_DROP'
+  | 'LOCK_ROTATE'
+
+/**
+ * State for the recall-to-spawn & transformation animation when the player receives
+ * a piece-altering power (`GIANT_PIECE`, `SLICK_BRICK`, `TURBO_DROP`, `LOCK_ROTATE`):
+ * 1. The active piece stops in place (`0..55ms`).
+ * 2. It is elevated smoothly back up to the starting spawn point (`55..340ms`).
+ * 3. At the starting point (`340ms`), the piece itself transforms into the new state
+ *    with a scale-pop & aura animation (`340..620ms`) before resuming its fall.
+ */
+export interface PieceRecallTransformAnim {
+  powerId: PieceAlteringPowerId
+  startLocalX: number
+  startLocalY: number
+  startAngle: number
+  targetLocalX: number
+  targetLocalY: number
+  targetAngle: number
+  elapsedMs: number
+  readonly liftDurationMs: number
+  readonly totalDurationMs: number
+  hasTransformed: boolean
+}
+
 /**
  * Isolated Player Arena / Tower Instance (`TowerInstance`).
  * Uses local coordinates relative to the center-top of its own Green Base Plate,
@@ -195,6 +261,22 @@ export class TowerInstance {
   public matchSeed: string
   /** Single-Player MVP flag: when true, Checkpoint rolls only Positive (Self-Help) powers */
   public isSinglePlayer: boolean = true
+  /** Active Game Mode ('RACE' = Corrida 30m, 'SURVIVAL' = Sobrevivência 3 Vidas) */
+  public gameMode: GameMode = 'RACE'
+  public lives: number = GAME_CONSTANTS.SURVIVAL_INITIAL_LIVES
+  public maxLives: number = GAME_CONSTANTS.SURVIVAL_INITIAL_LIVES
+  public maxTowerHeight: number = 0
+  /** 3-second (3000ms) blinking invulnerability countdown after losing a life in Survival Mode */
+  public invulnerableRemainingMs: number = 0
+  /** Intense multi-pulse white flash timer (780ms) when the player drops a piece */
+  public fallWhiteFlashMs: number = 0
+  /** Expressive Wizard (Mago) shock/panic reaction timer (2500ms) when a piece falls */
+  public mascotFallReactionMs: number = 0
+  private lastLifeLossAtMs: number = -5000
+  private lastFallFeedbackAtMs: number = -5000
+  private fallFeedbackCallouts: FallFeedbackCallout[] = []
+  private survivalPieceCheckpointsReached: number[] = []
+  private extraLifeBalloons: ExtraLifeBalloonEntity[] = []
 
   /** Floating Side Island (`SIDE_ISLAND`) & Lane Boundary configuration constants */
   public readonly BASE_WIDTH = GAME_CONSTANTS.BASE_WIDTH_UNITS // 8.0 columns (Col 0..7)
@@ -249,9 +331,10 @@ export class TowerInstance {
   public slickBrickRemaining: number = 0
   public lockRotateRemaining: number = 0
   public turboDropRemaining: number = 0
+  public giantPieceRemaining: number = 0
   public blindManualRemainingMs: number = 0
-  private fogAnchorX: number = 0
-  private fogAnchorY: number = -38
+  public fogAnchorX: number = 0
+  public fogAnchorY: number = -38
 
   private glueWeldLinks: GlueWeldLink[] = []
   private glueVines: GlueVineBridge[] = []
@@ -273,6 +356,8 @@ export class TowerInstance {
   }> = []
 
   public activePiece: TowerPieceEntity | null = null
+  /** Active recall-to-spawn & transformation animation when hit by a piece-altering power */
+  public pieceRecallAnim: PieceRecallTransformAnim | null = null
   /** Frozen & hidden falling piece stored during GOAL_COUNTDOWN (restored if tower slips before 0.0s, discarded on ROOF_DROP) */
   public heldActivePiece: TowerPieceEntity | null = null
   public settledPieces: TowerPieceEntity[] = []
@@ -311,15 +396,18 @@ export class TowerInstance {
   public cameraCenterHeightUnits: number = 0
   public cameraParallaxX: number = 0
   public cameraZoom: number = 1.0
+  private lastCanvasWidth: number = 1280
+  private lastCanvasHeight: number = 720
   private mascotHoverXUnits: number = 6.2
   private mascotHoverYUnits: number = 3.5
   private victoryAnimTimeMs: number = 0
   public showDebugColliders: boolean = false
   public showGhostPiece: boolean = false
 
-  /** Real-time Multiplayer rank badge, player nick, mascot cast animation, and remote lane render buffers */
+  /** Real-time Multiplayer rank badge, player nick, slot index, mascot cast animation, and remote lane render buffers */
   public rankBadge: '1ST' | '2ND' | '3RD' | '4TH' | null = null
   public playerNick: string = ''
+  public localSlotIndex: number = 0
   public mascotCastAnimMs: number = 0
   public mascotCastCategory: 'POSITIVE' | 'NEGATIVE' | null = null
   public remoteLanesToRender: RemoteLaneRenderData[] = []
@@ -334,6 +422,11 @@ export class TowerInstance {
   private onPieceSettled?: (towerHeight: number, settledCount: number) => void
   private onLifeLost?: () => void
   private onVictory?: (elapsedTimeMs: number, towerHeight: number) => void
+  private onGameOver?: (
+    elapsedTimeMs: number,
+    maxTowerHeight: number,
+    piecesPlaced: number
+  ) => void
 
   constructor(config: TowerInstanceConfig) {
     this.id = config.id
@@ -345,12 +438,16 @@ export class TowerInstance {
     if (config.basePresetId) {
       this.forcedBasePresetId = config.basePresetId
     }
+    if (config.gameMode) {
+      this.gameMode = config.gameMode
+    }
     this.onSnapshot = config.onSnapshot
     this.onEventBanner = config.onEventBanner
     this.onPowerCast = config.onPowerCast
     this.onPieceSettled = config.onPieceSettled
     this.onLifeLost = config.onLifeLost
     this.onVictory = config.onVictory
+    this.onGameOver = config.onGameOver
 
     this.randomizer = new SeededBagRandomizer(this.matchSeed)
     this.windPhaseOffset = (hashSeedString(this.matchSeed) % 1000) / 100
@@ -490,6 +587,7 @@ export class TowerInstance {
   private handleCollisionPairs(pairs: Matter.Pair[]): void {
     if (
       !this.activePiece ||
+      this.pieceRecallAnim !== null ||
       (this.state !== 'FALLING' && this.state !== 'ROOF_DROP')
     ) {
       return
@@ -531,11 +629,6 @@ export class TowerInstance {
         return
       }
 
-      // Wake sleeping tower blocks if bumped by active piece
-      if (!otherPart.parent.isStatic && otherPart.parent.isSleeping) {
-        Matter.Sleeping.set(otherPart.parent, false)
-      }
-
       // Compute horizontal and vertical bounding overlap between the two colliding squares
       const overlapX =
         Math.min(activePart.bounds.max.x, otherPart.bounds.max.x) -
@@ -550,12 +643,17 @@ export class TowerInstance {
       const isAboveTopSurface =
         activePart.bounds.max.y <= otherPart.bounds.min.y + 10
 
+      // Require genuine horizontal support overlap (> 5.5px) so lateral corner grazes in adjacent columns
+      // never falsely trigger bottom support on a tall vertical "I" piece
       const isBottomSupport =
         isAboveTopSurface &&
-        ((dy >= 11 && overlapX > 2.2 && overlapX >= overlapY * 0.55) ||
-          (dy >= 7 && overlapX > 2.2 && normalY > 0.65))
+        ((dy >= 11 && overlapX > 5.5 && overlapX >= overlapY * 0.55) ||
+          (dy >= 7 && overlapX > 5.5 && normalY > 0.65))
 
       if (isBottomSupport) {
+        if (!otherPart.parent.isStatic && otherPart.parent.isSleeping) {
+          Matter.Sleeping.set(otherPart.parent, false)
+        }
         // Start / sustain the 0.5s (500ms) bottom-contact grace window so the player can walk sideways
         // or perform a "Socão" to one of the sides before the piece locks in place!
         if (this.bottomTouchTimerMs === 0 && !this.hasBottomSupportThisTick) {
@@ -601,6 +699,17 @@ export class TowerInstance {
     this.respawnDelayRemainingMs = 0
     this.goalCountdownMs = null
     this.towerHeight = 0
+    this.maxTowerHeight = 0
+    this.lives = GAME_CONSTANTS.SURVIVAL_INITIAL_LIVES
+    this.maxLives = GAME_CONSTANTS.SURVIVAL_INITIAL_LIVES
+    this.invulnerableRemainingMs = 0
+    this.fallWhiteFlashMs = 0
+    this.mascotFallReactionMs = 0
+    this.lastLifeLossAtMs = -5000
+    this.lastFallFeedbackAtMs = -5000
+    this.fallFeedbackCallouts = []
+    this.survivalPieceCheckpointsReached = []
+    this.extraLifeBalloons = []
     this.windForce = 0
     this.windActive = false
     this.checkpointsReached = []
@@ -615,6 +724,7 @@ export class TowerInstance {
     this.slickBrickRemaining = 0
     this.lockRotateRemaining = 0
     this.turboDropRemaining = 0
+    this.giantPieceRemaining = 0
     this.blindManualRemainingMs = 0
     this.fogAnchorX = 0
     this.fogAnchorY = -38
@@ -625,6 +735,7 @@ export class TowerInstance {
     this.confettiParticles = []
 
     this.activePiece = null
+    this.pieceRecallAnim = null
     this.heldActivePiece = null
     this.settledPieces = []
     this.hasSpawnedSideIsland = false
@@ -652,6 +763,66 @@ export class TowerInstance {
 
     this.initWorld()
     this.emitSnapshotNow()
+  }
+
+  /**
+   * Updates the active game mode ('RACE' or 'SURVIVAL') and resets lives.
+   */
+  public setGameMode(mode: GameMode): void {
+    this.gameMode = mode
+    this.lives = GAME_CONSTANTS.SURVIVAL_INITIAL_LIVES
+    this.maxLives = GAME_CONSTANTS.SURVIVAL_INITIAL_LIVES
+    this.invulnerableRemainingMs = 0
+    this.fallWhiteFlashMs = 0
+    this.mascotFallReactionMs = 0
+    this.fallFeedbackCallouts = []
+    this.extraLifeBalloons = []
+    this.emitSnapshotNow()
+  }
+
+  /**
+   * Updates the horizontal world offset (`offsetX`) of this player's lane
+   * (so Player 1 is at Position 1, Player 2 at Position 2, etc.) and seamlessly
+   * translates all existing Matter.js bodies by `deltaX`.
+   */
+  public setLaneOffsetX(newOffsetX: number): void {
+    const deltaX = newOffsetX - this.offsetX
+    if (Math.abs(deltaX) < 0.05) return
+    this.offsetX = newOffsetX
+
+    if (this.baseBody) {
+      Body.setPosition(this.baseBody, {
+        x: this.baseBody.position.x + deltaX,
+        y: this.baseBody.position.y,
+      })
+    }
+    for (const isl of this.islands) {
+      Body.setPosition(isl.body, {
+        x: isl.body.position.x + deltaX,
+        y: isl.body.position.y,
+      })
+    }
+    for (const p of this.settledPieces) {
+      this.setBodyPositionClean(
+        p.body,
+        p.body.position.x + deltaX,
+        p.body.position.y
+      )
+    }
+    if (this.activePiece) {
+      this.setBodyPositionClean(
+        this.activePiece.body,
+        this.activePiece.body.position.x + deltaX,
+        this.activePiece.body.position.y
+      )
+    }
+    if (this.heldActivePiece) {
+      this.setBodyPositionClean(
+        this.heldActivePiece.body,
+        this.heldActivePiece.body.position.x + deltaX,
+        this.heldActivePiece.body.position.y
+      )
+    }
   }
 
   public setSinglePlayerMode(isSingle: boolean): void {
@@ -707,7 +878,8 @@ export class TowerInstance {
     if (
       this.state === 'GOAL_COUNTDOWN' ||
       this.state === 'ROOF_DROP' ||
-      this.state === 'VICTORY'
+      this.state === 'VICTORY' ||
+      this.state === 'GAME_OVER'
     ) {
       return false
     }
@@ -735,7 +907,8 @@ export class TowerInstance {
     if (
       this.state === 'GOAL_COUNTDOWN' ||
       this.state === 'ROOF_DROP' ||
-      this.state === 'VICTORY'
+      this.state === 'VICTORY' ||
+      this.state === 'GAME_OVER'
     ) {
       return false
     }
@@ -852,6 +1025,7 @@ export class TowerInstance {
           const ay = this.activePiece.body.position.y
           World.remove(this.engine.world, this.activePiece.body)
           this.activePiece = null
+          this.pieceRecallAnim = null
           this.brickRemoverEffects.push({
             x: ax,
             y: ay,
@@ -873,19 +1047,28 @@ export class TowerInstance {
         break
       }
 
+      case 'EXTRA_LIFE': {
+        this.activateExtraLifeBalloonPower()
+        break
+      }
+
       case 'GIANT_PIECE': {
-        const stableGiantTypes: PieceType[] = ['I', 'O', 'T', 'L', 'J']
-        const type =
-          stableGiantTypes[
-            Math.floor(this.randomizer.nextFloat() * stableGiantTypes.length)
-          ]
-        this.randomizer.enqueueCustomPiece({
-          type,
-          variant: 'GIANT',
-          label: `🦣 Poder Negativo: Mega-Bloco 2x "${type}" (Massa 16)!`,
-        })
+        const recalled = this.startPieceRecallTransform('GIANT_PIECE')
+        if (!recalled) {
+          const stableGiantTypes: PieceType[] = ['I', 'O', 'T', 'L', 'J']
+          const type =
+            stableGiantTypes[
+              Math.floor(this.randomizer.nextFloat() * stableGiantTypes.length)
+            ]
+          this.giantPieceRemaining++
+          this.randomizer.enqueueCustomPiece({
+            type,
+            variant: 'GIANT',
+            label: `🦣 Poder Negativo: Mega-Bloco 2x "${type}" (Massa 16)!`,
+          })
+        }
         this.onEventBanner?.(
-          `${cfg.icon} Efeito Negativo (Dev): Próxima peça será um Mega-Bloco 2x (Massa 16.0)!`,
+          `${cfg.icon} Mega-Bloco 2x: sua peça parou, subiu de volta ao topo e virou Gigante (2x)!`,
           'warning'
         )
         break
@@ -893,23 +1076,14 @@ export class TowerInstance {
 
       case 'SLICK_BRICK': {
         const count = cfg.durationPieces || 2
-        if (
-          this.activePiece &&
-          this.state === 'FALLING' &&
-          this.activePiece.powerEffect === 'NONE'
-        ) {
-          this.activePiece.powerEffect = 'SLICK_BRICK'
-          this.applyPieceFriction(
-            this.activePiece,
-            GAME_CONSTANTS.SLICK_BRICK_FRICTION,
-            false
-          )
-          this.slickBrickRemaining += count - 1
+        const recalled = this.startPieceRecallTransform('SLICK_BRICK')
+        if (recalled) {
+          this.slickBrickRemaining += Math.max(0, count - 1)
         } else {
           this.slickBrickRemaining += count
         }
         this.onEventBanner?.(
-          `${cfg.icon} Efeito de Gelo: Próximas ${count} peças em gelo azul-ciano escorregadio (μ=0.02)!`,
+          `${cfg.icon} Bloco Escorregadio: sua peça voltou ao topo e congelou em gelo azul-ciano (μ=0.02)!`,
           'warning'
         )
         break
@@ -917,18 +1091,14 @@ export class TowerInstance {
 
       case 'LOCK_ROTATE': {
         const count = cfg.durationPieces || 2
-        if (
-          this.activePiece &&
-          this.state === 'FALLING' &&
-          this.activePiece.powerEffect === 'NONE'
-        ) {
-          this.activePiece.powerEffect = 'LOCK_ROTATE'
-          this.lockRotateRemaining += count - 1
+        const recalled = this.startPieceRecallTransform('LOCK_ROTATE')
+        if (recalled) {
+          this.lockRotateRemaining += Math.max(0, count - 1)
         } else {
           this.lockRotateRemaining += count
         }
         this.onEventBanner?.(
-          `${cfg.icon} Giro Travado: Próximas ${count} peças com rotação travada!`,
+          `${cfg.icon} Giro Travado: sua peça voltou ao topo com rotação travada!`,
           'warning'
         )
         break
@@ -953,22 +1123,257 @@ export class TowerInstance {
 
       case 'TURBO_DROP': {
         const count = cfg.durationPieces || 2
-        if (
-          this.activePiece &&
-          this.state === 'FALLING' &&
-          this.activePiece.powerEffect === 'NONE'
-        ) {
-          this.activePiece.powerEffect = 'TURBO_DROP'
-          this.turboDropRemaining += count - 1
+        const recalled = this.startPieceRecallTransform('TURBO_DROP')
+        if (recalled) {
+          this.turboDropRemaining += Math.max(0, count - 1)
         } else {
           this.turboDropRemaining += count
         }
         this.onEventBanner?.(
-          `${cfg.icon} Queda Turbo: Próximas ${count} peças em queda acelerada!`,
+          `${cfg.icon} Queda Turbo: sua peça voltou ao ponto de partida e entrou em Queda Turbo!`,
           'danger'
         )
         break
       }
+    }
+  }
+
+  /**
+   * Toggles `isSensor` on a piece's compound body and all its child parts so it can
+   * elevate back to the starting point without colliding with tower blocks along the way.
+   */
+  private setPieceBodySensor(body: Matter.Body, isSensor: boolean): void {
+    body.isSensor = isSensor
+    for (const part of body.parts) {
+      part.isSensor = isSensor
+    }
+  }
+
+  /**
+   * Computes the default starting point `(localX, localY)` at the top spawn zone for `piece`.
+   */
+  private computeDefaultSpawnLocalPosition(
+    piece: Pick<TowerPieceEntity, 'cellsFromCoM' | 'scale'>
+  ): { localX: number; localY: number } {
+    const u = GAME_CONSTANTS.UNIT_PX
+    const basePeakUnits = Math.max(0, ...this.currentBasePreset.elevations)
+    const spawnHeightUnits =
+      Math.max(basePeakUnits, this.towerHeight) +
+      GAME_CONSTANTS.SPAWN_OFFSET_UNITS
+    const leftEdgeOffsetUnits = this.getCell0LeftEdgeOffsetUnits(piece, 0)
+    const desiredLeftEdgeUnits = -1.0
+    const spawnXUnits = desiredLeftEdgeUnits - leftEdgeOffsetUnits
+    return {
+      localX: spawnXUnits * u,
+      localY: -spawnHeightUnits * u,
+    }
+  }
+
+  /**
+   * Stops the player's current falling piece, elevates it back up to the starting spawn point,
+   * and schedules the piece-altering transformation (`GIANT_PIECE`, `SLICK_BRICK`, `TURBO_DROP`, `LOCK_ROTATE`)
+   * with a dedicated pop/aura animation at the starting point.
+   */
+  private startPieceRecallTransform(powerId: PieceAlteringPowerId): boolean {
+    // If the player is between pieces (SPAWNING / SETTLING / RESPAWN_DELAY), spawn the piece immediately so it transforms at the top!
+    if (
+      !this.activePiece &&
+      (this.state === 'SPAWNING' ||
+        this.state === 'SETTLING' ||
+        this.state === 'RESPAWN_DELAY')
+    ) {
+      this.settlingTimerMs = 0
+      this.respawnDelayRemainingMs = 0
+      this.spawnNextPiece()
+    }
+
+    if (
+      !this.activePiece ||
+      this.state !== 'FALLING' ||
+      this.activePiece.powerEffect === 'CASTLE_ROOF'
+    ) {
+      return false
+    }
+
+    // If an earlier recall animation was still lifting and hadn't applied its mutation yet, apply it now so nothing is lost
+    if (this.pieceRecallAnim && !this.pieceRecallAnim.hasTransformed) {
+      this.applyPieceRecallMutation(
+        this.pieceRecallAnim.powerId,
+        this.pieceRecallAnim.targetLocalX,
+        this.pieceRecallAnim.targetLocalY
+      )
+    }
+
+    // 1. Stop the active piece immediately
+    this.pendingLandPiece = false
+    this.bottomTouchTimerMs = 0
+    this.hasBottomSupportThisTick = false
+    this.isSoftDropping = false
+    this.softDropTrail = []
+    this.softDropTrailAccumMs = 0
+
+    const body = this.activePiece.body
+    Body.setVelocity(body, { x: 0, y: 0 })
+    Body.setAngularVelocity(body, 0)
+    this.setPieceBodySensor(body, true)
+
+    const startLocalX = body.position.x - this.offsetX
+    const startLocalY = body.position.y
+    const startAngle = body.angle
+    const spawnPos = this.computeDefaultSpawnLocalPosition(this.activePiece)
+
+    const stopColor =
+      powerId === 'GIANT_PIECE'
+        ? '#EF4444'
+        : powerId === 'SLICK_BRICK'
+          ? '#38BDF8'
+          : powerId === 'TURBO_DROP'
+            ? '#F97316'
+            : '#A855F7'
+
+    // Visual burst where the piece stopped in mid-air
+    this.spawnColoredBurst(startLocalX, startLocalY, stopColor, 14)
+    this.impactParticles.push({
+      x: startLocalX,
+      y: startLocalY,
+      vx: 0,
+      vy: 0,
+      radius: 10,
+      ageMs: 0,
+      maxAgeMs: 280,
+      kind: 'ring',
+    })
+
+    this.pieceRecallAnim = {
+      powerId,
+      startLocalX,
+      startLocalY,
+      startAngle,
+      targetLocalX: spawnPos.localX,
+      targetLocalY: spawnPos.localY,
+      targetAngle: 0,
+      elapsedMs: 0,
+      liftDurationMs: 340,
+      totalDurationMs: 640,
+      hasTransformed: false,
+    }
+
+    this.emitSnapshotNow()
+    return true
+  }
+
+  /**
+   * Applies the actual piece transformation (`GIANT_PIECE`, `SLICK_BRICK`, `TURBO_DROP`, `LOCK_ROTATE`)
+   * once the piece arrives back at the starting point `(targetLocalX, targetLocalY)`.
+   */
+  private applyPieceRecallMutation(
+    powerId: PieceAlteringPowerId,
+    targetLocalX: number,
+    targetLocalY: number
+  ): void {
+    if (!this.activePiece) return
+    const u = GAME_CONSTANTS.UNIT_PX
+
+    let burstColor = '#FACC15'
+
+    if (powerId === 'GIANT_PIECE') {
+      burstColor = '#EF4444'
+      const oldPiece = this.activePiece
+      const spawnHeightUnits = Math.max(2.5, -targetLocalY / u)
+      World.remove(this.engine.world, oldPiece.body)
+
+      const giantEntity = this.createPieceEntity(
+        {
+          type: oldPiece.type,
+          variant: 'GIANT',
+          powerEffect: oldPiece.powerEffect,
+          colorPaletteIndex: oldPiece.colorPaletteIndex,
+        },
+        spawnHeightUnits
+      )
+      const giantSpawnPos = this.computeDefaultSpawnLocalPosition(giantEntity)
+      this.setBodyPositionClean(
+        giantEntity.body,
+        this.offsetX + giantSpawnPos.localX,
+        targetLocalY
+      )
+      Body.setAngle(giantEntity.body, 0)
+      Body.setInertia(giantEntity.body, Infinity)
+      Body.setVelocity(giantEntity.body, { x: 0, y: 0 })
+      Body.setAngularVelocity(giantEntity.body, 0)
+      this.setPieceBodySensor(giantEntity.body, true)
+      World.add(this.engine.world, giantEntity.body)
+      this.activePiece = giantEntity
+      if (this.pieceRecallAnim) {
+        this.pieceRecallAnim.targetLocalX = giantSpawnPos.localX
+      }
+    } else if (powerId === 'SLICK_BRICK') {
+      burstColor = '#38BDF8'
+      this.activePiece.powerEffect = 'SLICK_BRICK'
+      this.applyPieceFriction(
+        this.activePiece,
+        GAME_CONSTANTS.SLICK_BRICK_FRICTION,
+        false
+      )
+    } else if (powerId === 'TURBO_DROP') {
+      burstColor = '#F97316'
+      this.activePiece.powerEffect = 'TURBO_DROP'
+    } else if (powerId === 'LOCK_ROTATE') {
+      burstColor = '#A855F7'
+      this.activePiece.powerEffect = 'LOCK_ROTATE'
+    }
+
+    const fxX = this.activePiece.body.position.x - this.offsetX
+    const fxY = this.activePiece.body.position.y
+    this.spawnMagicSmokePoof(fxX, fxY)
+    this.spawnColoredBurst(fxX, fxY, burstColor, 20)
+    this.playPieceTransformSound(powerId)
+  }
+
+  /**
+   * Synthesizes a rising whoosh + transformation chime when a piece is recalled to the top and transformed.
+   */
+  private playPieceTransformSound(powerId: PieceAlteringPowerId): void {
+    try {
+      const AudioContextClass =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext })
+          .webkitAudioContext
+      if (!AudioContextClass) return
+      if (!this.audioCtx) {
+        this.audioCtx = new AudioContextClass()
+      }
+      if (this.audioCtx.state === 'suspended') {
+        this.audioCtx.resume()
+      }
+      const ctx = this.audioCtx
+      const now = ctx.currentTime
+
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.type = powerId === 'GIANT_PIECE' ? 'sawtooth' : 'triangle'
+      const startFreq =
+        powerId === 'GIANT_PIECE'
+          ? 240
+          : powerId === 'SLICK_BRICK'
+            ? 520
+            : 360
+      const endFreq =
+        powerId === 'GIANT_PIECE'
+          ? 150
+          : powerId === 'SLICK_BRICK'
+            ? 880
+            : 680
+      osc.frequency.setValueAtTime(startFreq, now)
+      osc.frequency.exponentialRampToValueAtTime(endFreq, now + 0.18)
+      gain.gain.setValueAtTime(0.24, now)
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22)
+      osc.connect(gain)
+      gain.connect(ctx.destination)
+      osc.start(now)
+      osc.stop(now + 0.23)
+    } catch {
+      // Ignore audio errors
     }
   }
 
@@ -1257,6 +1662,204 @@ export class TowerInstance {
   }
 
   /**
+   * Positive Power 5 (`EXTRA_LIFE` — "Vida Extra / Balão Flutuante"):
+   * Not free! Spawns a floating Heart Balloon ("balão de vida extra") that drifts upward
+   * and sideways as it goes away. To actually earn `+1 ❤️ Vida Extra`, the player must
+   * touch/catch the balloon using the piece they are currently controlling (`this.activePiece`)!
+   */
+  public activateExtraLifeBalloonPower(): void {
+    const u = GAME_CONSTANTS.UNIT_PX
+    const topHeightUnits = Math.max(1.5, this.towerHeight)
+
+    let sideDir: -1 | 1 = this.randomizer.nextFloat() < 0.5 ? -1 : 1
+    let spawnY = -(topHeightUnits + 3.4) * u
+
+    if (this.activePiece) {
+      const pieceLocalX = this.activePiece.body.position.x - this.offsetX
+      const pieceLocalY = this.activePiece.body.position.y
+      if (pieceLocalX > 0.6 * u) {
+        sideDir = -1
+      } else if (pieceLocalX < -0.6 * u) {
+        sideDir = 1
+      }
+      const minY = -(topHeightUnits + 6.4) * u
+      const maxY = -(topHeightUnits + 2.2) * u
+      spawnY = Math.max(minY, Math.min(maxY, pieceLocalY + 2.4 * u))
+    }
+
+    const spawnX =
+      sideDir * (2.8 + this.randomizer.nextFloat() * 1.15) * u
+
+    this.extraLifeBalloons.push({
+      id: this.nextEntityId++,
+      x: spawnX,
+      y: spawnY,
+      vx: sideDir * 9.5,
+      vy: -21,
+      swayPhase: this.randomizer.nextFloat() * Math.PI * 2,
+      ageMs: 0,
+      maxAgeMs: 9200,
+    })
+
+    this.spawnMagicSmokePoof(spawnX, spawnY)
+    this.spawnColoredBurst(spawnX, spawnY, '#F43F5E', 16)
+    this.spawnColoredBurst(spawnX, spawnY, '#FEF08A', 10)
+    this.playBalloonReleaseSound()
+
+    this.onEventBanner?.(
+      '🎈 Balão de Vida Extra solto! Encoste nele com a peça que está controlando antes que vá embora!',
+      'info'
+    )
+  }
+
+  /**
+   * Checks whether any cell of the player's currently controlled piece (`this.activePiece`)
+   * touches an active Extra Life Balloon (`this.extraLifeBalloons`).
+   * If touched, pops the balloon with confetti and grants `+1 ❤️ Vida Extra`!
+   */
+  private checkExtraLifeBalloonCatch(): void {
+    if (
+      this.extraLifeBalloons.length === 0 ||
+      !this.activePiece ||
+      (this.state !== 'FALLING' && this.state !== 'ROOF_DROP')
+    ) {
+      return
+    }
+
+    const u = GAME_CONSTANTS.UNIT_PX
+    const piece = this.activePiece
+    const body = piece.body
+    const pieceLocalX = body.position.x - this.offsetX
+    const pieceLocalY = body.position.y
+    const cos = Math.cos(body.angle)
+    const sin = Math.sin(body.angle)
+    const cellPx = u * piece.scale
+    const cellHitRadius = cellPx * 0.56
+
+    for (let i = this.extraLifeBalloons.length - 1; i >= 0; i--) {
+      const balloon = this.extraLifeBalloons[i]
+      let caught = false
+
+      for (const c of piece.cellsFromCoM) {
+        const rx = (c.x * cos - c.y * sin) * cellPx
+        const ry = (c.x * sin + c.y * cos) * cellPx
+        const cx = pieceLocalX + rx
+        const cy = pieceLocalY + ry
+
+        const distCrown = Math.hypot(cx - balloon.x, cy - balloon.y)
+        const distCharm = Math.hypot(cx - balloon.x, cy - (balloon.y + 22))
+        if (
+          distCrown <= cellHitRadius + 26 ||
+          distCharm <= cellHitRadius + 20
+        ) {
+          caught = true
+          break
+        }
+      }
+
+      if (caught) {
+        this.extraLifeBalloons.splice(i, 1)
+        this.lives += 1
+        if (this.lives > this.maxLives) {
+          this.maxLives = Math.min(5, this.lives)
+        }
+
+        this.spawnVictoryConfetti(balloon.x, balloon.y, 26)
+        this.spawnColoredBurst(balloon.x, balloon.y, '#F43F5E', 18)
+        this.spawnColoredBurst(balloon.x, balloon.y, '#FACC15', 14)
+        this.playExtraLifeCaughtSound()
+
+        const calloutX = Math.max(-5.5 * u, Math.min(5.5 * u, balloon.x))
+        this.fallFeedbackCallouts.push({
+          x: calloutX,
+          y: balloon.y,
+          startY: balloon.y,
+          title: '🎈❤️ +1 VIDA EXTRA!',
+          subtitle: `AGORA COM ${this.lives} ❤️`,
+          tone: 'EXTRA_LIFE_CAUGHT',
+          ageMs: 0,
+          maxAgeMs: 1750,
+        })
+
+        this.onLifeLost?.()
+        const heartsDisplay =
+          '❤️'.repeat(this.lives) +
+          '🖤'.repeat(Math.max(0, this.maxLives - this.lives))
+        this.onEventBanner?.(
+          `🎈❤️ VIDA EXTRA CAPTURADA! Você pegou o balão com a peça controlada! (${heartsDisplay})`,
+          'success'
+        )
+        this.emitSnapshotNow()
+      }
+    }
+  }
+
+  private playBalloonReleaseSound(): void {
+    try {
+      const AudioContextClass =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext })
+          .webkitAudioContext
+      if (!AudioContextClass) return
+      if (!this.audioCtx) {
+        this.audioCtx = new AudioContextClass()
+      }
+      if (this.audioCtx.state === 'suspended') {
+        this.audioCtx.resume()
+      }
+      const ctx = this.audioCtx
+      const now = ctx.currentTime
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.type = 'sine'
+      osc.frequency.setValueAtTime(340, now)
+      osc.frequency.exponentialRampToValueAtTime(680, now + 0.22)
+      gain.gain.setValueAtTime(0.22, now)
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25)
+      osc.connect(gain)
+      gain.connect(ctx.destination)
+      osc.start(now)
+      osc.stop(now + 0.26)
+    } catch {
+      // Ignore audio errors
+    }
+  }
+
+  private playExtraLifeCaughtSound(): void {
+    try {
+      const AudioContextClass =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext })
+          .webkitAudioContext
+      if (!AudioContextClass) return
+      if (!this.audioCtx) {
+        this.audioCtx = new AudioContextClass()
+      }
+      if (this.audioCtx.state === 'suspended') {
+        this.audioCtx.resume()
+      }
+      const ctx = this.audioCtx
+      const now = ctx.currentTime
+      const notes = [587.33, 783.99, 987.77, 1174.66] // D5, G5, B5, D6
+      notes.forEach((freq, idx) => {
+        const osc = ctx.createOscillator()
+        const gain = ctx.createGain()
+        osc.type = 'triangle'
+        const t0 = now + idx * 0.065
+        osc.frequency.setValueAtTime(freq, t0)
+        gain.gain.setValueAtTime(0.24, t0)
+        gain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.34)
+        osc.connect(gain)
+        gain.connect(ctx.destination)
+        osc.start(t0)
+        osc.stop(t0 + 0.35)
+      })
+    } catch {
+      // Ignore audio errors
+    }
+  }
+
+  /**
    * Checks whether any settled piece in the tower is resting on or welded to `island`.
    */
   private isIslandSupportingAnyBlock(island: FloatingIsland): boolean {
@@ -1498,39 +2101,64 @@ export class TowerInstance {
       y: c.y - comUnitY,
     }))
 
-    const colliderW = cellPx - 3.2
-    const colliderH = cellPx - 0.8
-    const effFriction =
-      powerEffect === 'SLICK_BRICK'
-        ? GAME_CONSTANTS.SLICK_BRICK_FRICTION
-        : phys.friction * slideParams.frictionScale
+    // Rotation-symmetric outer clearance (1.0px on exposed outer faces, 0px on internal shared seams)
+    // so rotating any piece by 90° ("em pé") preserves exact slot width, height, and smooth notch-free sides!
+    const outerInset = 1.0
+    const outerCornerRadius = 2.0
+
+    const hasNeighborCell = (
+      cell: CellCoord,
+      dx: number,
+      dy: number
+    ): boolean =>
+      def.cells.some(
+        (other) =>
+          Math.abs(other.x - (cell.x + dx)) < 0.05 &&
+          Math.abs(other.y - (cell.y + dy)) < 0.05
+      )
 
     const partBodies: Matter.Body[] = def.cells.map((cell) => {
-      return Bodies.rectangle(
-        cell.x * cellPx,
-        cell.y * cellPx,
-        colliderW,
-        colliderH,
-        {
-          chamfer: { radius: 3.5 },
-          friction: effFriction,
-          frictionStatic:
-            powerEffect === 'SLICK_BRICK'
-              ? GAME_CONSTANTS.SLICK_BRICK_FRICTION
-              : effFriction * slideParams.staticMultUnsnapped,
-          restitution: 0.0,
-          slop: 0.01,
-        }
-      )
+      const hasLeft = hasNeighborCell(cell, -1, 0)
+      const hasRight = hasNeighborCell(cell, 1, 0)
+      const hasTop = hasNeighborCell(cell, 0, -1)
+      const hasBottom = hasNeighborCell(cell, 0, 1)
+
+      const insetLeft = hasLeft ? 0 : outerInset
+      const insetRight = hasRight ? 0 : outerInset
+      const insetTop = hasTop ? 0 : outerInset
+      const insetBottom = hasBottom ? 0 : outerInset
+
+      const partW = cellPx - insetLeft - insetRight
+      const partH = cellPx - insetTop - insetBottom
+      const partCenterX = cell.x * cellPx + (insetLeft - insetRight) * 0.5
+      const partCenterY = cell.y * cellPx + (insetTop - insetBottom) * 0.5
+
+      // Only chamfer true outer corners of the piece; internal seams stay 100% flush with zero notches
+      const rTL = !hasTop && !hasLeft ? outerCornerRadius : 0
+      const rTR = !hasTop && !hasRight ? outerCornerRadius : 0
+      const rBR = !hasBottom && !hasRight ? outerCornerRadius : 0
+      const rBL = !hasBottom && !hasLeft ? outerCornerRadius : 0
+      const cornerRadii = [rTL, rTR, rBR, rBL]
+      const hasAnyChamfer = cornerRadii.some((r) => r > 0)
+
+      // Active falling pieces use 0 friction while in player control so sliding past tower walls never drags settled blocks
+      const part = Bodies.rectangle(partCenterX, partCenterY, partW, partH, {
+        chamfer: hasAnyChamfer
+          ? { radius: cornerRadii as unknown as number }
+          : undefined,
+        friction: 0,
+        frictionStatic: 0,
+        restitution: 0.0,
+        slop: 0.01,
+      })
+      Body.setMass(part, phys.cellMass)
+      return part
     })
 
     const compound = Body.create({
       parts: [...partBodies],
-      friction: effFriction,
-      frictionStatic:
-        powerEffect === 'SLICK_BRICK'
-          ? GAME_CONSTANTS.SLICK_BRICK_FRICTION
-          : effFriction * slideParams.staticMultUnsnapped,
+      friction: 0,
+      frictionStatic: 0,
       frictionAir: 0.018 + 0.008 * slideParams.grip,
       restitution: 0.0,
       slop: 0.01,
@@ -1538,9 +2166,27 @@ export class TowerInstance {
       label: `piece_${spec.type}_${this.nextEntityId}`,
     })
 
+    // Ensure compound center of mass matches the exact geometric 4-cell average `(comUnitX, comUnitY)`
+    const targetComPxX = comUnitX * cellPx
+    const targetComPxY = comUnitY * cellPx
+    if (
+      Math.abs(compound.position.x - targetComPxX) > 1e-4 ||
+      Math.abs(compound.position.y - targetComPxY) > 1e-4
+    ) {
+      Body.setCentre(
+        compound,
+        {
+          x: targetComPxX - compound.position.x,
+          y: targetComPxY - compound.position.y,
+        },
+        true
+      )
+    }
+
     Body.setMass(compound, phys.totalMass)
     const baseInertia = compound.inertia
-    const realInertia = baseInertia * slideParams.inertiaMult
+    const typeInertiaMult = spec.type === 'I' ? 1.45 : 1.0
+    const realInertia = baseInertia * slideParams.inertiaMult * typeInertiaMult
 
     const tempPiece = { cellsFromCoM, scale: phys.scale }
     const leftEdgeOffsetUnits = this.getCell0LeftEdgeOffsetUnits(tempPiece, 0)
@@ -1575,11 +2221,23 @@ export class TowerInstance {
    * Spawns the next piece from the 7-Bag (applying any queued Positive or Negative Power Effects).
    */
   private spawnNextPiece(): void {
+    if (
+      this.gameMode === 'SURVIVAL' &&
+      this.lives > 0 &&
+      this.settledPieces.length >= GAME_CONSTANTS.SURVIVAL_GOAL_PIECES
+    ) {
+      this.triggerSurvivalVictory()
+      return
+    }
+
     const basePeakUnits = Math.max(0, ...this.currentBasePreset.elevations)
     const spawnHeightUnits =
       Math.max(basePeakUnits, this.towerHeight) + GAME_CONSTANTS.SPAWN_OFFSET_UNITS
 
     const spec = this.randomizer.nextPiece()
+    if (spec.variant === 'GIANT' && this.giantPieceRemaining > 0) {
+      this.giantPieceRemaining--
+    }
     if (this.pendingNextPiecePower !== 'NONE') {
       spec.powerEffect = this.pendingNextPiecePower
       this.pendingNextPiecePower = 'NONE'
@@ -1665,6 +2323,10 @@ export class TowerInstance {
       return
     }
 
+    // Resolve any vertical micro-penetration with supporting blocks below before unlocking rotational inertia
+    // so tall vertical pieces ("I" em pé) never receive an off-center separation kick upon landing!
+    this.resolveLandingVerticalPenetration(body)
+
     // Unlock rotation: restore compound moment of inertia
     Body.setInertia(body, piece.realInertia)
     ;(body as unknown as { anglePrev: number }).anglePrev = body.angle
@@ -1700,6 +2362,57 @@ export class TowerInstance {
     this.onPieceSettled?.(this.towerHeight, this.settledPieces.length)
     this.state = 'SETTLING'
     this.settlingTimerMs = 170
+  }
+
+  /**
+   * Separates any vertical micro-penetration between a newly landed `body` and the blocks supporting it below,
+   * and damps any spurious angular impulse on the supporting blocks so landing a vertical piece never kicks the tower.
+   */
+  private resolveLandingVerticalPenetration(body: Matter.Body): void {
+    const candidates: Matter.Body[] = [
+      this.baseBody,
+      ...this.islands.filter((i) => !i.body.isSensor).map((i) => i.body),
+      ...this.settledPieces.map((p) => p.body),
+    ]
+    const activeParts =
+      body.parts.length > 1 ? body.parts.slice(1) : [body]
+
+    let maxPenY = 0
+    for (const other of candidates) {
+      if (other === body) continue
+      const otherParts =
+        other.parts.length > 1 ? other.parts.slice(1) : [other]
+
+      for (const partA of activeParts) {
+        for (const partB of otherParts) {
+          const overlapX =
+            Math.min(partA.bounds.max.x, partB.bounds.max.x) -
+            Math.max(partA.bounds.min.x, partB.bounds.min.x)
+          if (overlapX <= 5.5) continue
+
+          const dy = partB.position.y - partA.position.y
+          if (dy < 7) continue
+
+          const penY = partA.bounds.max.y - partB.bounds.min.y
+          if (penY > 0.05 && penY <= 6.5) {
+            if (penY > maxPenY) {
+              maxPenY = penY
+            }
+            if (!other.isStatic && !other.isSleeping) {
+              Body.setAngularVelocity(other, other.angularVelocity * 0.35)
+              Body.setVelocity(other, {
+                x: other.velocity.x * 0.5,
+                y: Math.max(-0.1, Math.min(0.25, other.velocity.y)),
+              })
+            }
+          }
+        }
+      }
+    }
+
+    if (maxPenY > 0.05) {
+      this.setBodyPositionClean(body, body.position.x, body.position.y - maxPenY)
+    }
   }
 
   /**
@@ -2101,6 +2814,7 @@ export class TowerInstance {
   public moveHorizontal(dir: -1 | 1, isShiftNudge: boolean): void {
     if (
       !this.activePiece ||
+      this.pieceRecallAnim !== null ||
       (this.state !== 'FALLING' && this.state !== 'ROOF_DROP')
     ) {
       return
@@ -2194,6 +2908,7 @@ export class TowerInstance {
 
     // Test requested step on exact grid alignment without penetrating any block
     if (this.tryMoveBodyWithSlotClearance(body, targetX, origPos.y)) {
+      this.checkExtraLifeBalloonCatch()
       if (clampedByBoundary) {
         this.boundaryShakeDir = dir
         this.boundaryShakeTimerMs = 110
@@ -2357,7 +3072,7 @@ export class TowerInstance {
           const overlapX =
             Math.min(partA.bounds.max.x, partB.bounds.max.x) -
             Math.max(partA.bounds.min.x, partB.bounds.min.x)
-          if (overlapX <= 2.2) continue
+          if (overlapX <= 5.5) continue
 
           const dy = partB.position.y - partA.position.y
           if (dy < 7) continue
@@ -2518,15 +3233,15 @@ export class TowerInstance {
         otherBody.parts.length > 1 ? otherBody.parts.slice(1) : [otherBody]
 
       for (const partA of activeParts) {
-        // Visual outer edges of partA (accounting for 1.6px horizontal collider inset)
-        const aLeft = partA.bounds.min.x - 1.6
-        const aRight = partA.bounds.max.x + 1.6
+        // Visual outer edges of partA (accounting for 1.0px outer collider inset)
+        const aLeft = partA.bounds.min.x - 1.0
+        const aRight = partA.bounds.max.x + 1.0
         const aTop = partA.bounds.min.y + 3.0
         const aBottom = partA.bounds.max.y - 3.0
 
         for (const partB of otherParts) {
-          const bLeft = partB.bounds.min.x - 1.6
-          const bRight = partB.bounds.max.x + 1.6
+          const bLeft = partB.bounds.min.x - 1.0
+          const bRight = partB.bounds.max.x + 1.0
           const bTop = partB.bounds.min.y + 3.0
           const bBottom = partB.bounds.max.y - 3.0
 
@@ -2845,12 +3560,33 @@ export class TowerInstance {
   }
 
   /**
+   * Returns the downward extent (in pixels below `body.position.y`) of `piece` when rotated at `angleRad`.
+   */
+  private getPieceBottomExtentPx(
+    piece: Pick<TowerPieceEntity, 'cellsFromCoM' | 'scale'>,
+    angleRad: number
+  ): number {
+    const sin = Math.sin(angleRad)
+    const cos = Math.cos(angleRad)
+    const cellPx = GAME_CONSTANTS.UNIT_PX * piece.scale
+    let maxBottomPx = -Infinity
+    for (const c of piece.cellsFromCoM) {
+      const ry = (c.x * sin + c.y * cos + 0.5) * cellPx
+      if (ry > maxBottomPx) {
+        maxBottomPx = ry
+      }
+    }
+    return maxBottomPx
+  }
+
+  /**
    * Instant 90-degree rotation (clockwise = +1, counter-clockwise = -1)
    * with exact grid preservation and physical Wall Kick (±1.0 or ±0.5 unit).
    */
   public rotateActivePiece(direction: 1 | -1): void {
     if (
       !this.activePiece ||
+      this.pieceRecallAnim !== null ||
       (this.state !== 'FALLING' && this.state !== 'ROOF_DROP')
     ) {
       return
@@ -2897,6 +3633,10 @@ export class TowerInstance {
       Math.round((origAngle + direction * (Math.PI / 2)) / (Math.PI / 2)) *
       (Math.PI / 2)
 
+    const oldBottomExtentPx = this.getPieceBottomExtentPx(piece, origAngle)
+    const newBottomExtentPx = this.getPieceBottomExtentPx(piece, targetAngle)
+    const extraDownwardPx = Math.max(0, newBottomExtentPx - oldBottomExtentPx)
+
     Body.setAngle(body, targetAngle)
     Body.setInertia(body, Infinity)
 
@@ -2925,9 +3665,23 @@ export class TowerInstance {
       y: origPos.y,
     }
 
-    // Prioritize small Wall Kicks and slot-fitting micro-clearance so rotating near slots works smoothly
-    const kickOffsetsUnits = [0, 0.5, -0.5, 1.0, -1.0, 1.5, -1.5, 2.0, -2.0]
-    for (const kickU of kickOffsetsUnits) {
+    const finalizeSuccessfulRotation = () => {
+      this.checkExtraLifeBalloonCatch()
+      if (!this.isPieceSupportedBelow(body)) {
+        this.bottomTouchTimerMs = 0
+        this.hasBottomSupportThisTick = false
+      }
+      if (
+        piece.powerEffect === 'STATIC_BRICK' &&
+        this.isStaticBrickTouchingTower(body)
+      ) {
+        this.landActivePiece()
+      }
+    }
+
+    // 1. First test exact vertical position (or micro-lifts) at `kickU = 0` and `±0.5`
+    const primaryKicks = [0, 0.5, -0.5]
+    for (const kickU of primaryKicks) {
       const candidateBodyXUnits = alignedBodyXUnits + kickU
       if (
         candidateBodyXUnits < minRotBodyXUnits - 0.04 ||
@@ -2942,12 +3696,53 @@ export class TowerInstance {
           alignedPos.y
         )
       ) {
+        finalizeSuccessfulRotation()
+        return
+      }
+    }
+
+    // 2. When rotating a piece increases its downward reach (e.g. rotating "I" from horizontal 4x1 to vertical 1x4 "em pé",
+    // which extends the bottom downward by +1.5u = +48px), lift the piece upward in its current column so its bottom
+    // sits cleanly above the tower rather than kicking it sideways into the side of the tower!
+    if (extraDownwardPx > 0) {
+      const maxLiftPx = Math.ceil(extraDownwardPx + 6)
+      for (const kickU of primaryKicks) {
+        const candidateBodyXUnits = alignedBodyXUnits + kickU
         if (
-          piece.powerEffect === 'STATIC_BRICK' &&
-          this.isStaticBrickTouchingTower(body)
+          candidateBodyXUnits < minRotBodyXUnits - 0.04 ||
+          candidateBodyXUnits > maxRotBodyXUnits + 0.04
         ) {
-          this.landActivePiece()
+          continue
         }
+        const testX = alignedPos.x + kickU * u
+        for (let liftPx = 6; liftPx <= maxLiftPx; liftPx += 4) {
+          this.setBodyPositionClean(body, testX, alignedPos.y - liftPx)
+          if (this.getOverlappingTowerBodies(body).length === 0) {
+            finalizeSuccessfulRotation()
+            return
+          }
+        }
+      }
+    }
+
+    // 3. Fallback wider horizontal Wall Kicks (±1.0u .. ±2.0u) if wedged between tall side walls
+    const wideKickOffsetsUnits = [1.0, -1.0, 1.5, -1.5, 2.0, -2.0]
+    for (const kickU of wideKickOffsetsUnits) {
+      const candidateBodyXUnits = alignedBodyXUnits + kickU
+      if (
+        candidateBodyXUnits < minRotBodyXUnits - 0.04 ||
+        candidateBodyXUnits > maxRotBodyXUnits + 0.04
+      ) {
+        continue
+      }
+      if (
+        this.tryMoveBodyWithSlotClearance(
+          body,
+          alignedPos.x + kickU * u,
+          alignedPos.y
+        )
+      ) {
+        finalizeSuccessfulRotation()
         return
       }
     }
@@ -2962,7 +3757,7 @@ export class TowerInstance {
   /**
    * Checks if a `STATIC_BRICK` ("Bloco de Ferro") is touching any block in the tower,
    * the base plate, or a Side Island—including lateral (side-to-side) contact!
-   * Accounts for the 1.6px horizontal collider inset per cell (`gapX <= 3.8px` when visually flush).
+   * Accounts for the 1.0px outer collider inset per cell (`gapX <= 3.8px` when visually flush).
    */
   private isStaticBrickTouchingTower(testBody: Matter.Body): boolean {
     const candidates: Matter.Body[] = [
@@ -3006,13 +3801,13 @@ export class TowerInstance {
             Math.min(partA.bounds.max.y, partB.bounds.max.y) -
             Math.max(partA.bounds.min.y, partB.bounds.min.y)
 
-          // 1. Lateral touch (side-by-side): collider inset is 1.6px on each block (3.2px total when visually flush)
+          // 1. Lateral touch (side-by-side): collider inset is 1.0px on each block (2.0px total when visually flush)
           if (gapX <= 3.8 && overlapY >= 2.0) {
             return true
           }
 
-          // 2. Vertical touch (top or bottom): collider inset is 0.4px on each block (0.8px total when visually flush)
-          if (gapY <= 1.6 && overlapX >= 2.0) {
+          // 2. Vertical touch (top or bottom): collider inset is 1.0px on each block (2.0px total when visually flush)
+          if (gapY <= 2.8 && overlapX >= 2.0) {
             return true
           }
         }
@@ -3121,6 +3916,13 @@ export class TowerInstance {
       return
     }
 
+    if (this.state === 'GAME_OVER') {
+      this.updateCamera(dtMs)
+      this.updateNudgeEffects(dtMs)
+      this.tickSnapshots(dtMs)
+      return
+    }
+
     const clampedDt = Math.min(16.667, dtMs)
 
     // 1. Handle initial 3, 2, 1, GO! countdown
@@ -3169,8 +3971,10 @@ export class TowerInstance {
       }
     }
 
-    // 3. Control active falling piece velocity (in FALLING or ROOF_DROP, with Soft Drop & Turbo Drop support)
-    if (
+    // 3. Control active falling piece velocity (or Recall-to-Spawn & Transform animation)
+    if (this.pieceRecallAnim && this.activePiece) {
+      this.updatePieceRecallAnim(clampedDt)
+    } else if (
       this.activePiece &&
       (this.state === 'FALLING' || this.state === 'ROOF_DROP')
     ) {
@@ -3231,6 +4035,7 @@ export class TowerInstance {
     // 5a-bis. Bloco de Ferro (`STATIC_BRICK`): if it touches any block even laterally while falling, freeze immediately!
     if (
       !this.pendingLandPiece &&
+      !this.pieceRecallAnim &&
       this.activePiece &&
       this.state === 'FALLING' &&
       this.activePiece.powerEffect === 'STATIC_BRICK' &&
@@ -3243,6 +4048,7 @@ export class TowerInstance {
     // Upon touching the piece below, gives the player 0.5s to walk sideways (`←/→`) or perform a Socão (`Shift + ←/→`).
     if (
       !this.pendingLandPiece &&
+      !this.pieceRecallAnim &&
       this.activePiece &&
       this.state === 'FALLING'
     ) {
@@ -3264,7 +4070,7 @@ export class TowerInstance {
     }
 
     // 5b. Process queued landing cleanly after Solver finishes position & velocity passes
-    if (this.pendingLandPiece) {
+    if (this.pendingLandPiece && !this.pieceRecallAnim) {
       this.landActivePiece()
     }
 
@@ -3281,13 +4087,187 @@ export class TowerInstance {
   }
 
   /**
+   * Advances the piece recall-to-spawn & transformation animation (`this.pieceRecallAnim`):
+   * - `0..55ms`: Piece stops in mid-air.
+   * - `55..liftDurationMs (340ms)`: Piece rises smoothly back up to the starting spawn point.
+   * - `liftDurationMs (340ms)`: Applies the piece mutation (`GIANT_PIECE`, `SLICK_BRICK`, `TURBO_DROP`, `LOCK_ROTATE`).
+   * - `liftDurationMs..totalDurationMs (640ms)`: Hovers at the starting point playing a transformation scale-pop & aura animation.
+   */
+  private updatePieceRecallAnim(dtMs: number): void {
+    const anim = this.pieceRecallAnim
+    if (!anim || !this.activePiece) {
+      this.pieceRecallAnim = null
+      return
+    }
+
+    anim.elapsedMs += dtMs
+
+    if (anim.elapsedMs < anim.liftDurationMs) {
+      const freezeMs = 55
+      const rawT =
+        anim.elapsedMs <= freezeMs
+          ? 0
+          : Math.min(
+              1,
+              (anim.elapsedMs - freezeMs) /
+                Math.max(1, anim.liftDurationMs - freezeMs)
+            )
+      // Smooth cubic ease-in-out
+      const ease =
+        rawT < 0.5
+          ? 4 * rawT * rawT * rawT
+          : 1 - Math.pow(-2 * rawT + 2, 3) / 2
+
+      const curLocalX =
+        anim.startLocalX + (anim.targetLocalX - anim.startLocalX) * ease
+      const curLocalY =
+        anim.startLocalY + (anim.targetLocalY - anim.startLocalY) * ease
+      const curAngle = anim.startAngle * (1 - ease)
+
+      this.setBodyPositionClean(
+        this.activePiece.body,
+        this.offsetX + curLocalX,
+        curLocalY
+      )
+      Body.setAngle(this.activePiece.body, curAngle)
+      Body.setVelocity(this.activePiece.body, { x: 0, y: 0 })
+      Body.setAngularVelocity(this.activePiece.body, 0)
+
+      // Emit shimmering upward tractor-beam particles while elevating
+      if (rawT > 0 && Math.random() < 0.65) {
+        const beamColor =
+          anim.powerId === 'GIANT_PIECE'
+            ? '#EF4444'
+            : anim.powerId === 'SLICK_BRICK'
+              ? '#38BDF8'
+              : anim.powerId === 'TURBO_DROP'
+                ? '#F97316'
+                : '#A855F7'
+        this.impactParticles.push({
+          x: curLocalX + (Math.random() - 0.5) * 28,
+          y: curLocalY + (Math.random() - 0.5) * 16,
+          vx: (Math.random() - 0.5) * 0.6,
+          vy: 1.2 + Math.random() * 1.4,
+          radius: 2.5 + Math.random() * 2.0,
+          ageMs: 0,
+          maxAgeMs: 220,
+          kind: 'spark',
+          color: beamColor,
+        })
+      }
+      return
+    }
+
+    // Reached the starting point -> trigger transformation once!
+    if (!anim.hasTransformed) {
+      anim.hasTransformed = true
+      this.setBodyPositionClean(
+        this.activePiece.body,
+        this.offsetX + anim.targetLocalX,
+        anim.targetLocalY
+      )
+      Body.setAngle(this.activePiece.body, 0)
+      Body.setVelocity(this.activePiece.body, { x: 0, y: 0 })
+      Body.setAngularVelocity(this.activePiece.body, 0)
+      this.applyPieceRecallMutation(
+        anim.powerId,
+        anim.targetLocalX,
+        anim.targetLocalY
+      )
+    }
+
+    if (!this.activePiece) {
+      this.pieceRecallAnim = null
+      return
+    }
+
+    // Hold at the starting point while playing the transformation pop animation
+    this.setBodyPositionClean(
+      this.activePiece.body,
+      this.offsetX + anim.targetLocalX,
+      anim.targetLocalY
+    )
+    Body.setAngle(this.activePiece.body, 0)
+    Body.setVelocity(this.activePiece.body, { x: 0, y: 0 })
+    Body.setAngularVelocity(this.activePiece.body, 0)
+
+    if (anim.elapsedMs >= anim.totalDurationMs) {
+      this.setPieceBodySensor(this.activePiece.body, false)
+      this.pieceRecallAnim = null
+      this.emitSnapshotNow()
+    }
+  }
+
+  /**
    * Prevents compound-body position-impulse resonance (where blocks wedged in a slot
    * accumulate warm-started `positionImpulse` across frames and suddenly pop/explode)
    * and enforces velocity-neutral Super Glue welds (`solveGlueWelds`).
    */
   private stabilizePhysicsStep(): void {
     if (this.activePiece) {
-      this.clearBodyPositionImpulses(this.activePiece.body)
+      const activeBody = this.activePiece.body
+      this.clearBodyPositionImpulses(activeBody)
+
+      if (this.pieceRecallAnim) {
+        // Keep the active piece pinned to its recall/transformation trajectory against gravity
+        const anim = this.pieceRecallAnim
+        if (anim.elapsedMs < anim.liftDurationMs) {
+          const freezeMs = 55
+          const rawT =
+            anim.elapsedMs <= freezeMs
+              ? 0
+              : Math.min(
+                  1,
+                  (anim.elapsedMs - freezeMs) /
+                    Math.max(1, anim.liftDurationMs - freezeMs)
+                )
+          const ease =
+            rawT < 0.5
+              ? 4 * rawT * rawT * rawT
+              : 1 - Math.pow(-2 * rawT + 2, 3) / 2
+          const curLocalX =
+            anim.startLocalX + (anim.targetLocalX - anim.startLocalX) * ease
+          const curLocalY =
+            anim.startLocalY + (anim.targetLocalY - anim.startLocalY) * ease
+          this.setBodyPositionClean(
+            activeBody,
+            this.offsetX + curLocalX,
+            curLocalY
+          )
+        } else {
+          this.setBodyPositionClean(
+            activeBody,
+            this.offsetX + anim.targetLocalX,
+            anim.targetLocalY
+          )
+        }
+        Body.setVelocity(activeBody, { x: 0, y: 0 })
+        Body.setAngularVelocity(activeBody, 0)
+      } else if (this.state === 'FALLING' || this.state === 'ROOF_DROP') {
+        // Keep active falling piece on its exact 0.5u horizontal grid track if a lateral side-graze nudged it slightly
+        const u = GAME_CONSTANTS.UNIT_PX
+        const leftEdgeOffsetUnits = this.getCell0LeftEdgeOffsetUnits(
+          this.activePiece,
+          activeBody.angle
+        )
+        const curBodyXUnits = (activeBody.position.x - this.offsetX) / u
+        const curLeftEdgeUnits = curBodyXUnits + leftEdgeOffsetUnits
+        const snappedLeftEdgeUnits = Math.round(curLeftEdgeUnits * 2) / 2
+        const gridTargetX =
+          this.offsetX + (snappedLeftEdgeUnits - leftEdgeOffsetUnits) * u
+        const driftPx = Math.abs(activeBody.position.x - gridTargetX)
+
+        if (driftPx > 0.03 && driftPx <= 4.5) {
+          const prevX = activeBody.position.x
+          const prevY = activeBody.position.y
+          this.setBodyPositionClean(activeBody, gridTargetX, prevY)
+          if (this.getOverlappingTowerBodies(activeBody).length > 0) {
+            this.setBodyPositionClean(activeBody, prevX, prevY)
+          } else {
+            Body.setVelocity(activeBody, { x: 0, y: activeBody.velocity.y })
+          }
+        }
+      }
     }
 
     const isRecentNudge = this.elapsedTimeMs - this.lastNudgeAtMs < 220
@@ -3490,6 +4470,68 @@ export class TowerInstance {
         this.mascotCastCategory = null
       }
     }
+    if (this.invulnerableRemainingMs > 0) {
+      this.invulnerableRemainingMs = Math.max(
+        0,
+        this.invulnerableRemainingMs - dtMs
+      )
+    }
+    if (this.fallWhiteFlashMs > 0) {
+      this.fallWhiteFlashMs = Math.max(0, this.fallWhiteFlashMs - dtMs)
+    }
+    if (this.mascotFallReactionMs > 0) {
+      this.mascotFallReactionMs = Math.max(0, this.mascotFallReactionMs - dtMs)
+    }
+
+    if (this.extraLifeBalloons.length > 0) {
+      this.checkExtraLifeBalloonCatch()
+      const dtSec = dtMs / 1000
+      const u = GAME_CONSTANTS.UNIT_PX
+
+      for (let i = this.extraLifeBalloons.length - 1; i >= 0; i--) {
+        const balloon = this.extraLifeBalloons[i]
+        balloon.ageMs += dtMs
+        const lifeRatio = balloon.ageMs / balloon.maxAgeMs
+        // Accelerate upward slightly in the final 30% as the balloon floats away
+        const escapeBoost = lifeRatio > 0.7 ? 1 + (lifeRatio - 0.7) * 2.2 : 1
+        balloon.y += balloon.vy * escapeBoost * dtSec
+        balloon.x +=
+          balloon.vx * dtSec +
+          Math.sin(balloon.ageMs * 0.0045 + balloon.swayPhase) * 0.42
+
+        if (balloon.ageMs >= balloon.maxAgeMs) {
+          this.extraLifeBalloons.splice(i, 1)
+          const calloutX = Math.max(-5.5 * u, Math.min(5.5 * u, balloon.x))
+          this.spawnColoredBurst(calloutX, balloon.y, '#CBD5E1', 10)
+          this.fallFeedbackCallouts.push({
+            x: calloutX,
+            y: balloon.y,
+            startY: balloon.y,
+            title: '🎈💨 BALÃO FUGIU!',
+            subtitle: 'VIDA EXTRA PERDIDA',
+            tone: 'EXTRA_LIFE_ESCAPED',
+            ageMs: 0,
+            maxAgeMs: 1450,
+          })
+          this.onEventBanner?.(
+            '🎈💨 O Balão de Vida Extra foi embora! Você precisava encostar nele com a peça controlada.',
+            'warning'
+          )
+        }
+      }
+      this.checkExtraLifeBalloonCatch()
+    }
+
+    for (let i = this.fallFeedbackCallouts.length - 1; i >= 0; i--) {
+      const callout = this.fallFeedbackCallouts[i]
+      callout.ageMs += dtMs
+      if (callout.ageMs >= callout.maxAgeMs) {
+        this.fallFeedbackCallouts.splice(i, 1)
+        continue
+      }
+      const p = Math.min(1, callout.ageMs / callout.maxAgeMs)
+      callout.y = callout.startY - (1 - Math.pow(1 - p, 2.2)) * 68
+    }
 
     const stepFactor = dtMs / 16.667
 
@@ -3581,11 +4623,21 @@ export class TowerInstance {
       return
     }
 
-    if (this.towerHeight >= GAME_CONSTANTS.WIND_START_HEIGHT_UNITS) {
+    const windThresholdUnits =
+      this.gameMode === 'SURVIVAL'
+        ? 10
+        : GAME_CONSTANTS.WIND_START_HEIGHT_UNITS
+
+    if (
+      this.towerHeight >= windThresholdUnits ||
+      (this.gameMode === 'SURVIVAL' && this.settledPieces.length >= 8)
+    ) {
       if (!this.windActive) {
         this.windActive = true
         this.onEventBanner?.(
-          'Brisa suave de altitude (15m+) ativa no topo da torre!',
+          this.gameMode === 'SURVIVAL'
+            ? '💨 Brisa de Sobrevivência ativa no topo da torre!'
+            : 'Brisa suave de altitude (15m+) ativa no topo da torre!',
           'info'
         )
       }
@@ -3605,14 +4657,18 @@ export class TowerInstance {
 
     if (this.windForce === 0) return
 
+    const minPieceWindHeight = this.gameMode === 'SURVIVAL' ? 8 : 14
     const u = GAME_CONSTANTS.UNIT_PX
     for (const piece of this.settledPieces) {
       if (piece.body.isSleeping || piece.body.isStatic) continue
 
       const pieceHeightUnits = Math.max(0, -piece.body.position.y / u)
-      if (pieceHeightUnits < 14) continue
+      if (pieceHeightUnits < minPieceWindHeight) continue
 
-      const heightFactor = Math.min(1.0, (pieceHeightUnits - 14) / 16)
+      const heightFactor = Math.min(
+        1.0,
+        (pieceHeightUnits - minPieceWindHeight) / 16
+      )
       const snappedResistance = piece.snapped ? 0.35 : 1.0
       const pushForceX =
         this.windForce *
@@ -3660,12 +4716,12 @@ export class TowerInstance {
       this.isSoftDropping = false
       this.state = 'RESPAWN_DELAY'
       this.respawnDelayRemainingMs = GAME_CONSTANTS.RESPAWN_PENALTY_MS
-      this.onLifeLost?.()
-      this.onEventBanner?.(
-        'Peça Ativa caiu no Abismo! Penalidade de +1.0s no Spawn!',
-        'danger'
-      )
+      this.handleSurvivalOrRaceLifeLoss('ACTIVE_WATER', activeLocalX, waterSurfaceY)
     }
+
+    let settledLostReason: 'SETTLED_WATER' | 'SETTLED_LATERAL' | null = null
+    let settledLostLocalX = 0
+    let settledLostLocalY = waterSurfaceY
 
     for (let i = this.settledPieces.length - 1; i >= 0; i--) {
       const piece = this.settledPieces[i]
@@ -3721,8 +4777,235 @@ export class TowerInstance {
         } else if (outBottom) {
           this.spawnWaterSplashParticles(localX, waterSurfaceY)
         }
+
+        settledLostReason = outBottom ? 'SETTLED_WATER' : 'SETTLED_LATERAL'
+        settledLostLocalX = localX
+        settledLostLocalY = outBottom ? waterSurfaceY : body.position.y
       }
     }
+
+    if (settledLostReason) {
+      this.handleSurvivalOrRaceLifeLoss(
+        settledLostReason,
+        settledLostLocalX,
+        settledLostLocalY
+      )
+    }
+  }
+
+  /**
+   * Handles life deduction, 3-second blinking invulnerability, white flash feedback,
+   * and Wizard shock reaction when a piece falls into the abyss or disintegrates laterally.
+   * - In `RACE` mode: triggers white flash + Wizard shock reaction + floating callout (`⚠️ PEÇA CAIU!`),
+   *   and active piece abyss drops apply the +1.0s respawn penalty banner.
+   * - In `SURVIVAL` mode:
+   *   - If `this.invulnerableRemainingMs > 0` (player is blinking invulnerable during the 3-second
+   *     stabilization window), NO life is lost and a `"🛡️ INVULNERÁVEL!"` deflection callout is shown.
+   *   - Otherwise, deducts 1 heart, triggers a 3-second (`3000ms`) blinking invulnerability window,
+   *     flashes the player & tower in bright white, triggers the Wizard's panic reaction, and spawns
+   *     a dramatic `"💔 -1 VIDA! • 🛡️ 3.0s INVULNERÁVEL"` callout.
+   */
+  private handleSurvivalOrRaceLifeLoss(
+    reason: 'ACTIVE_WATER' | 'SETTLED_WATER' | 'SETTLED_LATERAL',
+    dropLocalX: number = 0,
+    dropLocalY: number = 0
+  ): void {
+    const u = GAME_CONSTANTS.UNIT_PX
+    const calloutStartX = Math.max(-5.5 * u, Math.min(5.5 * u, dropLocalX))
+    const calloutStartY = Math.min(-1.2 * u, dropLocalY - 1.2 * u)
+
+    if (this.gameMode === 'RACE') {
+      if (reason === 'ACTIVE_WATER') {
+        this.fallWhiteFlashMs = 740
+        this.mascotFallReactionMs = 2100
+        this.shakeTimerMs = 190
+        this.lastFallFeedbackAtMs = this.elapsedTimeMs
+        this.playCountdownAbortedBuzzer()
+        this.spawnColoredBurst(calloutStartX, dropLocalY, '#FFFFFF', 12)
+        this.fallFeedbackCallouts.push({
+          x: calloutStartX,
+          y: calloutStartY,
+          startY: calloutStartY,
+          title: '⚠️ PEÇA CAIU!',
+          subtitle: '⏱️ +1.0s PENALIDADE',
+          tone: 'PIECE_DROP',
+          ageMs: 0,
+          maxAgeMs: 1450,
+        })
+        this.onLifeLost?.()
+        this.onEventBanner?.(
+          'Peça Ativa caiu no Abismo! Penalidade de +1.0s no Spawn!',
+          'danger'
+        )
+        this.emitSnapshotNow()
+      } else if (this.elapsedTimeMs - this.lastFallFeedbackAtMs >= 650) {
+        this.lastFallFeedbackAtMs = this.elapsedTimeMs
+        this.fallWhiteFlashMs = Math.max(this.fallWhiteFlashMs, 640)
+        this.mascotFallReactionMs = Math.max(this.mascotFallReactionMs, 1850)
+        this.shakeTimerMs = Math.max(this.shakeTimerMs, 150)
+        this.spawnColoredBurst(calloutStartX, dropLocalY, '#FFFFFF', 10)
+        this.fallFeedbackCallouts.push({
+          x: calloutStartX,
+          y: calloutStartY,
+          startY: calloutStartY,
+          title: '⚠️ BLOCO CAIU!',
+          subtitle: 'SEGURE A TORRE!',
+          tone: 'PIECE_DROP',
+          ageMs: 0,
+          maxAgeMs: 1350,
+        })
+      }
+      return
+    }
+
+    if (this.state === 'GAME_OVER' || this.state === 'VICTORY') {
+      return
+    }
+
+    // 3-Second Invulnerability Window: while blinking invulnerable, falling blocks do NOT deduct lives!
+    if (
+      this.invulnerableRemainingMs > 0 ||
+      this.elapsedTimeMs - this.lastLifeLossAtMs <
+        GAME_CONSTANTS.SURVIVAL_LIFE_LOSS_COOLDOWN_MS
+    ) {
+      if (this.elapsedTimeMs - this.lastFallFeedbackAtMs >= 520) {
+        this.lastFallFeedbackAtMs = this.elapsedTimeMs
+        this.spawnColoredBurst(calloutStartX, dropLocalY, '#38BDF8', 8)
+        this.fallFeedbackCallouts.push({
+          x: calloutStartX,
+          y: calloutStartY,
+          startY: calloutStartY,
+          title: '🛡️ PROTEGIDO!',
+          subtitle: `INVULNERÁVEL ${(this.invulnerableRemainingMs / 1000).toFixed(1)}s`,
+          tone: 'SHIELD_PROTECTED',
+          ageMs: 0,
+          maxAgeMs: 1150,
+        })
+      }
+      return
+    }
+
+    this.lastLifeLossAtMs = this.elapsedTimeMs
+    this.lastFallFeedbackAtMs = this.elapsedTimeMs
+    this.lives = Math.max(0, this.lives - 1)
+    this.invulnerableRemainingMs =
+      this.lives > 0 ? GAME_CONSTANTS.SURVIVAL_LIFE_LOSS_COOLDOWN_MS : 0
+    this.fallWhiteFlashMs = 780
+    this.mascotFallReactionMs = 2500
+    this.playCountdownAbortedBuzzer()
+    this.shakeTimerMs = 250
+    this.spawnColoredBurst(calloutStartX, dropLocalY, '#FFFFFF', 14)
+    this.spawnColoredBurst(calloutStartX, dropLocalY, '#F43F5E', 10)
+    this.fallFeedbackCallouts.push({
+      x: calloutStartX,
+      y: calloutStartY,
+      startY: calloutStartY,
+      title: '💔 -1 VIDA!',
+      subtitle:
+        this.lives > 0 ? '🛡️ 3.0s INVULNERÁVEL!' : '💀 FIM DE JOGO!',
+      tone: 'LIFE_LOSS',
+      ageMs: 0,
+      maxAgeMs: 1750,
+    })
+    this.onLifeLost?.()
+
+    if (this.lives <= 0) {
+      this.triggerSurvivalGameOver()
+      return
+    }
+
+    const heartsDisplay =
+      '❤️'.repeat(this.lives) +
+      '🖤'.repeat(Math.max(0, this.maxLives - this.lives))
+    const reasonText =
+      reason === 'ACTIVE_WATER'
+        ? 'Peça caiu na água!'
+        : reason === 'SETTLED_WATER'
+          ? 'Bloco da torre caiu na água!'
+          : 'Bloco da torre desintegrou na lateral!'
+    this.onEventBanner?.(
+      `💔 -1 VIDA! ${reasonText} 🛡️ Invulnerável por 3s para estabilizar! (${heartsDisplay})`,
+      'danger'
+    )
+    this.emitSnapshotNow()
+  }
+
+  /**
+   * Transitions the instance into `GAME_OVER` when all 3 lives are lost in `SURVIVAL` mode.
+   */
+  public triggerSurvivalGameOver(): void {
+    if (this.state === 'GAME_OVER' || this.state === 'VICTORY') return
+
+    if (this.activePiece) {
+      World.remove(this.engine.world, this.activePiece.body)
+      this.activePiece = null
+    }
+    if (this.heldActivePiece) {
+      World.remove(this.engine.world, this.heldActivePiece.body)
+      this.heldActivePiece = null
+    }
+    this.pieceRecallAnim = null
+    this.extraLifeBalloons = []
+    this.isSoftDropping = false
+    this.pendingLandPiece = false
+    this.goalCountdownMs = null
+    this.state = 'GAME_OVER'
+
+    this.updateSettledBlocksAndHeight()
+    this.emitSnapshotNow()
+    this.onGameOver?.(
+      this.elapsedTimeMs,
+      this.maxTowerHeight,
+      this.settledPieces.length
+    )
+    this.onEventBanner?.(
+      `💀 FIM DE JOGO! Suas vidas acabaram! Peças empilhadas: ${this.settledPieces.length}/${GAME_CONSTANTS.SURVIVAL_GOAL_PIECES} • Altura Máx: ${this.maxTowerHeight.toFixed(1)}m`,
+      'danger'
+    )
+  }
+
+  /**
+   * Triggers `VICTORY` in `SURVIVAL` mode (either when reaching `SURVIVAL_GOAL_PIECES`
+   * or when winning as the Last Player Standing in Multiplayer).
+   */
+  public triggerSurvivalVictory(): void {
+    if (this.state === 'VICTORY') return
+
+    if (this.activePiece) {
+      World.remove(this.engine.world, this.activePiece.body)
+      this.activePiece = null
+    }
+    if (this.heldActivePiece) {
+      World.remove(this.engine.world, this.heldActivePiece.body)
+      this.heldActivePiece = null
+    }
+    this.pieceRecallAnim = null
+    this.extraLifeBalloons = []
+    this.isSoftDropping = false
+    this.pendingLandPiece = false
+    this.goalCountdownMs = null
+
+    for (const p of this.settledPieces) {
+      Body.setVelocity(p.body, { x: 0, y: 0 })
+      Body.setAngularVelocity(p.body, 0)
+      Body.setStatic(p.body, true)
+      p.snapped = true
+    }
+
+    const u = GAME_CONSTANTS.UNIT_PX
+    const topY = -Math.max(2, this.towerHeight) * u
+    this.spawnVictoryConfetti(0, topY, 52)
+    this.spawnColoredBurst(0, topY, '#FACC15', 18)
+    this.playVictoryFanfareSound()
+
+    this.state = 'VICTORY'
+    this.updateSettledBlocksAndHeight()
+    this.emitSnapshotNow()
+    this.onVictory?.(this.elapsedTimeMs, this.towerHeight)
+    this.onEventBanner?.(
+      `🏆 SOBREVIVENTE CAMPEÃO! ${this.settledPieces.length}/${GAME_CONSTANTS.SURVIVAL_GOAL_PIECES} peças empilhadas com ${this.lives} ❤️ restante(s)!`,
+      'success'
+    )
   }
 
   /**
@@ -3863,6 +5146,8 @@ export class TowerInstance {
           const angleErrorDeg =
             (Math.abs(body.angle - nearestRightAngleRad) * 180) / Math.PI
           const speed = Matter.Vector.magnitude(body.velocity)
+          const isVerticalBar =
+            piece.type === 'I' && Math.abs(Math.sin(nearestRightAngleRad)) > 0.7
 
           if (
             angleErrorDeg <= slideParams.maxDampAngleDeg &&
@@ -3871,14 +5156,29 @@ export class TowerInstance {
             const dampX = piece.snapped
               ? slideParams.dampXSnapped
               : slideParams.dampXUnsnapped
-            const dampAng = piece.snapped
+            const baseDampAng = piece.snapped
               ? slideParams.dampAngSnapped
               : slideParams.dampAngUnsnapped
+            const dampAng = isVerticalBar ? baseDampAng * 0.65 : baseDampAng
             Body.setVelocity(body, {
               x: body.velocity.x * dampX,
               y: body.velocity.y,
             })
             Body.setAngularVelocity(body, body.angularVelocity * dampAng)
+
+            // Keep upright vertical "I" pillars ("em pé") from developing solver micro-wobble on a flat support
+            if (
+              isVerticalBar &&
+              angleErrorDeg > 0.04 &&
+              angleErrorDeg <= 2.6 * slideParams.grip &&
+              Math.abs(body.velocity.x) < 0.65 &&
+              this.isPieceSupportedBelow(body)
+            ) {
+              const correctedAngle =
+                body.angle +
+                (nearestRightAngleRad - body.angle) * (0.32 * slideParams.grip)
+              Body.setAngle(body, correctedAngle)
+            }
           }
 
           if (
@@ -3919,16 +5219,53 @@ export class TowerInstance {
     }
 
     this.towerHeight = Math.max(0, Number(maxRestingHeightUnits.toFixed(1)))
+    if (this.towerHeight > this.maxTowerHeight) {
+      this.maxTowerHeight = this.towerHeight
+    }
   }
 
   /**
-   * Checkpoint Trigger Rule (`8m, 16m, 24m`):
+   * Checkpoint Trigger Rule (`8m, 16m, 24m` in RACE, extended + piece milestones in SURVIVAL):
    * - A settled piece must stabilize crossing the line for at least 0.5 second (`500ms`).
    * - Once triggered, the line glows, dissolves, and grants a rolled Power into the Single-Slot Inventory
    *   (overwriting any unspent power). Each checkpoint line only rewards once per match.
    */
   private updateCheckpoints(dtMs: number): void {
-    const checkpoints = [8, 16, 24]
+    // In SURVIVAL mode, also grant a checkpoint power every 10 stabilized pieces (10, 20, 30, 40)
+    // so wide/low survival towers receive helpful powers (including the Extra Life Balloon!) too!
+    if (this.gameMode === 'SURVIVAL') {
+      const pieceMilestones = [10, 20, 30, 40]
+      const currentCount = this.settledPieces.length
+      const nextPieceCp = pieceMilestones.find(
+        (m) =>
+          currentCount >= m &&
+          !this.survivalPieceCheckpointsReached.includes(m)
+      )
+      if (nextPieceCp !== undefined) {
+        this.survivalPieceCheckpointsReached.push(nextPieceCp)
+        const excludePositive: PowerId[] = []
+        if (this.hasSpawnedSideIsland) excludePositive.push('SIDE_ISLAND')
+        if (this.lives >= 5) excludePositive.push('EXTRA_LIFE')
+        const rolled = rollCheckpointPowers(
+          true,
+          () => this.randomizer.nextFloat(),
+          excludePositive
+        )
+        this.inventoryPower = {
+          selfPower: rolled.selfPower.id,
+          attackPower: rolled.attackPower ? rolled.attackPower.id : null,
+          sourceCheckpoint: nextPieceCp,
+        }
+        this.onEventBanner?.(
+          `★ Marco de ${nextPieceCp} Peças! [Espaço] ${rolled.selfPower.icon} ${rolled.selfPower.shortName} (Bom) | [C] ${rolled.attackPower?.icon} ${rolled.attackPower?.shortName} (Caos)`,
+          'success'
+        )
+        this.emitSnapshotNow()
+      }
+    }
+
+    const checkpoints =
+      this.gameMode === 'SURVIVAL' ? [8, 16, 24, 32, 40, 48, 56] : [8, 16, 24]
     const nextUnreached = checkpoints.find(
       (cp) => !this.checkpointsReached.includes(cp)
     )
@@ -3965,9 +5302,11 @@ export class TowerInstance {
 
       // Roll Checkpoint Power(s): Good Power (light bubble) + Chaos Power (dark red bubble) on the mascot!
       // Once the player has used SIDE_ISLAND (`hasSpawnedSideIsland === true`), remove SIDE_ISLAND from future Checkpoint rolls!
-      const excludePositive = this.hasSpawnedSideIsland
-        ? (['SIDE_ISLAND'] as PowerId[])
-        : []
+      const excludePositive: PowerId[] = []
+      if (this.hasSpawnedSideIsland) excludePositive.push('SIDE_ISLAND')
+      if (this.gameMode !== 'SURVIVAL' || this.lives >= 5) {
+        excludePositive.push('EXTRA_LIFE')
+      }
       const rolled = rollCheckpointPowers(
         true,
         () => this.randomizer.nextFloat(),
@@ -3991,15 +5330,21 @@ export class TowerInstance {
 
   /**
    * Finish Line Climax State Machine (`GOAL_COUNTDOWN` -> `COUNTDOWN_ABORTED` or `ROOF_DROP` -> `VICTORY`):
-   * - State A (`GOAL_COUNTDOWN`): Triggered when `towerHeight >= 30m`. Freezes and hides `activePiece` in
-   *   `heldActivePiece` with a magic smoke poof, zooms camera in, and runs a 3.0s stability test.
-   * - State B (`COUNTDOWN_ABORTED`): If the tower slips below 30m before 0.0s, plays "Bzzzt!", cancels timer,
-   *   and restores `heldActivePiece` at the top so the player resumes without losing their piece.
-   * - State C (`ROOF_DROP`): When the 3.0s timer reaches 0.0s, discards `heldActivePiece` and spawns the
-   *   3x3 Castle Roof (`CASTLE_ROOF`), which auto-welds on contact, locks the tower static, and triggers `VICTORY`.
+   * - In `SURVIVAL` mode: bypasses the 30m finish line; reaching `SURVIVAL_GOAL_PIECES` (50 pieces) triggers `triggerSurvivalVictory()`.
+   * - In `RACE` mode:
+   *   - State A (`GOAL_COUNTDOWN`): Triggered when `towerHeight >= 30m`. Freezes and hides `activePiece` in
+   *     `heldActivePiece` with a magic smoke poof, zooms camera in, and runs a 3.0s stability test.
+   *   - State B (`COUNTDOWN_ABORTED`): If the tower slips below 30m before 0.0s, plays "Bzzzt!", cancels timer,
+   *     and restores `heldActivePiece` at the top so the player resumes without losing their piece.
+   *   - State C (`ROOF_DROP`): When the 3.0s timer reaches 0.0s, discards `heldActivePiece` and spawns the
+   *     3x3 Castle Roof (`CASTLE_ROOF`), which auto-welds on contact, locks the tower static, and triggers `VICTORY`.
    */
   private updateGoalCountdown(dtMs: number): void {
-    if (this.state === 'ROOF_DROP' || this.state === 'VICTORY') {
+    if (
+      this.state === 'ROOF_DROP' ||
+      this.state === 'VICTORY' ||
+      this.state === 'GAME_OVER'
+    ) {
       return
     }
 
@@ -4026,7 +5371,18 @@ export class TowerInstance {
       return
     }
 
-    // Normal gameplay states: if the tower reaches 30m, enter State A (`GOAL_COUNTDOWN`)!
+    // Survival Mode (3 Vidas): no 30m finish line; reaching 50 stabilized pieces wins!
+    if (this.gameMode === 'SURVIVAL') {
+      if (
+        this.lives > 0 &&
+        this.settledPieces.length >= GAME_CONSTANTS.SURVIVAL_GOAL_PIECES
+      ) {
+        this.triggerSurvivalVictory()
+      }
+      return
+    }
+
+    // Normal Race Mode gameplay states: if the tower reaches 30m, enter State A (`GOAL_COUNTDOWN`)!
     if (this.towerHeight >= GAME_CONSTANTS.GOAL_HEIGHT_UNITS) {
       this.startGoalCountdown(false)
     }
@@ -4142,16 +5498,50 @@ export class TowerInstance {
   }
 
   private updateCamera(dtMs: number): void {
+    const u = GAME_CONSTANTS.UNIT_PX
     const isClimax =
       this.state === 'GOAL_COUNTDOWN' || this.state === 'ROOF_DROP'
+    const isMultiplayer =
+      !this.isSinglePlayer && this.remoteLanesToRender.length > 0
+
+    let lowestPlayerHeight = this.towerHeight
+    let highestVisibleUnits = Math.max(
+      this.towerHeight + GAME_CONSTANTS.SPAWN_OFFSET_UNITS + 2.0,
+      this.activePiece
+        ? Math.max(0, -this.activePiece.body.position.y / u) + 2.0
+        : 0
+    )
+
+    if (isMultiplayer) {
+      const activeRemotes = this.remoteLanesToRender.filter(
+        (r) => !r.isEliminated
+      )
+      for (const r of activeRemotes) {
+        if (r.towerHeight < lowestPlayerHeight) {
+          lowestPlayerHeight = r.towerHeight
+        }
+        const rTop = Math.max(
+          r.towerHeight + GAME_CONSTANTS.SPAWN_OFFSET_UNITS + 2.0,
+          r.activePiece ? Math.max(0, r.activePiece.y) + 2.0 : 0
+        )
+        if (rTop > highestVisibleUnits) {
+          highestVisibleUnits = rTop
+        }
+      }
+    }
+
+    // Regra Multiplayer: a tela acompanha sempre o jogador que estiver mais embaixo (lowestPlayerHeight)
+    const refLowHeight = isMultiplayer ? lowestPlayerHeight : this.towerHeight
     const baseVerticalPan =
-      this.towerHeight <= 6
-        ? this.towerHeight * 0.58
-        : 3.48 + (this.towerHeight - 6) * 0.94
-    const targetPanUnits = isClimax
-      ? Math.max(baseVerticalPan, this.towerHeight - 8.5)
-      : baseVerticalPan
-    const lerpFactor = Math.min(1, dtMs * 0.005)
+      refLowHeight <= 6
+        ? refLowHeight * 0.58
+        : 3.48 + (refLowHeight - 6) * 0.94
+    const targetPanUnits =
+      !isMultiplayer && isClimax
+        ? Math.max(baseVerticalPan, this.towerHeight - 8.5)
+        : baseVerticalPan
+
+    const lerpFactor = Math.min(1, dtMs * 0.0055)
     this.cameraCenterHeightUnits +=
       (targetPanUnits - this.cameraCenterHeightUnits) * lerpFactor
 
@@ -4167,12 +5557,43 @@ export class TowerInstance {
     this.cameraParallaxX +=
       (targetParallaxX - this.cameraParallaxX) * Math.min(1, dtMs * 0.007)
 
-    const targetZoom =
+    let targetZoom =
       this.state === 'GOAL_COUNTDOWN'
         ? 1.14
         : this.state === 'ROOF_DROP'
           ? 1.1
           : 1.0
+
+    if (isMultiplayer) {
+      const totalLanes = 1 + this.remoteLanesToRender.length
+      const maxMultiLaneZoom =
+        totalLanes >= 4 ? 0.68 : totalLanes === 3 ? 0.78 : 0.88
+
+      const allOffsetsX = [
+        this.offsetX,
+        ...this.remoteLanesToRender.map((r) => r.laneOffsetX),
+      ]
+      const minLaneX = Math.min(...allOffsetsX)
+      const maxLaneX = Math.max(...allOffsetsX)
+      const totalHorizontalSpanPx = maxLaneX - minLaneX + 19.5 * u
+      const availWidthPx = Math.max(360, this.lastCanvasWidth - 32)
+      const horizontalFitZoom =
+        availWidthPx / Math.max(1, totalHorizontalSpanPx)
+
+      // Zoom out automaticamente se um jogador estiver muito pra baixo e outro muito pra cima
+      const verticalSpanUnits = Math.max(
+        14,
+        highestVisibleUnits - targetPanUnits + 1.2
+      )
+      const availHeightPx = Math.max(240, this.lastCanvasHeight - 112 - 56)
+      const verticalFitZoom = availHeightPx / (verticalSpanUnits * u)
+
+      targetZoom = Math.max(
+        0.28,
+        Math.min(maxMultiLaneZoom, horizontalFitZoom, verticalFitZoom)
+      )
+    }
+
     this.cameraZoom += (targetZoom - this.cameraZoom) * Math.min(1, dtMs * 0.006)
   }
 
@@ -4204,6 +5625,16 @@ export class TowerInstance {
         x: Number(((b.position.x - this.offsetX) / u).toFixed(2)),
         y: Number((-b.position.y / u).toFixed(2)),
         angle: Number((((b.angle * 180) / Math.PI) % 360).toFixed(2)),
+        recallTransformProgress: this.pieceRecallAnim
+          ? Number(
+              Math.min(
+                1,
+                this.pieceRecallAnim.elapsedMs /
+                  Math.max(1, this.pieceRecallAnim.totalDurationMs)
+              ).toFixed(2)
+            )
+          : undefined,
+        recallPowerId: this.pieceRecallAnim?.powerId,
       }
     }
 
@@ -4229,6 +5660,14 @@ export class TowerInstance {
       playerId: this.id,
       matchSeed: this.matchSeed,
       isSinglePlayer: this.isSinglePlayer,
+      gameMode: this.gameMode,
+      lives: this.lives,
+      maxLives: this.maxLives,
+      invulnerableRemainingMs: Math.ceil(this.invulnerableRemainingMs),
+      fallFlashRemainingMs: Math.ceil(this.fallWhiteFlashMs),
+      piecesPlaced: this.settledPieces.length,
+      survivalGoalPieces: GAME_CONSTANTS.SURVIVAL_GOAL_PIECES,
+      maxTowerHeight: this.maxTowerHeight,
       basePresetId: this.currentBasePreset.id,
       basePresetName: this.currentBasePreset.name,
       baseElevations: [...this.currentBasePreset.elevations],
@@ -4254,7 +5693,21 @@ export class TowerInstance {
           : null,
       inventoryPower: { ...this.inventoryPower },
       blindManualRemainingMs: Math.ceil(this.blindManualRemainingMs),
-      nextQueue: this.randomizer.peekQueue(3),
+      fogAnchorX: Number(this.fogAnchorX.toFixed(1)),
+      fogAnchorY: Number(this.fogAnchorY.toFixed(1)),
+      nextQueue: this.randomizer.peekQueue(
+        this.gameMode === 'SURVIVAL'
+          ? Math.min(
+              3,
+              Math.max(
+                0,
+                GAME_CONSTANTS.SURVIVAL_GOAL_PIECES -
+                  this.settledPieces.length -
+                  (this.activePiece ? 1 : 0)
+              )
+            )
+          : 3
+      ),
       activePiece: activePieceSnap,
       settledBlocks,
       hasSpawnedSideIsland: this.hasSpawnedSideIsland,
@@ -4269,12 +5722,54 @@ export class TowerInstance {
     }
   }
 
+  private getPlayerFallVisualState(
+    whiteFlashMs: number = this.fallWhiteFlashMs,
+    invulnMs: number = this.invulnerableRemainingMs,
+    reactionMs: number = this.mascotFallReactionMs,
+    clockMs: number = this.elapsedTimeMs
+  ): {
+    whiteFlashAlpha: number
+    blinkAlpha: number
+    reactionIntensity: number
+  } {
+    let whiteFlashAlpha = 0
+    let blinkAlpha = 1.0
+
+    // 1. High-contrast multi-pulse white blink when dropping a piece ("piscar em branco")
+    if (whiteFlashMs > 0) {
+      const ratio = Math.min(1, whiteFlashMs / 780)
+      const progress = 1 - ratio
+      const pulse = Math.abs(Math.cos(progress * Math.PI * 3.5))
+      whiteFlashAlpha = pulse * Math.pow(ratio, 0.45) * 0.95
+    }
+
+    // 2. 3-second invulnerability blinking ("piscando invulnerável por 3 segundos")
+    if (invulnMs > 0) {
+      const blinkWave = Math.sin(clockMs * 0.056)
+      if (blinkWave < 0) {
+        blinkAlpha = 0.46
+        whiteFlashAlpha = Math.max(whiteFlashAlpha, 0.56)
+      } else {
+        blinkAlpha = 1.0
+      }
+    }
+
+    const reactionIntensity =
+      reactionMs > 0 ? Math.min(1, reactionMs / 2500) : 0
+
+    return { whiteFlashAlpha, blinkAlpha, reactionIntensity }
+  }
+
   public render(
     ctx: CanvasRenderingContext2D,
     canvasWidth: number,
     canvasHeight: number
   ): void {
+    this.lastCanvasWidth = canvasWidth
+    this.lastCanvasHeight = canvasHeight
     const u = GAME_CONSTANTS.UNIT_PX
+    const isMultiplayer =
+      !this.isSinglePlayer && this.remoteLanesToRender.length > 0
 
     let shakeOffsetX = 0
     let shakeOffsetY = 0
@@ -4285,9 +5780,16 @@ export class TowerInstance {
       shakeOffsetY = Math.sin(phase * 1.4) * 1.8 * decay
     }
 
+    const effectiveZoom = this.cameraZoom
     const cameraOriginScreenX = canvasWidth / 2 + this.offsetX + shakeOffsetX
     const cameraOriginScreenY =
       canvasHeight - 112 + this.cameraCenterHeightUnits * u + shakeOffsetY
+    const effectiveSceneryOriginY = isMultiplayer
+      ? canvasHeight -
+        112 +
+        this.cameraCenterHeightUnits * u * effectiveZoom +
+        shakeOffsetY
+      : cameraOriginScreenY
 
     const animTimeMs = this.elapsedTimeMs + this.victoryAnimTimeMs
 
@@ -4296,8 +5798,8 @@ export class TowerInstance {
       ctx,
       canvasWidth,
       canvasHeight,
-      cameraOriginScreenX,
-      cameraOriginScreenY,
+      canvasWidth / 2 + shakeOffsetX,
+      effectiveSceneryOriginY,
       animTimeMs,
       this.windForce,
       this.cameraParallaxX
@@ -4318,23 +5820,15 @@ export class TowerInstance {
     ctx.save()
     ctx.translate(cameraOriginScreenX, cameraOriginScreenY)
 
-    // Multi-lane scale adjustment when 2-4 online players are in the match so all lanes fit comfortably
-    const multiLaneScale =
-      this.remoteLanesToRender.length >= 3
-        ? 0.66
-        : this.remoteLanesToRender.length === 2
-          ? 0.76
-          : this.remoteLanesToRender.length === 1
-            ? 0.86
-            : 1.0
-    const effectiveZoom = this.cameraZoom * multiLaneScale
-
-    // Smooth camera zoom focused on the top of the tower during GOAL_COUNTDOWN and ROOF_DROP
+    // Smooth camera zoom (centered on screen X and anchored at lowest-player height in Multiplayer)
     if (Math.abs(effectiveZoom - 1.0) > 0.002) {
-      const focusY = -Math.max(0, this.towerHeight * 0.5) * u
-      ctx.translate(0, focusY)
+      const pivotX = isMultiplayer ? -this.offsetX : 0
+      const focusY = isMultiplayer
+        ? -this.cameraCenterHeightUnits * u
+        : -Math.max(0, this.towerHeight * 0.5) * u
+      ctx.translate(pivotX, focusY)
       ctx.scale(effectiveZoom, effectiveZoom)
-      ctx.translate(0, -focusY)
+      ctx.translate(-pivotX, -focusY)
     }
 
     // 2. Finish Line (30m) & Checkpoint lines in the sky
@@ -4389,17 +5883,25 @@ export class TowerInstance {
       this.renderPieceEntity(ctx, this.activePiece, true)
     }
 
+    // 6a. Floating Extra Life Balloons (`EXTRA_LIFE` — must be caught with the controlled piece before floating away!)
+    if (this.extraLifeBalloons.length > 0) {
+      this.renderExtraLifeBalloons(ctx, animTimeMs)
+    }
+
     // 6b. Brick Separator (Removedor de Peças) orange extractor animation
     if (this.brickRemoverEffects.length > 0) {
       this.renderBrickRemoverEffects(ctx)
     }
 
-    // 6c. Sparks & Smoke Particles + Toy-Brick Confetti
+    // 6c. Sparks & Smoke Particles + Toy-Brick Confetti + Fall Feedback Callouts
     if (this.impactParticles.length > 0) {
       this.renderImpactParticles(ctx)
     }
     if (this.confettiParticles.length > 0) {
       this.renderConfettiParticles(ctx)
+    }
+    if (this.fallFeedbackCallouts.length > 0) {
+      this.renderFallFeedbackCallouts(ctx)
     }
 
     // 6d. Negative Power 4: Manual de Instruções na Tela (Cegueira / Névoa sobre o topo da torre)
@@ -4424,7 +5926,7 @@ export class TowerInstance {
       ctx,
       canvasWidth,
       canvasHeight,
-      cameraOriginScreenY,
+      effectiveSceneryOriginY,
       animTimeMs
     )
   }
@@ -4526,19 +6028,29 @@ export class TowerInstance {
   }
 
   /**
-   * Renders Negative Power 4 (`BLIND_MANUAL` — "Nuvem Fog 20s"):
-   * A lateral bank of overlapping borderless clouds (`sem bordas`) with ~1.5x height,
-   * spanning the full width of the tower laterally (`ocupando toda a torre lateralmente`),
-   * using different transparencies (`transparências diferentes entre si`) to create depth,
-   * while remaining vertically fixed at the height of the last block where it spawned (`this.fogAnchorY`).
+   * Renders Negative Power 4 (`BLIND_MANUAL` — "Nuvem Fog 20s") on the local player's tower.
    */
   private renderBlindManualOverlay(ctx: CanvasRenderingContext2D): void {
-    const t = this.elapsedTimeMs * 0.0022
-    const fadeEnvelope = Math.min(1.0, this.blindManualRemainingMs / 800)
+    this.renderBlindFogCloudAt(
+      ctx,
+      this.fogAnchorX * 0.25,
+      this.fogAnchorY,
+      this.blindManualRemainingMs
+    )
+  }
 
-    // Center horizontally across the tower width (`x = 0` with slight anchor bias), fixed vertically at `this.fogAnchorY`
-    const centerX = this.fogAnchorX * 0.25
-    const anchorY = this.fogAnchorY
+  /**
+   * Renders the multi-layered borderless fog cloud bank ("Nuvem Fog" / "nuvem que esconde")
+   * centered at `(centerX, anchorY)` on either the local tower or a remote opponent's tower.
+   */
+  private renderBlindFogCloudAt(
+    ctx: CanvasRenderingContext2D,
+    centerX: number,
+    anchorY: number,
+    remainingMs: number
+  ): void {
+    const t = this.elapsedTimeMs * 0.0022
+    const fadeEnvelope = Math.min(1.0, Math.max(0.2, remainingMs / 800))
 
     // Lateral cloud bank (~1.5x height = 74-82px, spanning ~320px across the entire tower width)
     // Ordered back-to-front with different transparencies, subtle color depth, and independent drift phases
@@ -4689,11 +6201,18 @@ export class TowerInstance {
     const scaleXFlip: 1 | -1 = cx >= 0 ? -1 : 1
     const extraTiltRad = Math.cos(t * 0.0021) * 0.03
 
+    const fallVis = this.getPlayerFallVisualState()
+
     spriteRegistry.drawFloatingMascot(ctx, cx, cy, t, {
       scaleXFlip,
       extraTiltRad,
       selfPower: this.inventoryPower.selfPower,
       attackPower: this.inventoryPower.attackPower,
+      whiteFlashAlpha: fallVis.whiteFlashAlpha,
+      blinkAlpha: fallVis.blinkAlpha,
+      fallReactionIntensity: fallVis.reactionIntensity,
+      isSurvivalLifeLoss: this.gameMode === 'SURVIVAL',
+      invulnerableRemainingMs: this.invulnerableRemainingMs,
     })
 
     if (this.mascotCastAnimMs > 0 && this.mascotCastCategory) {
@@ -4706,22 +6225,55 @@ export class TowerInstance {
       )
     }
 
-    if (this.rankBadge) {
+    if (this.rankBadge || this.gameMode === 'SURVIVAL') {
+      const localDebuffs: string[] = []
+      if (this.blindManualRemainingMs > 0) localDebuffs.push('BLIND_MANUAL')
+      if (
+        this.slickBrickRemaining > 0 ||
+        this.activePiece?.powerEffect === 'SLICK_BRICK'
+      ) {
+        localDebuffs.push('SLICK_BRICK')
+      }
+      if (
+        this.lockRotateRemaining > 0 ||
+        this.activePiece?.powerEffect === 'LOCK_ROTATE'
+      ) {
+        localDebuffs.push('LOCK_ROTATE')
+      }
+      if (
+        this.turboDropRemaining > 0 ||
+        this.activePiece?.powerEffect === 'TURBO_DROP'
+      ) {
+        localDebuffs.push('TURBO_DROP')
+      }
+      if (
+        this.giantPieceRemaining > 0 ||
+        this.activePiece?.variant === 'GIANT'
+      ) {
+        localDebuffs.push('GIANT_PIECE')
+      }
+
       this.drawRankBadgeBelowMascot(
         ctx,
         cx,
         cy + 58,
-        this.rankBadge,
+        this.rankBadge ?? '1ST',
         this.playerNick || 'VOCÊ',
         this.towerHeight,
-        true
+        true,
+        this.localSlotIndex,
+        localDebuffs,
+        this.lives,
+        this.state === 'GAME_OVER' || this.lives <= 0,
+        this.invulnerableRemainingMs,
+        fallVis.whiteFlashAlpha
       )
     }
   }
 
   /**
-   * Draws the real-time Rank Badge (`1ST`, `2ND`, `3RD`, `4TH`) and Player Nickname
-   * directly below each floating mascot's cloud in Multiplayer matches.
+   * Draws the real-time Rank Badge (`1ST`, `2ND`, `3RD`, `4TH`), Player Position (`P1`..`P4`),
+   * Nickname, Survival Mode Hearts (`❤️❤️❤️`), 3s Invulnerability Stabilization Bar, and any active negative power debuff pills directly below each floating mascot's cloud.
    */
   private drawRankBadgeBelowMascot(
     ctx: CanvasRenderingContext2D,
@@ -4730,7 +6282,13 @@ export class TowerInstance {
     rank: '1ST' | '2ND' | '3RD' | '4TH',
     nick: string,
     heightUnits: number,
-    isLocal: boolean
+    isLocal: boolean,
+    slotIndex: number = 0,
+    activeDebuffs: string[] = [],
+    lives: number = GAME_CONSTANTS.SURVIVAL_INITIAL_LIVES,
+    isEliminated: boolean = false,
+    invulnerableRemainingMs: number = 0,
+    whiteFlashAlpha: number = 0
   ): void {
     const theme =
       rank === '1ST'
@@ -4759,10 +6317,11 @@ export class TowerInstance {
     ctx.textBaseline = 'middle'
     ctx.fillText(rank, 0, 11.5)
 
-    // Nickname & Height tag below rank pill
-    const label = `${nick.slice(0, 12)} • ${heightUnits.toFixed(1)}m`
+    // Player Slot Position (P1 / P2 / P3 / P4) + Nickname & Height tag below rank pill
+    const playerNumberTag = `P${Math.max(1, slotIndex + 1)}`
+    const label = `${playerNumberTag} • ${nick.slice(0, 11)} • ${heightUnits.toFixed(1)}m`
     ctx.font = '800 10px Inter, system-ui, sans-serif'
-    const textW = Math.max(68, ctx.measureText(label).width + 14)
+    const textW = Math.max(82, ctx.measureText(label).width + 14)
     ctx.fillStyle = isLocal
       ? 'rgba(15, 23, 42, 0.88)'
       : 'rgba(30, 41, 59, 0.82)'
@@ -4775,6 +6334,132 @@ export class TowerInstance {
 
     ctx.fillStyle = isLocal ? '#FEF08A' : '#F8FAFC'
     ctx.fillText(label, 0, 34.5)
+
+    let offsetY = 47
+
+    // In Survival Mode (3 Vidas), display the player's remaining hearts (or ELIMINADO) below their name tag!
+    if (this.gameMode === 'SURVIVAL') {
+      const maxHeartSlots = Math.max(
+        GAME_CONSTANTS.SURVIVAL_INITIAL_LIVES,
+        isLocal ? this.maxLives : GAME_CONSTANTS.SURVIVAL_INITIAL_LIVES,
+        Math.min(5, lives)
+      )
+      const clampedLives = Math.max(0, Math.min(maxHeartSlots, lives))
+      const heartsText =
+        isEliminated || clampedLives <= 0
+          ? '💀 ELIMINADO'
+          : '❤️'.repeat(clampedLives) +
+            '🖤'.repeat(Math.max(0, maxHeartSlots - clampedLives))
+      ctx.font = '800 10px Inter, system-ui, sans-serif'
+      const heartsW = Math.max(76, ctx.measureText(heartsText).width + 16)
+      const isFlashingWhite = whiteFlashAlpha > 0.35
+      ctx.fillStyle = isFlashingWhite
+        ? 'rgba(255, 255, 255, 0.96)'
+        : isEliminated || clampedLives <= 0
+          ? 'rgba(127, 29, 29, 0.94)'
+          : 'rgba(15, 23, 42, 0.9)'
+      ctx.strokeStyle = isFlashingWhite
+        ? '#FFFFFF'
+        : isEliminated || clampedLives <= 0
+          ? '#EF4444'
+          : '#F43F5E'
+      ctx.lineWidth = isFlashingWhite ? 2.2 : 1.5
+      ctx.beginPath()
+      ctx.roundRect(-heartsW / 2, offsetY, heartsW, 18, 5)
+      ctx.fill()
+      ctx.stroke()
+
+      ctx.fillStyle = isFlashingWhite
+        ? '#0F172A'
+        : isEliminated || clampedLives <= 0
+          ? '#FCA5A5'
+          : '#FFFFFF'
+      ctx.fillText(heartsText, 0, offsetY + 9.5)
+      offsetY += 21
+
+      // Blinking 3-second Invulnerability Stabilization Pill below hearts
+      if (invulnerableRemainingMs > 0 && !isEliminated && clampedLives > 0) {
+        const invText = `🛡️ INVULNERÁVEL ${(invulnerableRemainingMs / 1000).toFixed(1)}s`
+        ctx.font = '900 9px Inter, system-ui, sans-serif'
+        const invW = Math.max(106, ctx.measureText(invText).width + 14)
+        const ratio = Math.max(
+          0,
+          Math.min(
+            1,
+            invulnerableRemainingMs /
+              GAME_CONSTANTS.SURVIVAL_LIFE_LOSS_COOLDOWN_MS
+          )
+        )
+        const blinkBright = Math.sin(this.elapsedTimeMs * 0.056) < 0
+
+        ctx.fillStyle = blinkBright
+          ? 'rgba(224, 242, 254, 0.95)'
+          : 'rgba(12, 74, 110, 0.92)'
+        ctx.strokeStyle = blinkBright ? '#FFFFFF' : '#38BDF8'
+        ctx.lineWidth = 1.6
+        ctx.beginPath()
+        ctx.roundRect(-invW / 2, offsetY, invW, 19, 5)
+        ctx.fill()
+        ctx.stroke()
+
+        // Progress bar at bottom of the pill
+        ctx.fillStyle = blinkBright ? '#0284C7' : '#FEF08A'
+        ctx.fillRect(-invW / 2 + 3, offsetY + 15, (invW - 6) * ratio, 2.5)
+
+        ctx.fillStyle = blinkBright ? '#0F172A' : '#FFFFFF'
+        ctx.fillText(invText, 0, offsetY + 8.5)
+        offsetY += 22
+      }
+    }
+
+    // Render active curse / negative power badges affecting this player
+    if (activeDebuffs && activeDebuffs.length > 0) {
+      const debuffMeta: Record<string, { label: string; bg: string; border: string }> = {
+        BLIND_MANUAL: {
+          label: '🌫️ NUVEM FOG',
+          bg: 'rgba(107, 33, 168, 0.92)',
+          border: '#D8B4FE',
+        },
+        SLICK_BRICK: {
+          label: '🧊 GELO',
+          bg: 'rgba(3, 105, 161, 0.92)',
+          border: '#7DD3FC',
+        },
+        LOCK_ROTATE: {
+          label: '🔒 GIRO TRAVADO',
+          bg: 'rgba(159, 18, 57, 0.92)',
+          border: '#FDA4AF',
+        },
+        TURBO_DROP: {
+          label: '⚡ QUEDA TURBO',
+          bg: 'rgba(185, 28, 28, 0.92)',
+          border: '#FCA5A5',
+        },
+        GIANT_PIECE: {
+          label: '🦣 MEGA 2X',
+          bg: 'rgba(180, 83, 9, 0.92)',
+          border: '#FDE047',
+        },
+      }
+
+      for (const debuffId of activeDebuffs) {
+        const meta = debuffMeta[debuffId]
+        if (!meta) continue
+        ctx.font = '800 9px Inter, system-ui, sans-serif'
+        const pillW = Math.max(66, ctx.measureText(meta.label).width + 12)
+        ctx.fillStyle = meta.bg
+        ctx.strokeStyle = meta.border
+        ctx.lineWidth = 1.4
+        ctx.beginPath()
+        ctx.roundRect(-pillW / 2, offsetY, pillW, 16, 4)
+        ctx.fill()
+        ctx.stroke()
+
+        ctx.fillStyle = '#FFFFFF'
+        ctx.fillText(meta.label, 0, offsetY + 8.5)
+        offsetY += 19
+      }
+    }
 
     ctx.restore()
   }
@@ -4866,19 +6551,44 @@ export class TowerInstance {
   }
 
   /**
-   * Renders all remote online friends' lanes (Base Plate, Interpolated Settled Blocks,
-   * Interpolated Active Piece, Floating Mascot, and Live Rank Badge `1ST`/`2ND`/`3RD`/`4TH`).
+   * Renders all remote online friends' lanes (Base Plate, Side Islands, Interpolated Settled Blocks,
+   * Interpolated Active Piece, Active Power Effects such as `BLIND_MANUAL` Fog Cloud, Floating Mascot,
+   * and Live Rank Badge `1ST`/`2ND`/`3RD`/`4TH`).
    */
   private renderRemoteMultiplayerLanes(
     ctx: CanvasRenderingContext2D,
     animTimeMs: number
   ): void {
     const u = GAME_CONSTANTS.UNIT_PX
+    const nowPerf = performance.now()
 
     for (const lane of this.remoteLanesToRender) {
       const relOffsetX = lane.laneOffsetX - this.offsetX
       ctx.save()
       ctx.translate(relOffsetX, 0)
+
+      const elapsedSinceLoss =
+        typeof lane.lastLifeLostAtMs === 'number' && lane.lastLifeLostAtMs > 0
+          ? Math.max(0, nowPerf - lane.lastLifeLostAtMs)
+          : Infinity
+      const remWhiteFlashMs =
+        elapsedSinceLoss < 780 ? 780 - elapsedSinceLoss : 0
+      const remInvulnMs =
+        this.gameMode === 'SURVIVAL' &&
+        !lane.isEliminated &&
+        lane.lives > 0 &&
+        elapsedSinceLoss < GAME_CONSTANTS.SURVIVAL_LIFE_LOSS_COOLDOWN_MS
+          ? GAME_CONSTANTS.SURVIVAL_LIFE_LOSS_COOLDOWN_MS - elapsedSinceLoss
+          : 0
+      const remReactionMs =
+        elapsedSinceLoss < 2500 ? 2500 - elapsedSinceLoss : 0
+
+      const remFallVis = this.getPlayerFallVisualState(
+        remWhiteFlashMs,
+        remInvulnMs,
+        remReactionMs,
+        animTimeMs
+      )
 
       // 1. Remote Friend's Floating Mascot + Live Rank Badge (`1ST`, `2ND`, `3RD`, `4TH`)
       const swayX = Math.sin(animTimeMs * 0.002 + lane.laneOffsetX * 0.01) * 7
@@ -4892,7 +6602,15 @@ export class TowerInstance {
         mascotX,
         mascotY,
         animTimeMs,
-        { scaleXFlip: -1, targetHeight: 96 }
+        {
+          scaleXFlip: -1,
+          targetHeight: 96,
+          whiteFlashAlpha: remFallVis.whiteFlashAlpha,
+          blinkAlpha: remFallVis.blinkAlpha,
+          fallReactionIntensity: remFallVis.reactionIntensity,
+          isSurvivalLifeLoss: this.gameMode === 'SURVIVAL',
+          invulnerableRemainingMs: remInvulnMs,
+        }
       )
 
       if (lane.mascotCastAnimMs > 0 && lane.mascotCastCategory) {
@@ -4905,6 +6623,28 @@ export class TowerInstance {
         )
       }
 
+      const laneDebuffs = [...(lane.activeDebuffs || [])]
+      if (
+        lane.blindManualRemainingMs > 0 &&
+        !laneDebuffs.includes('BLIND_MANUAL')
+      ) {
+        laneDebuffs.push('BLIND_MANUAL')
+      }
+      if (
+        lane.activePiece?.powerEffect &&
+        lane.activePiece.powerEffect !== 'NONE' &&
+        lane.activePiece.powerEffect !== 'CASTLE_ROOF' &&
+        !laneDebuffs.includes(lane.activePiece.powerEffect)
+      ) {
+        laneDebuffs.push(lane.activePiece.powerEffect)
+      }
+      if (
+        lane.activePiece?.variant === 'GIANT' &&
+        !laneDebuffs.includes('GIANT_PIECE')
+      ) {
+        laneDebuffs.push('GIANT_PIECE')
+      }
+
       this.drawRankBadgeBelowMascot(
         ctx,
         mascotX,
@@ -4912,10 +6652,16 @@ export class TowerInstance {
         lane.rankBadge,
         lane.customNick,
         lane.towerHeight,
-        false
+        false,
+        lane.slotIndex,
+        laneDebuffs,
+        lane.lives,
+        lane.isEliminated || lane.lives <= 0,
+        remInvulnMs,
+        remFallVis.whiteFlashAlpha
       )
 
-      // 2. Remote Friend's Modular 8-Column Green Base Plate
+      // 2. Remote Friend's Modular 8-Column Green Base Plate (only the wizard blinks, not the base or tower!)
       spriteRegistry.drawBasePlate(
         ctx,
         0,
@@ -4923,7 +6669,23 @@ export class TowerInstance {
         this.currentBasePreset.elevations
       )
 
-      // 3. Remote Friend's Interpolated Settled Blocks
+      // 2b. Remote Friend's Floating Side Islands (`SIDE_ISLAND`)
+      if (lane.islands && lane.islands.length > 0) {
+        for (const isl of lane.islands) {
+          spriteRegistry.drawSideIsland(
+            ctx,
+            this.toPixels(isl.x),
+            this.toPixelsY(isl.y),
+            this.toPixels(isl.width),
+            this.toPixels(isl.height),
+            isl.side,
+            1,
+            animTimeMs
+          )
+        }
+      }
+
+      // 3. Remote Friend's Interpolated Settled Blocks (never blink; only the wizard blinks!)
       for (const blk of lane.settledBlocks) {
         this.renderSnapshotPieceOnLane(ctx, blk, false)
       }
@@ -4931,6 +6693,24 @@ export class TowerInstance {
       // 4. Remote Friend's Interpolated Active Falling Piece
       if (lane.activePiece && !lane.isEliminated) {
         this.renderSnapshotPieceOnLane(ctx, lane.activePiece, true)
+      }
+
+      // 5. Remote Friend's Active Fog Cloud (`BLIND_MANUAL` — "nuvem que esconde")
+      const hasBlindFog =
+        lane.blindManualRemainingMs > 0 ||
+        (lane.activeDebuffs && lane.activeDebuffs.includes('BLIND_MANUAL'))
+      if (hasBlindFog) {
+        const fogCenterX = (lane.fogAnchorX ?? 0) * 0.25
+        const fogAnchorY =
+          typeof lane.fogAnchorY === 'number'
+            ? lane.fogAnchorY
+            : -Math.max(1.2, lane.towerHeight) * u
+        this.renderBlindFogCloudAt(
+          ctx,
+          fogCenterX,
+          fogAnchorY,
+          lane.blindManualRemainingMs > 0 ? lane.blindManualRemainingMs : 20000
+        )
       }
 
       ctx.restore()
@@ -4964,9 +6744,55 @@ export class TowerInstance {
             y: c.y - comUnitY,
           }))
 
+    const pxX = snap.x * u
+    const pxY = -snap.y * u
+    const angleRad = (snap.angle * Math.PI) / 180
+
+    const recallProg =
+      isActive && 'recallTransformProgress' in snap
+        ? snap.recallTransformProgress
+        : undefined
+    const recallPowerId =
+      isActive && 'recallPowerId' in snap ? snap.recallPowerId : undefined
+
+    // Render fast-drop shadow trail when opponent's active piece has TURBO_DROP
+    if (
+      isActive &&
+      snap.powerEffect === 'TURBO_DROP' &&
+      recallProg === undefined
+    ) {
+      for (const dy of [-16, -8]) {
+        ctx.save()
+        ctx.translate(pxX, pxY + dy)
+        ctx.scale(0.96, 1.03)
+        ctx.rotate(angleRad)
+        ctx.globalAlpha = dy === -16 ? 0.14 : 0.24
+        spriteRegistry.drawPieceCells(
+          ctx,
+          snap.type,
+          snap.variant || 'NORMAL',
+          cellsFromCoM,
+          phys.scale,
+          {
+            isGhost: true,
+            powerEffect: snap.powerEffect,
+            colorPaletteIndex: snap.colorPaletteIndex ?? 0,
+          }
+        )
+        ctx.restore()
+      }
+    }
+
     ctx.save()
-    ctx.translate(snap.x * u, -snap.y * u)
-    ctx.rotate((snap.angle * Math.PI) / 180)
+    ctx.translate(pxX, pxY)
+    if (recallProg !== undefined && recallProg >= 0.53) {
+      const popT = Math.min(1, (recallProg - 0.53) / 0.47)
+      const scalePop = 1 + 0.34 * Math.sin(popT * Math.PI)
+      const wobble = Math.sin(popT * Math.PI * 3) * 0.085
+      ctx.scale(scalePop, scalePop)
+      ctx.rotate(wobble)
+    }
+    ctx.rotate(angleRad)
     spriteRegistry.drawPieceCells(
       ctx,
       snap.type,
@@ -4983,6 +6809,139 @@ export class TowerInstance {
         colorPaletteIndex: snap.colorPaletteIndex ?? 0,
       }
     )
+    ctx.restore()
+
+    if (recallProg !== undefined && recallPowerId) {
+      this.drawPieceRecallTransformOverlay(
+        ctx,
+        pxX,
+        pxY,
+        recallProg,
+        recallPowerId
+      )
+    }
+  }
+
+  /**
+   * Renders the tractor-beam lift aura (`progress < 0.53`) and the starting-point transformation
+   * ring + badge (`progress >= 0.53`) when a piece is recalled to the top and transformed.
+   */
+  private drawPieceRecallTransformOverlay(
+    ctx: CanvasRenderingContext2D,
+    pxX: number,
+    pxY: number,
+    progress: number,
+    powerId: PowerId,
+    startLocalX?: number,
+    startLocalY?: number
+  ): void {
+    const theme =
+      powerId === 'GIANT_PIECE'
+        ? {
+            color: '#EF4444',
+            glow: 'rgba(239, 68, 68, 0.55)',
+            label: '🦣 MEGA 2X!',
+          }
+        : powerId === 'SLICK_BRICK'
+          ? {
+              color: '#38BDF8',
+              glow: 'rgba(56, 189, 248, 0.55)',
+              label: '🧊 BLOCO DE GELO!',
+            }
+          : powerId === 'TURBO_DROP'
+            ? {
+                color: '#F97316',
+                glow: 'rgba(249, 115, 22, 0.55)',
+                label: '⚡ QUEDA TURBO!',
+              }
+            : {
+                color: '#A855F7',
+                glow: 'rgba(168, 85, 247, 0.55)',
+                label: '🔒 GIRO TRAVADO!',
+              }
+
+    ctx.save()
+
+    if (progress < 0.53) {
+      // Phase 1: Piece stopped & elevating back to the starting point
+      const liftRatio = Math.min(1, progress / 0.53)
+      if (
+        typeof startLocalX === 'number' &&
+        typeof startLocalY === 'number' &&
+        Math.abs(startLocalY - pxY) > 8
+      ) {
+        const beamGrad = ctx.createLinearGradient(
+          pxX,
+          pxY,
+          startLocalX,
+          startLocalY
+        )
+        beamGrad.addColorStop(0, theme.glow)
+        beamGrad.addColorStop(1, 'rgba(255, 255, 255, 0)')
+        ctx.strokeStyle = beamGrad
+        ctx.lineWidth = 38 * (1 - liftRatio * 0.35)
+        ctx.lineCap = 'round'
+        ctx.beginPath()
+        ctx.moveTo(pxX, pxY)
+        ctx.lineTo(startLocalX, startLocalY)
+        ctx.stroke()
+      }
+
+      // Lock-on ring around the rising piece
+      ctx.translate(pxX, pxY)
+      const ringRadius = 38 + Math.sin(liftRatio * Math.PI * 2) * 6
+      ctx.strokeStyle = theme.color
+      ctx.shadowColor = theme.color
+      ctx.shadowBlur = 14
+      ctx.lineWidth = 3
+      ctx.beginPath()
+      ctx.arc(0, 0, ringRadius, 0, Math.PI * 2)
+      ctx.stroke()
+    } else {
+      // Phase 2: Transformation pop at the starting point
+      const popT = Math.min(1, (progress - 0.53) / 0.47)
+      const alpha = Math.sin(popT * Math.PI)
+
+      ctx.translate(pxX, pxY)
+
+      // Radial flash
+      const flashRadius = 36 + popT * 62
+      const grad = ctx.createRadialGradient(0, 0, 6, 0, 0, flashRadius)
+      grad.addColorStop(0, `rgba(255, 255, 255, ${(0.75 * alpha).toFixed(3)})`)
+      grad.addColorStop(0.5, theme.glow)
+      grad.addColorStop(1, 'rgba(255, 255, 255, 0)')
+      ctx.fillStyle = grad
+      ctx.beginPath()
+      ctx.arc(0, 0, flashRadius, 0, Math.PI * 2)
+      ctx.fill()
+
+      // Expanding shockwave ring
+      ctx.strokeStyle = theme.color
+      ctx.lineWidth = 3.5 * (1 - popT * 0.6)
+      ctx.globalAlpha = Math.max(0, 1 - popT * 0.85)
+      ctx.beginPath()
+      ctx.arc(0, 0, 28 + popT * 54, 0, Math.PI * 2)
+      ctx.stroke()
+
+      // Floating transformation pill label above the piece
+      ctx.globalAlpha = Math.min(1, alpha * 1.45)
+      ctx.font = '900 11px Inter, system-ui, sans-serif'
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      const pillW = Math.max(96, ctx.measureText(theme.label).width + 18)
+      const pillY = -58 - popT * 12
+      ctx.fillStyle = theme.color
+      ctx.strokeStyle = '#FFFFFF'
+      ctx.lineWidth = 2
+      ctx.beginPath()
+      ctx.roundRect(-pillW / 2, pillY - 11, pillW, 22, 6)
+      ctx.fill()
+      ctx.stroke()
+
+      ctx.fillStyle = '#FFFFFF'
+      ctx.fillText(theme.label, 0, pillY)
+    }
+
     ctx.restore()
   }
 
@@ -5089,22 +7048,43 @@ export class TowerInstance {
       }
     }
 
-    const markerHeights = [5, 8, 10, 15, 16, 20, 24, 25, 30, 35]
+    const markerHeights =
+      this.gameMode === 'SURVIVAL'
+        ? [5, 8, 10, 15, 16, 20, 24, 25, 30, 32, 35, 40, 48, 56]
+        : [5, 8, 10, 15, 16, 20, 24, 25, 30, 35]
     for (const h of markerHeights) {
       const y = -h * u
-      const isGoal = h === GAME_CONSTANTS.GOAL_HEIGHT_UNITS
-      const isCheckpoint = h === 8 || h === 16 || h === 24
+      const isGoal =
+        this.gameMode === 'RACE' && h === GAME_CONSTANTS.GOAL_HEIGHT_UNITS
+      const isCheckpoint =
+        this.gameMode === 'SURVIVAL'
+          ? h === 8 ||
+            h === 16 ||
+            h === 24 ||
+            h === 32 ||
+            h === 40 ||
+            h === 48 ||
+            h === 56
+          : h === 8 || h === 16 || h === 24
       const isWindLine = h === GAME_CONSTANTS.WIND_START_HEIGHT_UNITS
 
       if (isGoal) {
-        const lineHalfW = Math.max(baseHalfW * 2.5, canvasWidth * 0.25)
+        let minLineX = -Math.max(baseHalfW * 2.5, canvasWidth * 0.25)
+        let maxLineX = Math.max(baseHalfW * 2.5, canvasWidth * 0.25)
+        if (this.remoteLanesToRender.length > 0) {
+          for (const r of this.remoteLanesToRender) {
+            const relX = r.laneOffsetX - this.offsetX
+            minLineX = Math.min(minLineX, relX - baseHalfW * 2.2)
+            maxLineX = Math.max(maxLineX, relX + baseHalfW * 2.2)
+          }
+        }
         ctx.save()
         ctx.strokeStyle = '#FACC15'
         ctx.lineWidth = 3.5
         ctx.setLineDash([14, 10])
         ctx.beginPath()
-        ctx.moveTo(-lineHalfW, y)
-        ctx.lineTo(lineHalfW, y)
+        ctx.moveTo(minLineX, y)
+        ctx.lineTo(maxLineX, y)
         ctx.stroke()
         ctx.setLineDash([])
 
@@ -5366,15 +7346,23 @@ export class TowerInstance {
     let localX = body.position.x - this.offsetX
     const localY = body.position.y
 
+    const recallAnim = isActive ? this.pieceRecallAnim : null
+    const recallProg = recallAnim
+      ? Math.min(
+          1,
+          recallAnim.elapsedMs / Math.max(1, recallAnim.totalDurationMs)
+        )
+      : undefined
+
     let pulse = 0
-    if (isActive && this.pistonTimerMs > 0) {
+    if (isActive && this.pistonTimerMs > 0 && !recallAnim) {
       const progress = 1 - this.pistonTimerMs / this.pistonDurationMs
       pulse = Math.sin(progress * Math.PI)
       const pistonOffsetPx = this.pistonDir * 6.0 * pulse
       localX += pistonOffsetPx
     }
 
-    if (isActive && this.boundaryShakeTimerMs > 0) {
+    if (isActive && this.boundaryShakeTimerMs > 0 && !recallAnim) {
       const ratio = this.boundaryShakeTimerMs / 135
       const jiggle =
         Math.sin((1 - ratio) * Math.PI * 3.5) * 3.6 * ratio * this.boundaryShakeDir
@@ -5383,18 +7371,29 @@ export class TowerInstance {
 
     const isFastFalling =
       isActive &&
+      !recallAnim &&
       (this.isSoftDropping || piece.powerEffect === 'TURBO_DROP') &&
       this.bottomTouchTimerMs === 0 &&
       !this.hasBottomSupportThisTick
 
     // Mini rastro shadow ("mini rastro shadow") behind the accelerating piece
-    if (isActive && (isFastFalling || this.softDropTrail.length > 0)) {
+    if (
+      isActive &&
+      !recallAnim &&
+      (isFastFalling || this.softDropTrail.length > 0)
+    ) {
       this.renderFastDropShadowTrail(ctx, piece, localX, localY, isFastFalling)
     }
 
     ctx.save()
     ctx.translate(localX, localY)
-    if (pulse > 0) {
+    if (recallProg !== undefined && recallProg >= 0.53) {
+      const popT = Math.min(1, (recallProg - 0.53) / 0.47)
+      const scalePop = 1 + 0.34 * Math.sin(popT * Math.PI)
+      const wobble = Math.sin(popT * Math.PI * 3) * 0.085
+      ctx.scale(scalePop, scalePop)
+      ctx.rotate(wobble)
+    } else if (pulse > 0) {
       ctx.scale(1 + 0.08 * pulse, 1 - 0.04 * pulse)
     } else if (isFastFalling) {
       // Subtle vertical aerodynamic speed stretch when pressing Down
@@ -5506,6 +7505,18 @@ export class TowerInstance {
     }
 
     ctx.restore()
+
+    if (recallAnim && recallProg !== undefined) {
+      this.drawPieceRecallTransformOverlay(
+        ctx,
+        localX,
+        localY,
+        recallProg,
+        recallAnim.powerId,
+        recallAnim.startLocalX,
+        recallAnim.startLocalY
+      )
+    }
   }
 
   /**
@@ -5748,6 +7759,314 @@ export class TowerInstance {
         ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2)
         ctx.fill()
       }
+    }
+    ctx.restore()
+  }
+
+  /**
+   * Renders the floating Extra Life Balloon (`EXTRA_LIFE`) that drifts upward and away.
+   * The player must steer their active falling piece (`activePiece`) into the balloon to catch it and earn `+1 ❤️ Vida Extra`!
+   */
+  private renderExtraLifeBalloons(
+    ctx: CanvasRenderingContext2D,
+    animTimeMs: number
+  ): void {
+    const u = GAME_CONSTANTS.UNIT_PX
+
+    ctx.save()
+    for (const b of this.extraLifeBalloons) {
+      const px = b.x
+      const py = b.y
+      const lifeRatio = Math.max(0, 1 - b.ageMs / b.maxAgeMs)
+      const isUrgent = lifeRatio < 0.34
+      const pulse = 1 + Math.sin(animTimeMs * (isUrgent ? 0.018 : 0.008) + b.swayPhase) * 0.08
+      const tiltRad = Math.sin(animTimeMs * 0.0042 + b.swayPhase) * 0.14
+
+      ctx.save()
+      ctx.translate(px, py)
+
+      // 1. Pulsing catch-zone target ring around the balloon so the player sees the exact pickup radius
+      const ringRadius = (1.35 + Math.sin(animTimeMs * 0.01) * 0.12) * u
+      ctx.save()
+      ctx.strokeStyle = isUrgent
+        ? 'rgba(254, 240, 138, 0.88)'
+        : 'rgba(251, 113, 133, 0.78)'
+      ctx.lineWidth = 2.4
+      ctx.setLineDash([7, 5])
+      ctx.lineDashOffset = -animTimeMs * 0.03
+      ctx.beginPath()
+      ctx.arc(0, 0, ringRadius, 0, Math.PI * 2)
+      ctx.stroke()
+      ctx.restore()
+
+      // Soft warm glow behind the balloon
+      const auraGrad = ctx.createRadialGradient(0, -4, 4, 0, -4, 42)
+      auraGrad.addColorStop(0, 'rgba(254, 240, 138, 0.68)')
+      auraGrad.addColorStop(0.55, 'rgba(244, 63, 94, 0.32)')
+      auraGrad.addColorStop(1, 'rgba(244, 63, 94, 0)')
+      ctx.fillStyle = auraGrad
+      ctx.beginPath()
+      ctx.arc(0, -4, 42, 0, Math.PI * 2)
+      ctx.fill()
+
+      ctx.save()
+      ctx.rotate(tiltRad)
+      ctx.scale(pulse, pulse)
+
+      // 2. Wavy white/gold balloon string dangling below
+      ctx.strokeStyle = '#FEF08A'
+      ctx.lineWidth = 2.6
+      ctx.lineCap = 'round'
+      ctx.beginPath()
+      ctx.moveTo(0, 18)
+      const wave = Math.sin(animTimeMs * 0.009 + b.swayPhase) * 7
+      ctx.bezierCurveTo(wave, 28, -wave, 38, wave * 0.5, 48)
+      ctx.stroke()
+
+      // Small golden gift tag dangling on the string
+      ctx.fillStyle = '#FACC15'
+      ctx.strokeStyle = '#713F12'
+      ctx.lineWidth = 1.8
+      ctx.beginPath()
+      ctx.roundRect(-12, 27, 24, 13, 3.5)
+      ctx.fill()
+      ctx.stroke()
+      ctx.font = '900 8.5px "Fredoka", Inter, system-ui, sans-serif'
+      ctx.fillStyle = '#713F12'
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillText('+1♥', 0, 34)
+
+      // 3. Balloon knot at bottom of heart
+      ctx.fillStyle = '#E11D48'
+      ctx.strokeStyle = '#4C0519'
+      ctx.lineWidth = 2.2
+      ctx.beginPath()
+      ctx.moveTo(-5, 19)
+      ctx.lineTo(5, 19)
+      ctx.lineTo(0, 13)
+      ctx.closePath()
+      ctx.fill()
+      ctx.stroke()
+
+      // 4. Glossy 3D Heart Balloon body
+      const heartGrad = ctx.createRadialGradient(-8, -14, 3, 0, -4, 32)
+      heartGrad.addColorStop(0, '#FDA4AF')
+      heartGrad.addColorStop(0.35, '#F43F5E')
+      heartGrad.addColorStop(0.8, '#E11D48')
+      heartGrad.addColorStop(1, '#9F1239')
+      ctx.fillStyle = heartGrad
+      ctx.strokeStyle = '#4C0519'
+      ctx.lineWidth = 3
+      ctx.beginPath()
+      ctx.moveTo(0, 16)
+      ctx.bezierCurveTo(-28, 2, -30, -24, -13, -24)
+      ctx.bezierCurveTo(-5, -24, 0, -16, 0, -11)
+      ctx.bezierCurveTo(0, -16, 5, -24, 13, -24)
+      ctx.bezierCurveTo(30, -24, 28, 2, 0, 16)
+      ctx.closePath()
+      ctx.fill()
+      ctx.stroke()
+
+      // Glossy specular highlight on upper-left lobe
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.72)'
+      ctx.beginPath()
+      ctx.ellipse(-11, -13, 6, 3.2, -0.55, 0, Math.PI * 2)
+      ctx.fill()
+
+      // Bold white "+1 ❤️" inside the balloon
+      ctx.font = '900 12px "Fredoka", Inter, system-ui, sans-serif'
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.strokeStyle = '#4C0519'
+      ctx.lineWidth = 3
+      ctx.strokeText('+1♥', 0, -4)
+      ctx.fillStyle = '#FFFFFF'
+      ctx.fillText('+1♥', 0, -4)
+
+      ctx.restore()
+
+      // 5. Floating prompt pill above the balloon so the mechanic is 100% clear
+      const promptText = isUrgent
+        ? '🎈💨 PEGUE RÁPIDO!'
+        : '🎈 PEGUE COM A PEÇA!'
+      ctx.font = '900 10px "Fredoka", Inter, system-ui, sans-serif'
+      const pillW = Math.max(114, ctx.measureText(promptText).width + 18)
+      const pillY = -48
+      ctx.fillStyle = isUrgent
+        ? 'rgba(185, 28, 28, 0.94)'
+        : 'rgba(15, 23, 42, 0.92)'
+      ctx.strokeStyle = isUrgent ? '#FEF08A' : '#FB7185'
+      ctx.lineWidth = 2
+      ctx.beginPath()
+      ctx.roundRect(-pillW / 2, pillY, pillW, 19, 6)
+      ctx.fill()
+      ctx.stroke()
+
+      ctx.fillStyle = '#FEF08A'
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(promptText, 0, pillY + 9.5)
+
+      ctx.restore()
+    }
+    ctx.restore()
+  }
+
+  /**
+   * Renders attractive visual fall feedback ("feedback visual mais atrativo para entender")
+   * when a piece drops into the water or disintegrates laterally:
+   * - Expanding dual shockwave rings + vertical splash beacon at the fall location
+   * - Elastic 3D cartoon callout badge (`💔 -1 VIDA! • 🛡️ 3.0s INVULNERÁVEL!` / `🛡️ PROTEGIDO!` / `⚠️ PEÇA CAIU!`)
+   */
+  private renderFallFeedbackCallouts(ctx: CanvasRenderingContext2D): void {
+    ctx.save()
+    for (const c of this.fallFeedbackCallouts) {
+      const progress = Math.min(1, c.ageMs / c.maxAgeMs)
+      const fadeOut =
+        progress > 0.72 ? Math.max(0, 1 - (progress - 0.72) / 0.28) : 1
+      if (fadeOut <= 0.02) continue
+
+      const popIn =
+        progress < 0.16
+          ? 0.55 + Math.sin((progress / 0.16) * (Math.PI / 2)) * 0.6
+          : progress < 0.26
+            ? 1.15 - ((progress - 0.16) / 0.1) * 0.15
+            : 1.0
+
+      const theme =
+        c.tone === 'LIFE_LOSS'
+          ? {
+              bgTop: '#EF4444',
+              bgBottom: '#991B1B',
+              border: '#FFFFFF',
+              outerBorder: '#450A0A',
+              subColor: '#FEF08A',
+              ringColor: 'rgba(244, 63, 94, 0.85)',
+              beamColor: 'rgba(255, 255, 255, 0.55)',
+            }
+          : c.tone === 'EXTRA_LIFE_CAUGHT'
+            ? {
+                bgTop: '#10B981',
+                bgBottom: '#047857',
+                border: '#FEF08A',
+                outerBorder: '#064E3B',
+                subColor: '#FEF08A',
+                ringColor: 'rgba(52, 211, 153, 0.9)',
+                beamColor: 'rgba(254, 240, 138, 0.55)',
+              }
+            : c.tone === 'EXTRA_LIFE_ESCAPED'
+              ? {
+                  bgTop: '#64748B',
+                  bgBottom: '#334155',
+                  border: '#CBD5E1',
+                  outerBorder: '#0F172A',
+                  subColor: '#F8FAFC',
+                  ringColor: 'rgba(148, 163, 184, 0.75)',
+                  beamColor: 'rgba(226, 232, 240, 0.35)',
+                }
+              : c.tone === 'SHIELD_PROTECTED'
+                ? {
+                    bgTop: '#0284C7',
+                    bgBottom: '#0C4A6E',
+                    border: '#E0F2FE',
+                    outerBorder: '#082F49',
+                    subColor: '#FEF08A',
+                    ringColor: 'rgba(56, 189, 248, 0.85)',
+                    beamColor: 'rgba(186, 230, 253, 0.45)',
+                  }
+                : {
+                    bgTop: '#F97316',
+                    bgBottom: '#9A3412',
+                    border: '#FEF08A',
+                    outerBorder: '#431407',
+                    subColor: '#FFFFFF',
+                    ringColor: 'rgba(251, 146, 60, 0.85)',
+                    beamColor: 'rgba(255, 255, 255, 0.45)',
+                  }
+
+      // 1. Expanding shockwave ring & vertical impact beacon in the first 500ms
+      if (c.ageMs < 520) {
+        const ringT = c.ageMs / 520
+        const ringAlpha = (1 - ringT) * 0.9
+        ctx.save()
+        ctx.translate(c.x, c.startY + 28)
+
+        // Vertical light column shooting up from the fall spot
+        const beamH = 120 * (1 - ringT * 0.4)
+        const beamW = 48 * (1 - ringT * 0.5)
+        const beamGrad = ctx.createLinearGradient(0, 10, 0, -beamH)
+        beamGrad.addColorStop(0, theme.beamColor)
+        beamGrad.addColorStop(1, 'rgba(255, 255, 255, 0)')
+        ctx.globalAlpha = ringAlpha
+        ctx.fillStyle = beamGrad
+        ctx.fillRect(-beamW / 2, -beamH, beamW, beamH + 10)
+
+        // Expanding elliptical shockwave ring
+        ctx.strokeStyle = '#FFFFFF'
+        ctx.shadowColor = theme.ringColor
+        ctx.shadowBlur = 14
+        ctx.lineWidth = 3.5 * (1 - ringT * 0.6)
+        ctx.beginPath()
+        ctx.ellipse(
+          0,
+          0,
+          18 + ringT * 68,
+          7 + ringT * 22,
+          0,
+          0,
+          Math.PI * 2
+        )
+        ctx.stroke()
+        ctx.restore()
+      }
+
+      // 2. Rising 3D Arcade Callout Pill
+      ctx.save()
+      ctx.translate(c.x, c.y)
+      ctx.scale(popIn, popIn)
+      ctx.globalAlpha = fadeOut
+
+      ctx.font = '900 13px "Fredoka", Inter, system-ui, sans-serif'
+      const titleW = ctx.measureText(c.title).width
+      ctx.font = '800 9.5px Inter, system-ui, sans-serif'
+      const subW = ctx.measureText(c.subtitle).width
+      const boxW = Math.max(118, Math.max(titleW, subW) + 24)
+      const boxH = 38
+
+      const bgGrad = ctx.createLinearGradient(0, -boxH / 2, 0, boxH / 2)
+      bgGrad.addColorStop(0, theme.bgTop)
+      bgGrad.addColorStop(1, theme.bgBottom)
+
+      ctx.fillStyle = bgGrad
+      ctx.strokeStyle = theme.outerBorder
+      ctx.lineWidth = 4.2
+      ctx.beginPath()
+      ctx.roundRect(-boxW / 2, -boxH / 2, boxW, boxH, 9)
+      ctx.stroke()
+      ctx.fill()
+
+      ctx.strokeStyle = theme.border
+      ctx.lineWidth = 2.0
+      ctx.beginPath()
+      ctx.roundRect(-boxW / 2 + 1.5, -boxH / 2 + 1.5, boxW - 3, boxH - 3, 7.5)
+      ctx.stroke()
+
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+
+      ctx.font = '900 13px "Fredoka", Inter, system-ui, sans-serif'
+      ctx.fillStyle = '#FFFFFF'
+      ctx.strokeStyle = theme.outerBorder
+      ctx.lineWidth = 2.8
+      ctx.strokeText(c.title, 0, -5.5)
+      ctx.fillText(c.title, 0, -5.5)
+
+      ctx.font = '800 9.5px Inter, system-ui, sans-serif'
+      ctx.fillStyle = theme.subColor
+      ctx.fillText(c.subtitle, 0, 9.5)
+
+      ctx.restore()
     }
     ctx.restore()
   }

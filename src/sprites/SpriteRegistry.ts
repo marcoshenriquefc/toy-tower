@@ -2228,10 +2228,35 @@ export class SpriteRegistry {
     ctx.restore()
   }
 
+  private whiteSilhouetteCache: WeakMap<HTMLImageElement, HTMLCanvasElement> =
+    new WeakMap()
+
+  private getWhiteSilhouetteCanvas(
+    img: HTMLImageElement
+  ): HTMLCanvasElement | null {
+    const cached = this.whiteSilhouetteCache.get(img)
+    if (cached) return cached
+    const w = img.naturalWidth || img.width
+    const h = img.naturalHeight || img.height
+    if (!w || !h) return null
+    const offscreen = document.createElement('canvas')
+    offscreen.width = w
+    offscreen.height = h
+    const octx = offscreen.getContext('2d')
+    if (!octx) return null
+    octx.drawImage(img, 0, 0, w, h)
+    octx.globalCompositeOperation = 'source-in'
+    octx.fillStyle = '#FFFFFF'
+    octx.fillRect(0, 0, w, h)
+    this.whiteSilhouetteCache.set(img, offscreen)
+    return offscreen
+  }
+
   /**
    * Renders the floating character/mascot alongside the tower's top height.
    * Uses the active Player Skin from `assets/sprites/player` (e.g. `player_mage.png`)
    * with procedural floating bobbing, tower-facing horizontal orientation, victory dance flips,
+   * white flash & 3-second invulnerability blinking when dropping a piece, expressive Wizard Shock Reaction,
    * and Tricky Towers-style floating Power Bubbles above its head:
    * - Light Bubble ("balão claro"): Good Power (`selfPower`, Positive)
    * - Dark Red Bubble ("balão vermelho escuro"): Chaos Power (`attackPower`, Negative)
@@ -2246,27 +2271,69 @@ export class SpriteRegistry {
       extraTiltRad?: number
       selfPower?: PowerId | null
       attackPower?: PowerId | null
+      whiteFlashAlpha?: number
+      blinkAlpha?: number
+      fallReactionIntensity?: number
+      isSurvivalLifeLoss?: boolean
+      invulnerableRemainingMs?: number
     }
   ): void {
     const slot = this.getSlot('mascot_floating')
     const rawFlipX = options?.scaleXFlip ?? -1
     const extraTilt = options?.extraTiltRad ?? 0
+    const reaction = Math.max(0, Math.min(1, options?.fallReactionIntensity ?? 0))
+    const whiteFlash = Math.max(0, Math.min(1, options?.whiteFlashAlpha ?? 0))
+    const blinkAlpha = Math.max(0.15, Math.min(1, options?.blinkAlpha ?? 1))
+    const invulnMs = Math.max(0, options?.invulnerableRemainingMs ?? 0)
+
+    // Wizard startled jump + rapid horizontal panic tremor when a piece falls!
+    const jumpPhase = reaction > 0.65 ? (reaction - 0.65) / 0.35 : 0
+    const reactionJumpY = -Math.sin(jumpPhase * Math.PI) * 26
+    const reactionShakeX =
+      reaction > 0
+        ? Math.sin(animTimeMs * 0.058) * 7.5 * Math.pow(reaction, 0.75)
+        : 0
+    const reactionTilt =
+      reaction > 0
+        ? Math.sin(animTimeMs * 0.042) * 0.24 * Math.pow(reaction, 0.8) +
+          (rawFlipX < 0 ? 0.14 : -0.14) * jumpPhase
+        : 0
+
+    const effX = centerX + reactionShakeX
+    const effY = centerY + reactionJumpY
 
     const baseTiltRad = Math.sin(animTimeMs * 0.0025) * 0.04
-    const tiltRad = baseTiltRad + extraTilt
+    const tiltRad = baseTiltRad + extraTilt + reactionTilt
 
-    const breathScaleY = 1 + Math.sin(animTimeMs * 0.005) * 0.02
-    const breathScaleX = 1 - Math.sin(animTimeMs * 0.005) * 0.012
+    const squashStretchY = 1 + jumpPhase * 0.15
+    const squashStretchX = 1 - jumpPhase * 0.1
+    const breathScaleY =
+      (1 + Math.sin(animTimeMs * 0.005) * 0.02) * squashStretchY
+    const breathScaleX =
+      (1 - Math.sin(animTimeMs * 0.005) * 0.012) * squashStretchX
 
     const signedFlipX =
       Math.abs(rawFlipX) < 0.08
-        ? (rawFlipX >= 0 ? 0.08 : -0.08)
+        ? rawFlipX >= 0
+          ? 0.08
+          : -0.08
         : rawFlipX
 
+    // 0. Protective Invulnerability Shield Ring around the Wizard during the 3s stabilization window
+    if (invulnMs > 0) {
+      this.drawMascotInvulnerabilityShield(ctx, effX, effY, animTimeMs, invulnMs)
+    }
+
     ctx.save()
-    ctx.translate(centerX, centerY)
+    ctx.translate(effX, effY)
     ctx.rotate(tiltRad)
     ctx.scale(breathScaleX * signedFlipX, breathScaleY)
+    ctx.globalAlpha *= blinkAlpha
+
+    if (whiteFlash > 0.02) {
+      ctx.shadowColor = '#FFFFFF'
+      ctx.shadowBlur = 22 * whiteFlash
+    }
 
     if (!this.forcePlaceholders && slot.loaded && slot.image) {
       // 192x192 HD sprite at 0.5x world scale = 96x96px (3x3 units, matching the 64px->32px block scale!)
@@ -2278,9 +2345,19 @@ export class SpriteRegistry {
       const drawH = targetHeight
       const drawW = Math.min(128, Math.max(48, targetHeight * aspect))
       ctx.drawImage(slot.image, -drawW / 2, -drawH * 0.62, drawW, drawH)
+
+      if (whiteFlash > 0.01) {
+        const whiteSil = this.getWhiteSilhouetteCanvas(slot.image)
+        if (whiteSil) {
+          ctx.save()
+          ctx.globalAlpha = whiteFlash
+          ctx.drawImage(whiteSil, -drawW / 2, -drawH * 0.62, drawW, drawH)
+          ctx.restore()
+        }
+      }
     } else {
       // Fallback placeholder
-      ctx.fillStyle = slot.placeholder.fill
+      ctx.fillStyle = whiteFlash > 0.4 ? '#FFFFFF' : slot.placeholder.fill
       ctx.strokeStyle = slot.placeholder.border
       ctx.lineWidth = 2
       ctx.beginPath()
@@ -2288,7 +2365,7 @@ export class SpriteRegistry {
       ctx.fill()
       ctx.stroke()
 
-      ctx.fillStyle = '#EF4444'
+      ctx.fillStyle = whiteFlash > 0.4 ? '#FFFFFF' : '#EF4444'
       ctx.beginPath()
       ctx.arc(3, -26, 3.5, 0, Math.PI * 2)
       ctx.fill()
@@ -2303,12 +2380,24 @@ export class SpriteRegistry {
 
     ctx.restore()
 
+    // Expressive Wizard Shock/Panic Reaction when a piece falls!
+    if (reaction > 0.02) {
+      this.drawMascotFallReactionOverlay(
+        ctx,
+        effX,
+        effY,
+        animTimeMs,
+        reaction,
+        Boolean(options?.isSurvivalLifeLoss)
+      )
+    }
+
     // Draw floating Power Bubbles above the character's head (unflipped so icons are always upright!)
     if (options?.selfPower || options?.attackPower) {
       this.drawMascotPowerBubbles(
         ctx,
-        centerX,
-        centerY,
+        effX,
+        effY - (reaction > 0.05 ? 18 : 0),
         animTimeMs,
         options.selfPower || null,
         options.attackPower || null
@@ -2318,7 +2407,7 @@ export class SpriteRegistry {
 
   /**
    * Draws a specific player skin character on its floating block cloud by `skinId`
-   * (used for the 2 randomly chosen side characters on `TITLE_SCREEN` and `MAIN_MENU`).
+   * (used for the 2 randomly chosen side characters on `TITLE_SCREEN` and `MAIN_MENU`, and remote multiplayer lanes).
    */
   public drawMenuMascotBySkinId(
     ctx: CanvasRenderingContext2D,
@@ -2329,6 +2418,11 @@ export class SpriteRegistry {
     options?: {
       scaleXFlip?: 1 | -1
       targetHeight?: number
+      whiteFlashAlpha?: number
+      blinkAlpha?: number
+      fallReactionIntensity?: number
+      isSurvivalLifeLoss?: boolean
+      invulnerableRemainingMs?: number
     }
   ): void {
     const img =
@@ -2337,24 +2431,64 @@ export class SpriteRegistry {
       null
     const flipX = options?.scaleXFlip ?? 1
     const targetHeight = options?.targetHeight ?? 132
+    const reaction = Math.max(0, Math.min(1, options?.fallReactionIntensity ?? 0))
+    const whiteFlash = Math.max(0, Math.min(1, options?.whiteFlashAlpha ?? 0))
+    const blinkAlpha = Math.max(0.15, Math.min(1, options?.blinkAlpha ?? 1))
+    const invulnMs = Math.max(0, options?.invulnerableRemainingMs ?? 0)
 
-    const tiltRad = Math.sin(animTimeMs * 0.0022) * 0.035
-    const breathScaleY = 1 + Math.sin(animTimeMs * 0.0045) * 0.018
-    const breathScaleX = 1 - Math.sin(animTimeMs * 0.0045) * 0.012
+    const jumpPhase = reaction > 0.65 ? (reaction - 0.65) / 0.35 : 0
+    const reactionJumpY = -Math.sin(jumpPhase * Math.PI) * 24
+    const reactionShakeX =
+      reaction > 0
+        ? Math.sin(animTimeMs * 0.058) * 7.0 * Math.pow(reaction, 0.75)
+        : 0
+    const reactionTilt =
+      reaction > 0
+        ? Math.sin(animTimeMs * 0.042) * 0.22 * Math.pow(reaction, 0.8)
+        : 0
+
+    const effX = centerX + reactionShakeX
+    const effY = centerY + reactionJumpY
+
+    if (invulnMs > 0) {
+      this.drawMascotInvulnerabilityShield(ctx, effX, effY, animTimeMs, invulnMs)
+    }
+
+    const tiltRad = Math.sin(animTimeMs * 0.0022) * 0.035 + reactionTilt
+    const breathScaleY =
+      (1 + Math.sin(animTimeMs * 0.0045) * 0.018) * (1 + jumpPhase * 0.14)
+    const breathScaleX =
+      (1 - Math.sin(animTimeMs * 0.0045) * 0.012) * (1 - jumpPhase * 0.09)
 
     ctx.save()
-    ctx.translate(centerX, centerY)
+    ctx.translate(effX, effY)
     ctx.rotate(tiltRad)
     ctx.scale(breathScaleX * flipX, breathScaleY)
+    ctx.globalAlpha *= blinkAlpha
+
+    if (whiteFlash > 0.02) {
+      ctx.shadowColor = '#FFFFFF'
+      ctx.shadowBlur = 20 * whiteFlash
+    }
 
     if (!this.forcePlaceholders && img && img.naturalHeight > 0) {
       const aspect = img.naturalWidth / img.naturalHeight
       const drawH = targetHeight
       const drawW = Math.min(180, Math.max(64, targetHeight * aspect))
       ctx.drawImage(img, -drawW / 2, -drawH * 0.55, drawW, drawH)
+
+      if (whiteFlash > 0.01) {
+        const whiteSil = this.getWhiteSilhouetteCanvas(img)
+        if (whiteSil) {
+          ctx.save()
+          ctx.globalAlpha = whiteFlash
+          ctx.drawImage(whiteSil, -drawW / 2, -drawH * 0.55, drawW, drawH)
+          ctx.restore()
+        }
+      }
     } else {
       const slot = this.getSlot('mascot_floating')
-      ctx.fillStyle = slot.placeholder.fill
+      ctx.fillStyle = whiteFlash > 0.4 ? '#FFFFFF' : slot.placeholder.fill
       ctx.strokeStyle = slot.placeholder.border
       ctx.lineWidth = 2.5
       ctx.beginPath()
@@ -2369,6 +2503,186 @@ export class SpriteRegistry {
       ctx.stroke()
     }
 
+    ctx.restore()
+
+    if (reaction > 0.02) {
+      this.drawMascotFallReactionOverlay(
+        ctx,
+        effX,
+        effY,
+        animTimeMs,
+        reaction,
+        Boolean(options?.isSurvivalLifeLoss)
+      )
+    }
+  }
+
+  /**
+   * Renders the protective blinking Invulnerability Shield Aura around the Wizard
+   * during the 3-second (`3000ms`) stabilization window in Survival Mode.
+   */
+  private drawMascotInvulnerabilityShield(
+    ctx: CanvasRenderingContext2D,
+    cx: number,
+    cy: number,
+    animTimeMs: number,
+    invulnRemainingMs: number
+  ): void {
+    const pulse = 0.5 + 0.5 * Math.sin(animTimeMs * 0.028)
+    const radius = 52 + pulse * 5
+
+    ctx.save()
+    ctx.translate(cx, cy - 8)
+
+    // Soft white-cyan radial aura
+    const grad = ctx.createRadialGradient(0, 0, radius * 0.25, 0, 0, radius)
+    grad.addColorStop(0, `rgba(255, 255, 255, ${(0.28 + pulse * 0.22).toFixed(3)})`)
+    grad.addColorStop(0.65, `rgba(56, 189, 248, ${(0.24 + pulse * 0.18).toFixed(3)})`)
+    grad.addColorStop(1, 'rgba(56, 189, 248, 0)')
+    ctx.fillStyle = grad
+    ctx.beginPath()
+    ctx.arc(0, 0, radius, 0, Math.PI * 2)
+    ctx.fill()
+
+    // Rotating dashed protective barrier ring
+    ctx.save()
+    ctx.rotate(animTimeMs * 0.004)
+    ctx.strokeStyle = pulse > 0.5 ? '#FFFFFF' : '#38BDF8'
+    ctx.shadowColor = '#38BDF8'
+    ctx.shadowBlur = 12
+    ctx.lineWidth = 3
+    ctx.setLineDash([12, 8])
+    ctx.beginPath()
+    ctx.arc(0, 0, radius - 4, 0, Math.PI * 2)
+    ctx.stroke()
+    ctx.setLineDash([])
+    ctx.restore()
+
+    // Countdown arc showing remaining fraction of the 3.0s invulnerability window
+    const ratio = Math.max(
+      0,
+      Math.min(1, invulnRemainingMs / GAME_CONSTANTS.SURVIVAL_LIFE_LOSS_COOLDOWN_MS)
+    )
+    ctx.strokeStyle = '#FEF08A'
+    ctx.lineWidth = 3.5
+    ctx.lineCap = 'round'
+    ctx.beginPath()
+    ctx.arc(
+      0,
+      0,
+      radius + 2,
+      -Math.PI / 2,
+      -Math.PI / 2 + Math.PI * 2 * ratio
+    )
+    ctx.stroke()
+
+    ctx.restore()
+  }
+
+  /**
+   * Renders the Wizard's expressive comic shock/panic reaction above & around his head
+   * when the player drops a piece:
+   * - Radiating comic shock lines
+   * - Flying sweat droplets
+   * - Pulsing comic exclamation badge (`😱 ❗` / `💔 -1`)
+   */
+  private drawMascotFallReactionOverlay(
+    ctx: CanvasRenderingContext2D,
+    cx: number,
+    cy: number,
+    animTimeMs: number,
+    intensity: number,
+    isSurvivalLifeLoss: boolean
+  ): void {
+    const alpha = Math.min(1, intensity * 1.35)
+    if (alpha <= 0.03) return
+
+    ctx.save()
+    ctx.translate(cx, cy)
+    ctx.globalAlpha = alpha
+
+    // 1. Radiating comic shock spikes around the wizard's head
+    const spikePulse = Math.sin(animTimeMs * 0.045) * 4
+    const angles = [-2.55, -2.1, -1.57, -1.04, -0.58]
+    ctx.strokeStyle = '#FEF08A'
+    ctx.lineWidth = 3
+    ctx.lineCap = 'round'
+    for (let i = 0; i < angles.length; i++) {
+      const a = angles[i]
+      const r0 = 42 + (i % 2) * 4 + spikePulse * 0.5
+      const r1 = r0 + 13 + (i % 2) * 5 + spikePulse
+      ctx.beginPath()
+      ctx.moveTo(Math.cos(a) * r0, -18 + Math.sin(a) * r0)
+      ctx.lineTo(Math.cos(a) * r1, -18 + Math.sin(a) * r1)
+      ctx.stroke()
+    }
+
+    // 2. Animated flying sweat droplets ("gotinhas de suor") spraying off the wizard
+    const sweatCycle = (animTimeMs * 0.0045) % 1
+    const dropOffsets = [
+      { dir: -1, baseX: -32, baseY: -34, phase: 0 },
+      { dir: 1, baseX: 32, baseY: -36, phase: 0.35 },
+      { dir: -1, baseX: -38, baseY: -16, phase: 0.68 },
+    ]
+    for (const d of dropOffsets) {
+      const p = (sweatCycle + d.phase) % 1
+      const dx = d.baseX + d.dir * p * 18
+      const dy = d.baseY - Math.sin(p * Math.PI) * 10 + p * 16
+      const dropAlpha = Math.sin(p * Math.PI) * alpha
+      if (dropAlpha > 0.05) {
+        ctx.save()
+        ctx.globalAlpha = dropAlpha
+        ctx.translate(dx, dy)
+        ctx.rotate(d.dir * (0.35 + p * 0.4))
+        ctx.fillStyle = '#38BDF8'
+        ctx.strokeStyle = '#0F172A'
+        ctx.lineWidth = 1.6
+        ctx.beginPath()
+        ctx.moveTo(0, -6)
+        ctx.quadraticCurveTo(5, 1, 0, 6)
+        ctx.quadraticCurveTo(-5, 1, 0, -6)
+        ctx.closePath()
+        ctx.fill()
+        ctx.stroke()
+        ctx.restore()
+      }
+    }
+
+    // 3. Comic Shock Speech Bubble above the wizard's head
+    const popScale = 0.92 + Math.abs(Math.sin(animTimeMs * 0.022)) * 0.16
+    ctx.save()
+    ctx.translate(0, -76)
+    ctx.scale(popScale, popScale)
+
+    const bubbleW = isSurvivalLifeLoss ? 76 : 68
+    const bubbleH = 30
+    ctx.fillStyle = isSurvivalLifeLoss ? '#FEF2F2' : '#FEFCE8'
+    ctx.strokeStyle = isSurvivalLifeLoss ? '#DC2626' : '#CA8A04'
+    ctx.lineWidth = 3
+    ctx.shadowColor = 'rgba(15, 23, 42, 0.45)'
+    ctx.shadowBlur = 8
+    ctx.beginPath()
+    ctx.roundRect(-bubbleW / 2, -bubbleH / 2, bubbleW, bubbleH, 10)
+    ctx.fill()
+    ctx.stroke()
+
+    // Speech pointer triangle pointing down to wizard's hat
+    ctx.shadowBlur = 0
+    ctx.beginPath()
+    ctx.moveTo(-6, bubbleH / 2 - 1)
+    ctx.lineTo(6, bubbleH / 2 - 1)
+    ctx.lineTo(0, bubbleH / 2 + 8)
+    ctx.closePath()
+    ctx.fill()
+    ctx.stroke()
+
+    ctx.font = '900 14px "Fredoka", Inter, system-ui, sans-serif'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillStyle = isSurvivalLifeLoss ? '#B91C1C' : '#854D0E'
+    ctx.fillText(isSurvivalLifeLoss ? '😱 💔!' : '😱 ❗', 0, 1)
+
+    ctx.restore()
     ctx.restore()
   }
 
@@ -2909,6 +3223,49 @@ export class SpriteRegistry {
         ctx.strokeRect(-2, -9, 4, 3)
         ctx.fillRect(4, -9, 4, 3)
         ctx.strokeRect(4, -9, 4, 3)
+        break
+      }
+
+      case 'EXTRA_LIFE': {
+        // Glossy Red-Pink Extra Life Balloon with Heart Emblem & String
+        ctx.strokeStyle = '#1E1B4B'
+        ctx.lineWidth = 2.0
+        ctx.beginPath()
+        ctx.moveTo(0, 6)
+        ctx.quadraticCurveTo(3, 10, -1, 14)
+        ctx.stroke()
+
+        // Balloon body
+        ctx.fillStyle = '#F43F5E'
+        ctx.strokeStyle = '#1E1B4B'
+        ctx.lineWidth = 2.4
+        ctx.beginPath()
+        ctx.ellipse(0, -3, 9.5, 11, 0, 0, Math.PI * 2)
+        ctx.fill()
+        ctx.stroke()
+
+        // Balloon knot at bottom
+        ctx.fillStyle = '#E11D48'
+        ctx.beginPath()
+        ctx.moveTo(-2.5, 8)
+        ctx.lineTo(2.5, 8)
+        ctx.lineTo(0, 5.5)
+        ctx.closePath()
+        ctx.fill()
+        ctx.stroke()
+
+        // White specular shine
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.85)'
+        ctx.beginPath()
+        ctx.ellipse(-4, -6.5, 2.2, 4.0, -0.35, 0, Math.PI * 2)
+        ctx.fill()
+
+        // Mini gold '+1' heart badge in center
+        ctx.fillStyle = '#FEF08A'
+        ctx.font = '900 8.5px Inter, system-ui, sans-serif'
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'middle'
+        ctx.fillText('+1♥', 1, -2)
         break
       }
 
