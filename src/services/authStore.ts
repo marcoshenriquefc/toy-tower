@@ -592,6 +592,75 @@ function setUser(user: UserAccount | null): void {
   }
 }
 
+const PERSONAL_BEST_STORAGE_KEY = 'toy_tower_personal_best'
+let personalBestSyncTimer: ReturnType<typeof setTimeout> | null = null
+
+function getPersonalBest(): number {
+  const userBest = Number(state.user?.stats?.survivalBestPieces ?? 0)
+  let localBest = 0
+  if (typeof window !== 'undefined') {
+    localBest = Number(
+      window.localStorage.getItem(PERSONAL_BEST_STORAGE_KEY) || 0
+    )
+  }
+  return Math.max(0, userBest, localBest)
+}
+
+function updatePersonalBest(score: number): number {
+  const safeScore = Math.max(0, Math.floor(Number(score) || 0))
+  const currentBest = getPersonalBest()
+  if (safeScore <= currentBest) {
+    return currentBest
+  }
+
+  try {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(PERSONAL_BEST_STORAGE_KEY, String(safeScore))
+    }
+  } catch {
+    // Ignore storage errors
+  }
+
+  if (state.user) {
+    if (!state.user.stats) {
+      state.user.stats = {
+        matchesPlayed: 0,
+        wins: 0,
+        survivalBestPieces: safeScore,
+      }
+    } else {
+      state.user.stats.survivalBestPieces = Math.max(
+        Number(state.user.stats.survivalBestPieces ?? 0),
+        safeScore
+      )
+    }
+
+    if (personalBestSyncTimer) {
+      clearTimeout(personalBestSyncTimer)
+    }
+    personalBestSyncTimer = setTimeout(async () => {
+      try {
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+        }
+        if (state.token) {
+          headers.Authorization = `Bearer ${state.token}`
+        }
+        await fetch('/api/auth/stats', {
+          method: 'PATCH',
+          credentials: 'include',
+          headers,
+          body: JSON.stringify({ survivalBestPieces: safeScore }),
+        })
+      } catch {
+        // Ignore network sync error
+      }
+    }, 650)
+  }
+
+  return safeScore
+}
+
 async function logout(): Promise<void> {
   try {
     await fetch('/api/auth/logout', {
@@ -615,6 +684,9 @@ export const authStore = {
   sendFriendRequest,
   respondFriendRequest,
   setUser,
+  getPersonalBest,
+  updatePersonalBest,
   logout,
 }
+
 

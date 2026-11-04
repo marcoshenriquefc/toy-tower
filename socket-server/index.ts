@@ -326,11 +326,26 @@ export function isOriginAllowed(origin?: string): boolean {
 // 5. ROOMS, SOCIAL & 20HZ MATCH SYNC STATE
 // ============================================================================
 
-export type RoomGameMode = 'RACE' | 'SURVIVAL'
-export type RoomSelectableGameMode = 'RACE' | 'SURVIVAL' | 'RANDOM'
+export type RoomGameMode = 'RACE' | 'PUZZLE' | 'SURVIVAL' | 'ENDLESS'
+export type RoomSelectableGameMode =
+  | 'RACE'
+  | 'PUZZLE'
+  | 'SURVIVAL'
+  | 'ENDLESS'
+  | 'RANDOM'
 export type RoomVictoryCondition = 'SINGLE_WIN' | 'CUP_6' | 'CUP_12'
 
 const CUP_RANK_POINTS: readonly [number, number, number, number] = [3, 2, 1, 0]
+
+function resolveRoomActiveGameMode(
+  selected: RoomSelectableGameMode
+): RoomGameMode {
+  if (selected === 'RANDOM') {
+    const pool: RoomGameMode[] = ['RACE', 'PUZZLE', 'SURVIVAL', 'ENDLESS']
+    return pool[Math.floor(Math.random() * pool.length)]
+  }
+  return selected
+}
 
 function getCupTargetPoints(condition: RoomVictoryCondition): number {
   if (condition === 'SINGLE_WIN') return 3
@@ -378,6 +393,8 @@ interface InternalRoom {
   victoryCondition: RoomVictoryCondition
   cupTargetPoints: number
   roundNumber: number
+  isTiebreakerRound?: boolean
+  isCupFinished?: boolean
   eliminationCounter: number
   survivalClimaxWinnerHandle: string | null
   survivalClimaxTimer: ReturnType<typeof setTimeout> | null
@@ -552,17 +569,14 @@ function checkAndStartRoomCountdown(
     room.countdownSeconds = null
     room.status = 'PLAYING'
     room.roundNumber = 1
+    room.isTiebreakerRound = false
+    room.isCupFinished = false
     room.eliminationCounter = 0
     room.survivalClimaxWinnerHandle = null
     clearSurvivalClimaxTimer(room)
     room.cupTargetPoints = getCupTargetPoints(room.victoryCondition)
     room.pieceSeed = generatePieceSeed()
-    room.activeGameMode =
-      room.selectedGameMode === 'RANDOM'
-        ? Math.random() < 0.5
-          ? 'RACE'
-          : 'SURVIVAL'
-        : room.selectedGameMode
+    room.activeGameMode = resolveRoomActiveGameMode(room.selectedGameMode)
 
     room.matchStateByHandle.clear()
     for (const p of currentOccupied) {
@@ -585,6 +599,7 @@ function checkAndStartRoomCountdown(
       victoryCondition: room.victoryCondition,
       cupTargetPoints: room.cupTargetPoints,
       roundNumber: room.roundNumber,
+      isTiebreakerRound: false,
       startedAt: new Date().toISOString(),
       players: currentOccupied.map((p) => ({
         handle: p.handle,
@@ -645,7 +660,10 @@ async function concludeMultiplayerRound(
     if (b.handle === winnerPlayer.handle) return 1
     const stA = room.matchStateByHandle.get(a.handle)
     const stB = room.matchStateByHandle.get(b.handle)
-    if (room.activeGameMode === 'SURVIVAL') {
+    if (
+      room.activeGameMode === 'SURVIVAL' ||
+      room.activeGameMode === 'ENDLESS'
+    ) {
       const aAlive = (stA?.lives ?? 3) > 0 && !stA?.isEliminated ? 1 : 0
       const bAlive = (stB?.lives ?? 3) > 0 && !stB?.isEliminated ? 1 : 0
       if (bAlive !== aAlive) return bAlive - aAlive
@@ -668,18 +686,20 @@ async function concludeMultiplayerRound(
   const isSoloEliminated =
     soloEliminated ||
     (presentPlayers.length === 1 &&
-      room.activeGameMode === 'SURVIVAL' &&
+      (room.activeGameMode === 'SURVIVAL' ||
+        room.activeGameMode === 'ENDLESS') &&
       ((winnerState?.lives ?? 3) <= 0 || Boolean(winnerState?.isEliminated)))
+
+  const wasTiebreakerRound = Boolean(room.isTiebreakerRound)
 
   const podium = sorted.map((p, idx) => {
     const st = room.matchStateByHandle.get(p.handle)
     const rank = isSoloEliminated ? 4 : idx + 1
     const pointsEarned = isSoloEliminated ? 0 : (CUP_RANK_POINTS[idx] ?? 0)
     const previousCupPoints = p.cupPoints ?? 0
-    const nextCupPoints = Math.min(
-      cupTargetPoints,
-      previousCupPoints + pointsEarned
-    )
+    const nextCupPoints = wasTiebreakerRound
+      ? previousCupPoints + pointsEarned
+      : Math.min(cupTargetPoints, previousCupPoints + pointsEarned)
     p.lastPointsEarned = pointsEarned
     p.cupPoints = nextCupPoints
 
@@ -700,17 +720,42 @@ async function concludeMultiplayerRound(
       cupTargetPoints,
       isEliminated: st?.isEliminated ?? false,
       isWinner: !isSoloEliminated && p.handle === winnerPlayer.handle,
-      isCupWinner: !isSoloEliminated && nextCupPoints >= cupTargetPoints,
+      isCupWinner: false,
     }
   })
 
   const isSingleWin = room.victoryCondition === 'SINGLE_WIN'
-  const cupChampions = podium.filter((p) => (p.cupPoints ?? 0) >= cupTargetPoints)
+  const cupChampions = podium.filter(
+    (p) => (p.cupPoints ?? 0) >= cupTargetPoints
+  )
+  const allEliminatedInMultiplayerSurvival =
+    presentPlayers.length > 1 &&
+    (room.activeGameMode === 'SURVIVAL' ||
+      room.activeGameMode === 'ENDLESS') &&
+    podium.every((p) => p.isEliminated || p.lives <= 0)
+
+  const isTiebreaker =
+    !wasTiebreakerRound &&
+    !isSoloEliminated &&
+    ((!isSingleWin && cupChampions.length >= 2) ||
+      (isSingleWin && allEliminatedInMultiplayerSurvival))
+
   const isCupFinished =
-    !isSoloEliminated && (isSingleWin || cupChampions.length > 0)
+    !isTiebreaker &&
+    (wasTiebreakerRound ||
+      isSingleWin ||
+      (!isSoloEliminated && cupChampions.length >= 1))
+
+  room.isTiebreakerRound = isTiebreaker
+  room.isCupFinished = isCupFinished
 
   let cupWinnerEntry = podium[0]
-  if (isCupFinished && !isSingleWin && cupChampions.length > 0) {
+  if (
+    isCupFinished &&
+    !wasTiebreakerRound &&
+    !isSingleWin &&
+    cupChampions.length > 0
+  ) {
     cupWinnerEntry = [...cupChampions].sort((a, b) => {
       if ((b.cupPoints ?? 0) !== (a.cupPoints ?? 0)) {
         return (b.cupPoints ?? 0) - (a.cupPoints ?? 0)
@@ -721,7 +766,9 @@ async function concludeMultiplayerRound(
 
   for (const entry of podium) {
     entry.isCupWinner =
-      isCupFinished && entry.handle === cupWinnerEntry?.handle
+      !isSoloEliminated &&
+      isCupFinished &&
+      entry.handle === cupWinnerEntry?.handle
   }
 
   broadcastRoomState(io, room)
@@ -733,6 +780,7 @@ async function concludeMultiplayerRound(
     cupTargetPoints,
     roundNumber: room.roundNumber,
     isCupFinished,
+    isTiebreaker,
     roundWinnerHandle: winnerPlayer.handle,
     roundWinnerNick: winnerPlayer.customNick,
     roundWinnerSkin: winnerPlayer.equippedSkin,
@@ -798,7 +846,10 @@ function checkSurvivalLastPlayerStanding(
     return
   }
 
-  if (room.activeGameMode !== 'SURVIVAL') {
+  if (
+    room.activeGameMode !== 'SURVIVAL' &&
+    room.activeGameMode !== 'ENDLESS'
+  ) {
     return
   }
 
@@ -1327,7 +1378,9 @@ io.on('connection', async (socket) => {
           : undefined
 
       const initialMode: RoomSelectableGameMode =
+        reqOpts?.selectedGameMode === 'PUZZLE' ||
         reqOpts?.selectedGameMode === 'SURVIVAL' ||
+        reqOpts?.selectedGameMode === 'ENDLESS' ||
         reqOpts?.selectedGameMode === 'RANDOM'
           ? reqOpts.selectedGameMode
           : 'RACE'
@@ -1402,7 +1455,14 @@ io.on('connection', async (socket) => {
         countdownTimer: null,
         pieceSeed: null,
         selectedGameMode: initialMode,
-        activeGameMode: initialMode === 'SURVIVAL' ? 'SURVIVAL' : 'RACE',
+        activeGameMode:
+          initialMode === 'SURVIVAL'
+            ? 'SURVIVAL'
+            : initialMode === 'PUZZLE'
+              ? 'PUZZLE'
+              : initialMode === 'ENDLESS'
+                ? 'ENDLESS'
+                : 'RACE',
         victoryCondition: initialVictory,
         cupTargetPoints: getCupTargetPoints(initialVictory),
         roundNumber: 1,
@@ -1452,7 +1512,12 @@ io.on('connection', async (socket) => {
       }
       const requested = payload?.gameMode
       const nextMode: RoomSelectableGameMode =
-        requested === 'SURVIVAL' || requested === 'RANDOM' ? requested : 'RACE'
+        requested === 'PUZZLE' ||
+        requested === 'SURVIVAL' ||
+        requested === 'ENDLESS' ||
+        requested === 'RANDOM'
+          ? requested
+          : 'RACE'
       room.selectedGameMode = nextMode
       if (nextMode !== 'RANDOM') {
         room.activeGameMode = nextMode
@@ -1643,7 +1708,9 @@ io.on('connection', async (socket) => {
       if (payload && typeof payload === 'object' && isHostOrSolo) {
         if (
           payload.selectedGameMode === 'RACE' ||
+          payload.selectedGameMode === 'PUZZLE' ||
           payload.selectedGameMode === 'SURVIVAL' ||
+          payload.selectedGameMode === 'ENDLESS' ||
           payload.selectedGameMode === 'RANDOM'
         ) {
           room.selectedGameMode = payload.selectedGameMode
@@ -1858,12 +1925,9 @@ io.on('connection', async (socket) => {
       (s): s is RoomSlotPlayerDTO => s !== null
     )
     if (room.status !== 'FINISHED' && presentPlayers.length > 1) return
+    if (room.isCupFinished) return
 
     const cupTargetPoints = getCupTargetPoints(room.victoryCondition)
-    const hasCupWinner = presentPlayers.some(
-      (s) => (s.cupPoints ?? 0) >= cupTargetPoints
-    )
-    if (hasCupWinner) return
 
     clearSurvivalClimaxTimer(room)
     room.survivalClimaxWinnerHandle = null
@@ -1872,12 +1936,7 @@ io.on('connection', async (socket) => {
     room.roundNumber += 1
     room.cupTargetPoints = cupTargetPoints
     room.pieceSeed = generatePieceSeed()
-    room.activeGameMode =
-      room.selectedGameMode === 'RANDOM'
-        ? Math.random() < 0.5
-          ? 'RACE'
-          : 'SURVIVAL'
-        : room.selectedGameMode
+    room.activeGameMode = resolveRoomActiveGameMode(room.selectedGameMode)
 
     room.matchStateByHandle.clear()
     for (const p of presentPlayers) {
@@ -1899,6 +1958,7 @@ io.on('connection', async (socket) => {
       victoryCondition: room.victoryCondition,
       cupTargetPoints: room.cupTargetPoints,
       roundNumber: room.roundNumber,
+      isTiebreakerRound: Boolean(room.isTiebreakerRound),
       startedAt: new Date().toISOString(),
       players: presentPlayers.map((p) => ({
         handle: p.handle,
@@ -1924,6 +1984,8 @@ io.on('connection', async (socket) => {
     room.countdownSeconds = null
     room.pieceSeed = null
     room.roundNumber = 1
+    room.isTiebreakerRound = false
+    room.isCupFinished = false
     for (const s of room.slots) {
       if (s) {
         s.isReady = false

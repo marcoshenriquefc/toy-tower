@@ -847,6 +847,38 @@ export async function recordMatchStats(
   }
 }
 
+/**
+ * Atualiza o recorde pessoal (`stats.survivalBestPieces`) do jogador no MongoDB / local DB
+ * quando o SCORE do Modo Infinito / Abismo ultrapassa o PERSONAL BEST anterior.
+ */
+export async function updateUserPersonalBest(
+  googleId: string,
+  bestScore: number
+): Promise<IUser | null> {
+  const safeScore = Math.max(0, Math.floor(Number(bestScore) || 0))
+  const dbMode = await connectMongoDB()
+  if (dbMode === 'mongodb') {
+    const doc = await UserModel.findOneAndUpdate(
+      { googleId },
+      { $max: { 'stats.survivalBestPieces': safeScore } },
+      { new: true }
+    )
+    return doc ? sanitizeUser(doc.toObject()) : null
+  }
+
+  const users = readLocalUsers()
+  const idx = users.findIndex((u) => u.googleId === googleId)
+  if (idx === -1) return null
+  const currentBest = Number(users[idx].stats?.survivalBestPieces ?? 0)
+  users[idx].stats = {
+    matchesPlayed: Number(users[idx].stats?.matchesPlayed ?? 0),
+    wins: Number(users[idx].stats?.wins ?? 0),
+    survivalBestPieces: Math.max(currentBest, safeScore),
+  }
+  writeLocalUsers(users)
+  return sanitizeUser(users[idx])
+}
+
 const LEGACY_MOCK_FRIEND_EMAILS = new Set([
   'capitao.brink@gmail.com',
   'robotico.toy@gmail.com',
@@ -1481,6 +1513,28 @@ export async function handleAuthApiRequest(
         user: result.recipientUser,
         accepted: result.accepted,
       })
+      return true
+    }
+
+    // 8. PATCH /api/auth/stats — Persist PERSONAL BEST (stats.survivalBestPieces) in MongoDB
+    if (req.method === 'PATCH' && url === '/api/auth/stats') {
+      const token = extractRequestToken(req)
+      const verified = token ? verifySessionJwt(token) : null
+      if (!verified) {
+        sendJson(res, 401, { ok: false, error: 'Não autenticado.' })
+        return true
+      }
+
+      const body = await readJsonBody(req)
+      const survivalBestPieces = Math.max(
+        0,
+        Math.floor(Number(body.survivalBestPieces ?? body.personalBest ?? 0))
+      )
+      const updated = await updateUserPersonalBest(
+        verified.googleId,
+        survivalBestPieces
+      )
+      sendJson(res, 200, { ok: Boolean(updated), user: updated })
       return true
     }
 

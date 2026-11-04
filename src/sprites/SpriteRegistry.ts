@@ -116,6 +116,11 @@ const menuSpriteAssets = import.meta.glob<string>(
   { eager: true, import: 'default' }
 )
 
+const survivorMapAssets = import.meta.glob<string>(
+  '../../assets/sprites/other/map/survivor/*.{png,jpg,jpeg}',
+  { eager: true, import: 'default' }
+)
+
 function hexToRgb(hex: string): { r: number; g: number; b: number } {
   const clean = hex.replace('#', '').trim()
   const num = parseInt(clean, 16)
@@ -234,6 +239,19 @@ export class SpriteRegistry {
   private playerSkinImages: Map<string, HTMLImageElement> = new Map()
   private activePlayerSkinId: string = 'player_mage'
   private listeners: Array<() => void> = []
+  private survivorSprites: {
+    background: HTMLImageElement | null
+    estalagmite: HTMLImageElement | null
+    nuvem: HTMLImageElement | null
+    smoke: HTMLImageElement | null
+    raios: Array<HTMLImageElement | null>
+  } = {
+    background: null,
+    estalagmite: null,
+    nuvem: null,
+    smoke: null,
+    raios: [null, null, null, null],
+  }
 
   constructor() {
     this.initDefaultSlots()
@@ -719,6 +737,57 @@ export class SpriteRegistry {
         this.registerSprite('bg_left', url)
       } else if (fileName.startsWith('bg_right')) {
         this.registerSprite('bg_right', url)
+      }
+    }
+
+    // 4b. Discover Survivor Mode Map Sprites in assets/sprites/other/map/survivor
+    const loadSurvivorImg = (
+      url: string,
+      onReady: (img: HTMLImageElement) => void
+    ) => {
+      const img = new Image()
+      img.crossOrigin = 'anonymous'
+      img.onload = () => {
+        onReady(img)
+        this.notifyListeners()
+      }
+      img.src = url
+    }
+
+    for (const [path, url] of Object.entries(survivorMapAssets)) {
+      const fileName = (path.split('/').pop() || '').toLowerCase()
+      if (fileName === 'background.jpg' || fileName === 'background.png') {
+        loadSurvivorImg(url, (img) => {
+          this.survivorSprites.background = img
+        })
+      } else if (fileName === 'estalagmite.png') {
+        loadSurvivorImg(url, (img) => {
+          this.survivorSprites.estalagmite = img
+        })
+      } else if (fileName === 'nuvem.png') {
+        loadSurvivorImg(url, (img) => {
+          this.survivorSprites.nuvem = img
+        })
+      } else if (fileName === 'smoke.png') {
+        loadSurvivorImg(url, (img) => {
+          this.survivorSprites.smoke = img
+        })
+      } else if (fileName === 'raio 1.png' || fileName === 'raio1.png') {
+        loadSurvivorImg(url, (img) => {
+          this.survivorSprites.raios[0] = img
+        })
+      } else if (fileName === 'raio 2.png' || fileName === 'raio2.png') {
+        loadSurvivorImg(url, (img) => {
+          this.survivorSprites.raios[1] = img
+        })
+      } else if (fileName === 'raio 3.png' || fileName === 'raio3.png') {
+        loadSurvivorImg(url, (img) => {
+          this.survivorSprites.raios[2] = img
+        })
+      } else if (fileName === 'raio 4.png' || fileName === 'raio4.png') {
+        loadSurvivorImg(url, (img) => {
+          this.survivorSprites.raios[3] = img
+        })
       }
     }
 
@@ -1294,6 +1363,16 @@ export class SpriteRegistry {
    * - Layer 4 (Mid & Near Dynamic Clouds — `layer === 1` & `layer === 2`): Layered dynamic clouds at different distances and heights
    *   moving slowly in the direction of the wind.
    */
+  private lerpHexColor(hexA: string, hexB: string, t: number): string {
+    const clamped = Math.max(0, Math.min(1, t))
+    const a = hexToRgb(hexA)
+    const b = hexToRgb(hexB)
+    const r = Math.round(a.r + (b.r - a.r) * clamped)
+    const g = Math.round(a.g + (b.g - a.g) * clamped)
+    const bl = Math.round(a.b + (b.b - a.b) * clamped)
+    return `rgb(${r}, ${g}, ${bl})`
+  }
+
   public drawTrickyTowersSceneryBackground(
     ctx: CanvasRenderingContext2D,
     canvasWidth: number,
@@ -1302,7 +1381,9 @@ export class SpriteRegistry {
     cameraOriginY: number,
     elapsedTimeMs: number,
     windForce: number,
-    parallaxFocusX: number = 0
+    parallaxFocusX: number = 0,
+    endlessScore?: number,
+    isSurvivalMode: boolean = false
   ): void {
     const u = GAME_CONSTANTS.UNIT_PX
     const baseCameraOriginY = canvasHeight - 112
@@ -1322,6 +1403,19 @@ export class SpriteRegistry {
       (targetWindVel - this.currentCloudWindVel) * Math.min(1, dtSec * 2.5)
     this.cloudWindDriftPx += this.currentCloudWindVel * dtSec
 
+    if (isSurvivalMode) {
+      this.drawSurvivorSceneryBackground(
+        ctx,
+        canvasWidth,
+        canvasHeight,
+        cameraOriginY,
+        cameraElevationPx,
+        cameraShiftX,
+        elapsedTimeMs
+      )
+      return
+    }
+
     const bgMainSlot = this.getSlot('bg_main')
     const bgLeftSlot = this.getSlot('bg_left')
     const bgRightSlot = this.getSlot('bg_right')
@@ -1332,14 +1426,114 @@ export class SpriteRegistry {
       ((bgLeftSlot.loaded && !!bgLeftSlot.image) ||
         (bgRightSlot.loaded && !!bgRightSlot.image))
 
+    // Resolve atmosphere colors from endlessScore:
+    // 0-50: Morning Blue -> 50-150: Sunset Orange/Pink -> 150-300: Starry Night -> 300+: Outer Space
+    let topSky = '#1B66C9'
+    let midSky = '#3E8CE4'
+    let lowSky = '#76B5F5'
+    let botSky = '#AED6FC'
+    let starAlpha = 0
+    let spaceNebulaAlpha = 0
+    let atmosphereOverlayColor: string | null = null
+
+    if (typeof endlessScore === 'number') {
+      const s = Math.max(0, endlessScore)
+      const morning = ['#1B66C9', '#3E8CE4', '#76B5F5', '#AED6FC']
+      const sunset = ['#D9483B', '#EE744D', '#F8A164', '#FCD392']
+      const night = ['#0B1026', '#172554', '#1E3A8A', '#312E81']
+      const space = ['#03030A', '#090518', '#1E0B36', '#3B0764']
+
+      if (s < 35) {
+        ;[topSky, midSky, lowSky, botSky] = morning
+      } else if (s < 65) {
+        const t = (s - 35) / 30
+        topSky = this.lerpHexColor(morning[0], sunset[0], t)
+        midSky = this.lerpHexColor(morning[1], sunset[1], t)
+        lowSky = this.lerpHexColor(morning[2], sunset[2], t)
+        botSky = this.lerpHexColor(morning[3], sunset[3], t)
+        atmosphereOverlayColor = `rgba(244, 114, 72, ${(0.32 * t).toFixed(3)})`
+      } else if (s < 135) {
+        ;[topSky, midSky, lowSky, botSky] = sunset
+        atmosphereOverlayColor = 'rgba(244, 114, 72, 0.34)'
+      } else if (s < 165) {
+        const t = (s - 135) / 30
+        topSky = this.lerpHexColor(sunset[0], night[0], t)
+        midSky = this.lerpHexColor(sunset[1], night[1], t)
+        lowSky = this.lerpHexColor(sunset[2], night[2], t)
+        botSky = this.lerpHexColor(sunset[3], night[3], t)
+        starAlpha = t * 0.85
+        atmosphereOverlayColor = `rgba(15, 23, 42, ${(0.34 + 0.28 * t).toFixed(3)})`
+      } else if (s < 280) {
+        ;[topSky, midSky, lowSky, botSky] = night
+        starAlpha = 0.85
+        atmosphereOverlayColor = 'rgba(15, 23, 42, 0.62)'
+      } else if (s < 320) {
+        const t = (s - 280) / 40
+        topSky = this.lerpHexColor(night[0], space[0], t)
+        midSky = this.lerpHexColor(night[1], space[1], t)
+        lowSky = this.lerpHexColor(night[2], space[2], t)
+        botSky = this.lerpHexColor(night[3], space[3], t)
+        starAlpha = 0.85 + 0.15 * t
+        spaceNebulaAlpha = t
+        atmosphereOverlayColor = `rgba(9, 5, 24, ${(0.62 + 0.2 * t).toFixed(3)})`
+      } else {
+        ;[topSky, midSky, lowSky, botSky] = space
+        starAlpha = 1
+        spaceNebulaAlpha = 1
+        atmosphereOverlayColor = 'rgba(9, 5, 24, 0.82)'
+      }
+    }
+
     // 1. Base Sky Gradient (seamless upper-atmosphere extension & fallback)
     const skyGrad = ctx.createLinearGradient(0, 0, 0, canvasHeight)
-    skyGrad.addColorStop(0, '#1B66C9')
-    skyGrad.addColorStop(0.5, '#3E8CE4')
-    skyGrad.addColorStop(0.85, '#76B5F5')
-    skyGrad.addColorStop(1, '#AED6FC')
+    skyGrad.addColorStop(0, topSky)
+    skyGrad.addColorStop(0.5, midSky)
+    skyGrad.addColorStop(0.85, lowSky)
+    skyGrad.addColorStop(1, botSky)
     ctx.fillStyle = skyGrad
     ctx.fillRect(0, 0, canvasWidth, canvasHeight)
+
+    // Starry Night & Outer Space procedural stars + nebula
+    if (starAlpha > 0.01) {
+      ctx.save()
+      if (spaceNebulaAlpha > 0.01) {
+        const nebGrad = ctx.createRadialGradient(
+          canvasWidth * 0.62,
+          canvasHeight * 0.28,
+          20,
+          canvasWidth * 0.62,
+          canvasHeight * 0.28,
+          Math.max(canvasWidth, canvasHeight) * 0.55
+        )
+        nebGrad.addColorStop(
+          0,
+          `rgba(168, 85, 247, ${(0.28 * spaceNebulaAlpha).toFixed(3)})`
+        )
+        nebGrad.addColorStop(
+          0.5,
+          `rgba(236, 72, 153, ${(0.14 * spaceNebulaAlpha).toFixed(3)})`
+        )
+        nebGrad.addColorStop(1, 'rgba(0, 0, 0, 0)')
+        ctx.fillStyle = nebGrad
+        ctx.fillRect(0, 0, canvasWidth, canvasHeight)
+      }
+      for (let i = 0; i < 64; i++) {
+        const seedX = ((i * 137.5) % 100) / 100
+        const seedY = ((i * 293.7) % 100) / 100
+        const sx = seedX * canvasWidth
+        const sy =
+          ((seedY * canvasHeight + cameraElevationPx * 0.08) %
+            (canvasHeight * 0.85))
+        const twinkle =
+          0.45 + 0.55 * Math.sin(elapsedTimeMs * 0.003 + i * 1.9)
+        ctx.fillStyle = `rgba(255, 255, 255, ${(starAlpha * twinkle).toFixed(3)})`
+        const r = i % 5 === 0 ? 2.1 : 1.3
+        ctx.beginPath()
+        ctx.arc(sx, sy, r, 0, Math.PI * 2)
+        ctx.fill()
+      }
+      ctx.restore()
+    }
 
     let bg1DrawH = canvasHeight
 
@@ -1368,6 +1562,11 @@ export class SpriteRegistry {
       ctx.save()
       ctx.drawImage(img, drawX, drawY, drawW, drawH)
 
+      if (atmosphereOverlayColor) {
+        ctx.fillStyle = atmosphereOverlayColor
+        ctx.fillRect(drawX, drawY, drawW, drawH)
+      }
+
       // If climbing high pushes top of bg_1 into view, feather its top edge into the upper sky gradient
       if (drawY > -20) {
         const featherH = 90
@@ -1377,8 +1576,8 @@ export class SpriteRegistry {
           0,
           drawY + featherH
         )
-        topFeather.addColorStop(0, '#1B66C9')
-        topFeather.addColorStop(1, 'rgba(27, 102, 201, 0)')
+        topFeather.addColorStop(0, topSky)
+        topFeather.addColorStop(1, 'rgba(0, 0, 0, 0)')
         ctx.fillStyle = topFeather
         ctx.fillRect(0, 0, canvasWidth, drawY + featherH)
       }
@@ -1557,15 +1756,23 @@ export class SpriteRegistry {
   }
 
   /**
-   * Renders the foreground Ocean water at the bottom of the world (the Abyss zone).
+   * Renders the foreground Ocean water (or Survivor Stalagmites + Smoke) at the bottom of the world (the Abyss zone).
    */
   public drawTrickyTowersOceanForeground(
     ctx: CanvasRenderingContext2D,
     canvasWidth: number,
     canvasHeight: number,
     cameraOriginY: number,
-    elapsedTimeMs: number
+    elapsedTimeMs: number,
+    isSurvivalMode: boolean = false,
+    _cameraShiftX: number = 0
   ): void {
+    // In Survival Mode, all ground layers (stalagmites + smoke) are rendered in the background scenery pass
+    // so that the Base Island (`base.png`) and Tower always remain in front of everything!
+    if (isSurvivalMode) {
+      return
+    }
+
     const u = GAME_CONSTANTS.UNIT_PX
     const seaLevelScreenY = cameraOriginY + 2.8 * u
     if (seaLevelScreenY > canvasHeight + 40) return
@@ -1607,6 +1814,712 @@ export class SpriteRegistry {
       ctx.fillRect(wx, wy, 140, 3)
       ctx.fillRect((wx + canvasWidth * 0.5) % canvasWidth, wy + 6, 95, 2)
     }
+    ctx.restore()
+  }
+
+  /**
+   * Computes a realistic double-strike lightning flash intensity in `[0, 1]` for periodic lightning effects.
+   */
+  private computeLightningFlashEnvelope(phase01: number, activeDuty: number): number {
+    if (phase01 < 0 || phase01 >= activeDuty) return 0
+    const t = phase01 / activeDuty // 0..1 within active strike window
+    if (t < 0.14) {
+      return t / 0.14
+    }
+    if (t < 0.32) {
+      return 1.0 - ((t - 0.14) / 0.18) * 0.62
+    }
+    if (t < 0.48) {
+      return 0.38 + ((t - 0.32) / 0.16) * 0.62
+    }
+    const decay = 1 - (t - 0.48) / 0.52
+    return Math.max(0, decay * decay)
+  }
+
+  /**
+   * Renders the Survival Mode (`SURVIVAL`) Parallax Storm Scenery (all behind the Base Island and Tower):
+   * - Layer 1: `background.jpg` with slow far parallax (`0.20x` vertical, `0.12x` horizontal).
+   * - Layer 2: Distant temporary sheet-lightning flashes ("brilhos temporários lá no fundo para simular raios de fundo").
+   * - Layer 3: Rising glowing volcanic sparks & embers ("fagulhas") across the stormy sky.
+   * - Layer 4: Two horizontally-tiled layers of `estalagmite.png` (with varied heights & horizontal flips) + `smoke.png` between them.
+   * - Layer 5 (Top of screen): Compact `nuvem.png` + periodic lightning bolts (`raio 1..4.png`) following the top of the screen.
+   */
+  private drawSurvivorSceneryBackground(
+    ctx: CanvasRenderingContext2D,
+    canvasWidth: number,
+    canvasHeight: number,
+    cameraOriginY: number,
+    cameraElevationPx: number,
+    cameraShiftX: number,
+    elapsedTimeMs: number
+  ): void {
+    // 1. Deep Stormy Purple Sky Gradient (seamless upper extension)
+    const skyGrad = ctx.createLinearGradient(0, 0, 0, canvasHeight)
+    skyGrad.addColorStop(0, '#140624')
+    skyGrad.addColorStop(0.45, '#251042')
+    skyGrad.addColorStop(0.78, '#372159')
+    skyGrad.addColorStop(1, '#1A1328')
+    ctx.fillStyle = skyGrad
+    ctx.fillRect(0, 0, canvasWidth, canvasHeight)
+
+    // 2. Main Survivor Background (`background.jpg` — 2752x1536) with Far Parallax
+    const bgImg = this.survivorSprites.background
+    if (bgImg) {
+      const imgW = bgImg.naturalWidth || 2752
+      const imgH = bgImg.naturalHeight || 1536
+      const scale = Math.max(
+        (canvasWidth * 1.06) / imgW,
+        (canvasHeight * 1.06) / imgH
+      )
+      const drawW = imgW * scale
+      const drawH = imgH * scale
+
+      const parallaxY = cameraElevationPx * 0.2
+      const parallaxX =
+        cameraShiftX * 0.12 + Math.sin(elapsedTimeMs * 0.00035) * 5
+
+      const drawX = (canvasWidth - drawW) / 2 + parallaxX
+      const drawY = canvasHeight - drawH + parallaxY
+
+      ctx.save()
+      ctx.drawImage(bgImg, drawX, drawY, drawW, drawH)
+
+      if (drawY > -20) {
+        const featherH = 110
+        const topFeather = ctx.createLinearGradient(
+          0,
+          Math.max(0, drawY - 10),
+          0,
+          drawY + featherH
+        )
+        topFeather.addColorStop(0, '#140624')
+        topFeather.addColorStop(1, 'rgba(20, 6, 36, 0)')
+        ctx.fillStyle = topFeather
+        ctx.fillRect(0, 0, canvasWidth, drawY + featherH)
+      }
+      ctx.restore()
+    }
+
+    // 3. Distant Background Sheet-Lightning Glows ("brilhos temporários lá no fundo para simular raios de fundo")
+    const distantCells = [
+      { xRatio: 0.18, yRatio: 0.36, periodMs: 3100, offsetMs: 200, colorInner: '232, 121, 249', colorOuter: '147, 51, 234' },
+      { xRatio: 0.44, yRatio: 0.52, periodMs: 3900, offsetMs: 1450, colorInner: '251, 113, 133', colorOuter: '190, 18, 60' },
+      { xRatio: 0.68, yRatio: 0.42, periodMs: 2750, offsetMs: 820, colorInner: '216, 180, 254', colorOuter: '126, 34, 206' },
+      { xRatio: 0.85, yRatio: 0.34, periodMs: 4400, offsetMs: 2300, colorInner: '244, 114, 182', colorOuter: '168, 85, 247' },
+    ]
+
+    ctx.save()
+    ctx.globalCompositeOperation = 'screen'
+    for (const cell of distantCells) {
+      const phase =
+        ((elapsedTimeMs + cell.offsetMs) % cell.periodMs) / cell.periodMs
+      const flash = this.computeLightningFlashEnvelope(phase, 0.16)
+      if (flash <= 0.01) continue
+
+      const cx =
+        canvasWidth * cell.xRatio +
+        cameraShiftX * 0.15 +
+        Math.sin(elapsedTimeMs * 0.001 + cell.offsetMs) * 18
+      const cy =
+        canvasHeight * cell.yRatio +
+        (cameraElevationPx * 0.14) % (canvasHeight * 0.25)
+      const radius = Math.max(canvasWidth, canvasHeight) * 0.24
+
+      const glow = ctx.createRadialGradient(cx, cy, 4, cx, cy, radius)
+      glow.addColorStop(0, `rgba(255, 245, 255, ${(flash * 0.48).toFixed(3)})`)
+      glow.addColorStop(
+        0.32,
+        `rgba(${cell.colorInner}, ${(flash * 0.34).toFixed(3)})`
+      )
+      glow.addColorStop(
+        0.68,
+        `rgba(${cell.colorOuter}, ${(flash * 0.14).toFixed(3)})`
+      )
+      glow.addColorStop(1, 'rgba(0, 0, 0, 0)')
+
+      ctx.fillStyle = glow
+      ctx.fillRect(cx - radius, cy - radius, radius * 2, radius * 2)
+    }
+    ctx.restore()
+
+    // 4. Far & Mid Background Fagulhas (Sparks & Embers floating up through the storm)
+    this.drawSurvivorSparksLayer(
+      ctx,
+      canvasWidth,
+      canvasHeight,
+      cameraElevationPx,
+      cameraShiftX,
+      elapsedTimeMs,
+      50,
+      0.32
+    )
+
+    // 5. Ground Scenery Layers (Two Stalagmite Layers + Smoke between them, drawn BEHIND the Base Island)
+    this.drawSurvivorGroundScenery(
+      ctx,
+      canvasWidth,
+      canvasHeight,
+      cameraOriginY,
+      cameraElevationPx,
+      cameraShiftX,
+      elapsedTimeMs
+    )
+
+    // 6. Top Storm Cloud (`nuvem.png`) + Periodic Lightning Bolts (`raio 1..4.png`) following the top of the screen
+    this.drawSurvivorTopCloudAndLightning(
+      ctx,
+      canvasWidth,
+      canvasHeight,
+      cameraShiftX,
+      elapsedTimeMs
+    )
+  }
+
+  /**
+   * Renders animated glowing volcanic embers/sparks ("fagulhas") rising and drifting across the Survivor map.
+   */
+  private drawSurvivorSparksLayer(
+    ctx: CanvasRenderingContext2D,
+    canvasWidth: number,
+    canvasHeight: number,
+    cameraElevationPx: number,
+    cameraShiftX: number,
+    elapsedTimeMs: number,
+    count: number,
+    parallaxFactor: number
+  ): void {
+    const sparkColors = [
+      { core: '#FF5722', halo: 'rgba(255, 59, 48, 0.55)' },
+      { core: '#FF7043', halo: 'rgba(255, 107, 53, 0.50)' },
+      { core: '#F43F5E', halo: 'rgba(244, 63, 94, 0.55)' },
+      { core: '#EC4899', halo: 'rgba(236, 72, 153, 0.55)' },
+      { core: '#C084FC', halo: 'rgba(168, 85, 247, 0.55)' },
+      { core: '#E879F9', halo: 'rgba(217, 70, 239, 0.50)' },
+    ]
+
+    ctx.save()
+    for (let i = 0; i < count; i++) {
+      const seedA = (i * 137.508) % 100
+      const seedB = (i * 293.713) % 100
+      const speedY = 26 + (i % 7) * 9
+      const driftX =
+        this.cloudWindDriftPx * (0.45 + (i % 5) * 0.14) +
+        Math.sin(elapsedTimeMs * 0.0022 + i * 1.7) * 26
+
+      const rawX =
+        (seedA / 100) * (canvasWidth + 160) +
+        driftX +
+        cameraShiftX * parallaxFactor
+      const sx =
+        (((rawX % (canvasWidth + 160)) + (canvasWidth + 160)) %
+          (canvasWidth + 160)) -
+        80
+
+      const cycleH = canvasHeight + 140
+      const rawY =
+        canvasHeight +
+        60 -
+        ((elapsedTimeMs * 0.001 * speedY +
+          (seedB / 100) * cycleH -
+          cameraElevationPx * parallaxFactor) %
+          cycleH)
+      const sy = ((rawY % cycleH) + cycleH) % cycleH - 40
+
+      const pulse =
+        0.45 + 0.55 * Math.sin(elapsedTimeMs * 0.006 + i * 2.31)
+      if (pulse <= 0.12) continue
+
+      const palette = sparkColors[i % sparkColors.length]
+      const rx = 1.8 + (i % 3) * 0.95
+      const ry = rx * (1.7 + (i % 2) * 0.6)
+      const angle =
+        -0.38 + Math.sin(elapsedTimeMs * 0.0018 + i) * 0.25
+
+      ctx.save()
+      ctx.translate(sx, sy)
+      ctx.rotate(angle)
+      ctx.globalAlpha = Math.min(1, pulse * 0.92)
+
+      // Outer glow
+      ctx.fillStyle = palette.halo
+      ctx.beginPath()
+      ctx.ellipse(0, 0, rx * 2.2, ry * 1.8, 0, 0, Math.PI * 2)
+      ctx.fill()
+
+      // Bright core
+      ctx.fillStyle = palette.core
+      ctx.beginPath()
+      ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.restore()
+    }
+    ctx.restore()
+  }
+
+  /**
+   * Renders a compact, well-proportioned top vortex cloud (`nuvem.png`) that follows the top of the screen,
+   * repeating horizontally if needed on wide monitors, with periodic lightning bolts (`raio 1..4.png`).
+   */
+  private drawSurvivorTopCloudAndLightning(
+    ctx: CanvasRenderingContext2D,
+    canvasWidth: number,
+    canvasHeight: number,
+    cameraShiftX: number,
+    elapsedTimeMs: number
+  ): void {
+    const nuvemImg = this.survivorSprites.nuvem
+    const nuvemNatW = nuvemImg?.naturalWidth || 2752
+    const nuvemNatH = nuvemImg?.naturalHeight || 352
+
+    // Compact, pleasant height (~12.5% of viewport height, clamped between 86px and 132px)
+    const cloudH = Math.min(132, Math.max(86, canvasHeight * 0.125))
+    const cloudW = cloudH * (nuvemNatW / nuvemNatH)
+    const centerCloudX =
+      (canvasWidth - cloudW) / 2 +
+      cameraShiftX * 0.14 +
+      Math.sin(elapsedTimeMs * 0.0009) * 5
+    const cloudY = -8 + Math.sin(elapsedTimeMs * 0.0016) * 3
+
+    // Periodic lightning emitters positioned under the cloud
+    const boltSlots = [
+      {
+        xOffsetFactor: -0.34,
+        periodMs: 2650,
+        offsetMs: 0,
+        activeDuty: 0.24,
+        boltIdx: 2, // raio 3
+        flipX: true,
+        angleRad: 0.12,
+        scaleMul: 0.31,
+        glowRgb: '255, 75, 110',
+      },
+      {
+        xOffsetFactor: -0.17,
+        periodMs: 3100,
+        offsetMs: 950,
+        activeDuty: 0.22,
+        boltIdx: 0, // raio 1
+        flipX: false,
+        angleRad: 0.04,
+        scaleMul: 0.29,
+        glowRgb: '217, 70, 239',
+      },
+      {
+        xOffsetFactor: 0.18,
+        periodMs: 2450,
+        offsetMs: 420,
+        activeDuty: 0.25,
+        boltIdx: 1, // raio 2
+        flipX: false,
+        angleRad: -0.05,
+        scaleMul: 0.31,
+        glowRgb: '244, 63, 94',
+      },
+      {
+        xOffsetFactor: 0.35,
+        periodMs: 3400,
+        offsetMs: 1680,
+        activeDuty: 0.22,
+        boltIdx: 3, // raio 4 (rotated downward)
+        flipX: false,
+        angleRad: 1.24,
+        scaleMul: 0.21,
+        glowRgb: '168, 85, 247',
+      },
+    ]
+
+    const cloudCenterX = centerCloudX + cloudW / 2
+    const activeBolts: Array<{
+      anchorX: number
+      anchorY: number
+      intensity: number
+      glowRgb: string
+      bW: number
+      bH: number
+      boltImg: HTMLImageElement
+      isHorizontalBolt: boolean
+      angleRad: number
+      flipX: boolean
+      sIdx: number
+      cycleCount: number
+    }> = []
+
+    for (let sIdx = 0; sIdx < boltSlots.length; sIdx++) {
+      const slot = boltSlots[sIdx]
+      const cycleCount = Math.floor(
+        (elapsedTimeMs + slot.offsetMs) / slot.periodMs
+      )
+      const phase =
+        ((elapsedTimeMs + slot.offsetMs) % slot.periodMs) / slot.periodMs
+      const intensity = this.computeLightningFlashEnvelope(
+        phase,
+        slot.activeDuty
+      )
+      if (intensity <= 0.02) continue
+
+      const chosenIdx = (slot.boltIdx + cycleCount) % 4
+      const boltImg =
+        this.survivorSprites.raios[chosenIdx] ||
+        this.survivorSprites.raios.find((r) => r !== null) ||
+        null
+      if (!boltImg) continue
+
+      const anchorX =
+        cloudCenterX +
+        cloudW * slot.xOffsetFactor +
+        Math.sin(cycleCount * 3.1 + sIdx) * 14
+      // Tuck the bolt root deeper into the cloud body so it originates inside the vortex
+      const anchorY = cloudY + cloudH * 0.38
+
+      const bNatW = boltImg.naturalWidth || 480
+      const bNatH = boltImg.naturalHeight || 800
+      const isHorizontalBolt = bNatW > bNatH * 1.8 // raio 4 is 1518x211
+
+      const bScale =
+        (canvasHeight / 980) *
+        (isHorizontalBolt ? 0.21 : slot.scaleMul * 0.92)
+      const bW = bNatW * bScale
+      const bH = bNatH * bScale
+
+      activeBolts.push({
+        anchorX,
+        anchorY,
+        intensity,
+        glowRgb: slot.glowRgb,
+        bW,
+        bH,
+        boltImg,
+        isHorizontalBolt,
+        angleRad: slot.angleRad,
+        flipX: slot.flipX,
+        sIdx,
+        cycleCount,
+      })
+
+      // 1) Wide atmospheric bloom behind the bolt (blends with the dark stormy sky)
+      ctx.save()
+      ctx.globalCompositeOperation = 'screen'
+      const haloR = Math.max(bW, bH) * 0.82
+      const haloCenterY = anchorY + haloR * 0.38
+      const haloGrad = ctx.createRadialGradient(
+        anchorX,
+        haloCenterY,
+        4,
+        anchorX,
+        haloCenterY,
+        haloR
+      )
+      haloGrad.addColorStop(
+        0,
+        `rgba(255, 235, 255, ${(intensity * 0.38).toFixed(3)})`
+      )
+      haloGrad.addColorStop(
+        0.38,
+        `rgba(${slot.glowRgb}, ${(intensity * 0.26).toFixed(3)})`
+      )
+      haloGrad.addColorStop(
+        0.72,
+        `rgba(${slot.glowRgb}, ${(intensity * 0.09).toFixed(3)})`
+      )
+      haloGrad.addColorStop(1, 'rgba(0, 0, 0, 0)')
+      ctx.fillStyle = haloGrad
+      ctx.fillRect(
+        anchorX - haloR,
+        haloCenterY - haloR,
+        haloR * 2,
+        haloR * 2
+      )
+      ctx.restore()
+
+      // 2) Blended lightning bolt sprite (Screen + Lighter multi-pass to eliminate matte edges)
+      ctx.save()
+      ctx.translate(anchorX, anchorY)
+      if (isHorizontalBolt) {
+        ctx.rotate(sIdx < 2 ? 1.88 : 1.28)
+      } else {
+        ctx.rotate(slot.angleRad)
+        if (slot.flipX || cycleCount % 2 === 1) {
+          ctx.scale(-1, 1)
+        }
+      }
+
+      const drawX = isHorizontalBolt ? -bW * 0.08 : -bW * 0.5
+      const drawY = isHorizontalBolt ? -bH * 0.5 : -bH * 0.08
+
+      // Pass A: Soft screen-blended plasma bloom
+      ctx.globalCompositeOperation = 'screen'
+      ctx.shadowColor = `rgb(${slot.glowRgb})`
+      ctx.shadowBlur = 20
+      ctx.globalAlpha = Math.min(1, intensity * 0.85)
+      ctx.drawImage(boltImg, drawX, drawY, bW, bH)
+
+      // Pass B: Additive core flash so the bolt merges with background clouds & sky
+      ctx.globalCompositeOperation = 'lighter'
+      ctx.shadowBlur = 0
+      ctx.globalAlpha = Math.min(1, intensity * 0.5)
+      ctx.drawImage(boltImg, drawX, drawY, bW, bH)
+
+      ctx.restore()
+    }
+
+    // Draw `nuvem.png` centered and repeated horizontally if the screen is wider than a single cloud tile
+    if (nuvemImg) {
+      ctx.save()
+      const stepW = cloudW * 0.94
+      for (let offsetIdx = -2; offsetIdx <= 2; offsetIdx++) {
+        const tileX = centerCloudX + offsetIdx * stepW
+        if (tileX + cloudW < -40 || tileX > canvasWidth + 40) continue
+        ctx.save()
+        ctx.translate(tileX + cloudW / 2, cloudY)
+        if (Math.abs(offsetIdx) % 2 === 1) {
+          ctx.scale(-1, 1)
+        }
+        ctx.drawImage(nuvemImg, -cloudW / 2, 0, cloudW, cloudH)
+        ctx.restore()
+      }
+      ctx.restore()
+    }
+
+    // 3) Post-cloud integration: internal cloud glow & rim-light where each active bolt exits `nuvem.png`
+    for (const bolt of activeBolts) {
+      ctx.save()
+      ctx.globalCompositeOperation = 'screen'
+
+      // Soft radial illumination inside the lower cloud rim
+      const exitY = cloudY + cloudH * 0.68
+      const rimR = Math.max(58, cloudH * 0.72)
+      const rimGrad = ctx.createRadialGradient(
+        bolt.anchorX,
+        exitY,
+        3,
+        bolt.anchorX,
+        exitY,
+        rimR
+      )
+      rimGrad.addColorStop(
+        0,
+        `rgba(255, 240, 255, ${(bolt.intensity * 0.48).toFixed(3)})`
+      )
+      rimGrad.addColorStop(
+        0.42,
+        `rgba(${bolt.glowRgb}, ${(bolt.intensity * 0.32).toFixed(3)})`
+      )
+      rimGrad.addColorStop(1, 'rgba(0, 0, 0, 0)')
+      ctx.fillStyle = rimGrad
+      ctx.fillRect(
+        bolt.anchorX - rimR,
+        exitY - rimR * 0.75,
+        rimR * 2,
+        rimR * 1.5
+      )
+
+      // Subtle screen-blended bolt bleed over the lower cloud border so the bolt doesn't look flatly cut off
+      ctx.translate(bolt.anchorX, bolt.anchorY)
+      if (bolt.isHorizontalBolt) {
+        ctx.rotate(bolt.sIdx < 2 ? 1.88 : 1.28)
+      } else {
+        ctx.rotate(bolt.angleRad)
+        if (bolt.flipX || bolt.cycleCount % 2 === 1) {
+          ctx.scale(-1, 1)
+        }
+      }
+      const drawX = bolt.isHorizontalBolt ? -bolt.bW * 0.08 : -bolt.bW * 0.5
+      const drawY = bolt.isHorizontalBolt ? -bolt.bH * 0.5 : -bolt.bH * 0.08
+      ctx.globalAlpha = Math.min(1, bolt.intensity * 0.34)
+      ctx.drawImage(bolt.boltImg, drawX, drawY, bolt.bW, bolt.bH)
+
+      ctx.restore()
+    }
+  }
+
+  /**
+   * Renders the Survival Mode Ground Scenery (behind the Base Island and Tower):
+   * - Back Stalagmite Layer (`estalagmite.png` Layer 1): Compact, horizontally tiled with horizontal flips and varied heights.
+   * - Middle Smoke Layer (`smoke.png`): Volcanic mist & embers tiled horizontally between the two stalagmite layers.
+   * - Front Stalagmite Layer (`estalagmite.png` Layer 2): Compact foreground spikes tiled horizontally with varied heights/flips.
+   */
+  private drawSurvivorGroundScenery(
+    ctx: CanvasRenderingContext2D,
+    canvasWidth: number,
+    canvasHeight: number,
+    cameraOriginY: number,
+    cameraElevationPx: number,
+    cameraShiftX: number,
+    elapsedTimeMs: number
+  ): void {
+    const u = GAME_CONSTANTS.UNIT_PX
+    const baseCameraOriginY = canvasHeight - 112
+    const seaLevelScreenY = cameraOriginY + 2.8 * u
+
+    const backLayerScreenY =
+      baseCameraOriginY + 2.2 * u + cameraElevationPx * 0.52
+    if (
+      backLayerScreenY > canvasHeight + 260 &&
+      seaLevelScreenY > canvasHeight + 260
+    ) {
+      return
+    }
+
+    const estImg = this.survivorSprites.estalagmite
+    const smokeImg = this.survivorSprites.smoke
+
+    const estNatW = estImg?.naturalWidth || 2752
+    const estNatH = estImg?.naturalHeight || 522
+    const smokeNatW = smokeImg?.naturalWidth || 2752
+    const smokeNatH = smokeImg?.naturalHeight || 892
+
+    // Compact, pleasant proportions (~14% of screen height for stalagmites, tiled horizontally)
+    const frontEstH = Math.min(142, Math.max(92, canvasHeight * 0.145))
+    const frontEstW = frontEstH * (estNatW / estNatH)
+
+    const backEstH = frontEstH * 1.16
+    const backEstW = backEstH * (estNatW / estNatH)
+
+    const smokeH = Math.min(185, Math.max(120, canvasHeight * 0.19))
+    const smokeW = smokeH * (smokeNatW / smokeNatH)
+
+    ctx.save()
+
+    // =========================================================================
+    // 1. CAMADA 1 DE ESTALAGMITES (TRASEIRA — Repetida horizontalmente com Flip e Alturas Diferentes)
+    // =========================================================================
+    if (estImg) {
+      const backParallaxX = cameraShiftX * 0.24
+      const backBottomY = canvasHeight + 18 + cameraElevationPx * 0.48
+      const backStepW = backEstW * 0.86
+      const heightMultipliers = [1.08, 0.92, 1.15, 0.96, 1.05]
+
+      for (let idx = -3; idx <= 3; idx++) {
+        const tileCenterX =
+          canvasWidth / 2 + backParallaxX + idx * backStepW
+        if (
+          tileCenterX + backEstW / 2 < -60 ||
+          tileCenterX - backEstW / 2 > canvasWidth + 60
+        ) {
+          continue
+        }
+        const hMul =
+          heightMultipliers[
+            ((idx % heightMultipliers.length) + heightMultipliers.length) %
+              heightMultipliers.length
+          ]
+        const tileH = backEstH * hMul
+        const flipX = Math.abs(idx) % 2 === 0
+
+        ctx.save()
+        ctx.globalAlpha = 0.78
+        ctx.translate(tileCenterX, backBottomY - tileH - 22)
+        ctx.scale(flipX ? -1 : 1, 1)
+        ctx.drawImage(estImg, -backEstW / 2, 0, backEstW, tileH)
+        ctx.restore()
+      }
+    }
+
+    // =========================================================================
+    // 2. CAMADA DE SMOKE ENTRE AS ESTALAGMITES (`smoke.png` repetida horizontalmente)
+    // =========================================================================
+    if (smokeImg) {
+      const midSmokeBottomY = canvasHeight + 16 + cameraElevationPx * 0.62
+      const smokeDriftX =
+        cameraShiftX * 0.34 + Math.sin(elapsedTimeMs * 0.00055) * 22
+      const smokeStepW = smokeW * 0.88
+
+      for (let idx = -3; idx <= 3; idx++) {
+        const tileCenterX =
+          canvasWidth / 2 + smokeDriftX + idx * smokeStepW
+        if (
+          tileCenterX + smokeW / 2 < -60 ||
+          tileCenterX - smokeW / 2 > canvasWidth + 60
+        ) {
+          continue
+        }
+        const flipX = Math.abs(idx) % 2 === 1
+        ctx.save()
+        ctx.globalAlpha = 0.9
+        ctx.translate(tileCenterX, midSmokeBottomY - smokeH)
+        ctx.scale(flipX ? -1 : 1, 1)
+        ctx.drawImage(smokeImg, -smokeW / 2, 0, smokeW, smokeH)
+        ctx.restore()
+      }
+    }
+
+    // Fagulhas subindo entre as camadas de estalagmites
+    this.drawSurvivorSparksLayer(
+      ctx,
+      canvasWidth,
+      canvasHeight,
+      cameraElevationPx,
+      cameraShiftX,
+      elapsedTimeMs + 900,
+      22,
+      0.65
+    )
+
+    // =========================================================================
+    // 3. CAMADA 2 DE ESTALAGMITES (FRONTAL — Repetida horizontalmente com Alturas Variadas e Flip)
+    // =========================================================================
+    if (estImg) {
+      const frontParallaxX = cameraShiftX * 0.44
+      const frontBottomY = canvasHeight + 22 + cameraElevationPx * 0.78
+      const frontStepW = frontEstW * 0.86
+      const frontHeightMuls = [1.0, 0.88, 1.06, 0.93, 1.02]
+
+      for (let idx = -3; idx <= 3; idx++) {
+        const tileCenterX =
+          canvasWidth / 2 + frontParallaxX + idx * frontStepW
+        if (
+          tileCenterX + frontEstW / 2 < -60 ||
+          tileCenterX - frontEstW / 2 > canvasWidth + 60
+        ) {
+          continue
+        }
+        const hMul =
+          frontHeightMuls[
+            ((idx % frontHeightMuls.length) + frontHeightMuls.length) %
+              frontHeightMuls.length
+          ]
+        const tileH = frontEstH * hMul
+        const flipX = Math.abs(idx) % 2 === 1
+
+        ctx.save()
+        ctx.translate(tileCenterX, frontBottomY - tileH)
+        ctx.scale(flipX ? -1 : 1, 1)
+        ctx.drawImage(estImg, -frontEstW / 2, 0, frontEstW, tileH)
+        ctx.restore()
+      }
+
+      // =======================================================================
+      // 4. NÉVOA RASTEIRA NA BASE DAS ESTALAGMITES (`smoke.png`)
+      // =======================================================================
+      if (smokeImg) {
+        const baseSmokeDriftX =
+          cameraShiftX * 0.5 - Math.sin(elapsedTimeMs * 0.0007) * 18
+        const baseSmokeH = smokeH * 0.68
+        const baseSmokeW = smokeW * 0.85
+        const baseSmokeStepW = baseSmokeW * 0.86
+        const baseSmokeTopY = frontBottomY - baseSmokeH * 0.72
+
+        for (let idx = -3; idx <= 3; idx++) {
+          const tileCenterX =
+            canvasWidth / 2 + baseSmokeDriftX + idx * baseSmokeStepW
+          if (
+            tileCenterX + baseSmokeW / 2 < -60 ||
+            tileCenterX - baseSmokeW / 2 > canvasWidth + 60
+          ) {
+            continue
+          }
+          ctx.save()
+          ctx.globalAlpha = 0.82
+          ctx.translate(tileCenterX, baseSmokeTopY)
+          if (Math.abs(idx) % 2 === 1) {
+            ctx.scale(-1, 1)
+          }
+          ctx.drawImage(smokeImg, -baseSmokeW / 2, 0, baseSmokeW, baseSmokeH)
+          ctx.restore()
+        }
+      }
+    }
+
     ctx.restore()
   }
 
@@ -1787,28 +2700,42 @@ export class SpriteRegistry {
     ctx: CanvasRenderingContext2D,
     centerX: number,
     centerY: number,
-    elevations: readonly number[] = [0, 0, 0, 0, 0, 0, 0, 0]
+    elevations: readonly number[] = [0, 0, 0, 0, 0, 0, 0, 0],
+    options?: {
+      isPuzzleMode?: boolean
+      riseUnits?: number
+    }
   ): void {
     const u = GAME_CONSTANTS.UNIT_PX
     const cols = GAME_CONSTANTS.BASE_WIDTH_UNITS // 8 columns
     const height = GAME_CONSTANTS.BASE_HEIGHT_UNITS * u
+    const isPuzzle =
+      Boolean(options?.isPuzzleMode) ||
+      elevations.some((e) => e > 2)
+    const risePx = Math.max(0, (options?.riseUnits ?? 0) * u)
 
     ctx.save()
     ctx.translate(centerX, centerY)
 
-    // 1. Draw the Cottage Foundation (`base.png`) under each contiguous active segment (`elev >= -1`)
-    // Supports full 8-column bases, narrower 6/4-column platforms, and split twin islands (`elev === -2` is open void).
-    let segStart = -1
-    for (let col = 0; col <= cols; col++) {
-      const isActive = col < cols && (elevations[col] ?? 0) >= -1
-      if (isActive && segStart === -1) {
-        segStart = col
-      } else if (!isActive && segStart !== -1) {
-        const segEnd = col - 1
-        const spanCols = segEnd - segStart + 1
-        const segCenterX = (-cols / 2 + (segStart + segEnd + 1) * 0.5) * u
-        this.drawPedestalBody(ctx, segCenterX, height / 2 - 2, 1.0, spanCols)
-        segStart = -1
+    if (isPuzzle) {
+      // In Puzzle Mode ("Abaixo do Laser"), draw ultra-narrow vertical wooden/stone pillar trunks
+      // rising from the water directly under active columns (`elev >= 0`), without the wide 8-col house roof.
+      this.drawPuzzlePillarTrunks(ctx, cols, u, height, elevations, risePx)
+    } else {
+      // 1. Draw the Cottage Foundation (`base.png`) under each contiguous active segment (`elev >= -1`)
+      // Supports full 8-column bases, narrower 6/4-column platforms, and split twin islands (`elev === -2` is open void).
+      let segStart = -1
+      for (let col = 0; col <= cols; col++) {
+        const isActive = col < cols && (elevations[col] ?? 0) >= -1
+        if (isActive && segStart === -1) {
+          segStart = col
+        } else if (!isActive && segStart !== -1) {
+          const segEnd = col - 1
+          const spanCols = segEnd - segStart + 1
+          const segCenterX = (-cols / 2 + (segStart + segEnd + 1) * 0.5) * u
+          this.drawPedestalBody(ctx, segCenterX, height / 2 - 2, 1.0, spanCols)
+          segStart = -1
+        }
       }
     }
 
@@ -1834,8 +2761,9 @@ export class SpriteRegistry {
       }
     }
 
-    // 3. Draw the Modular 1x1 Green Blocks for each column (Col 0 .. Col 7) from bottom row (r = 0) up to r = elev
-    for (let r = 0; r <= 2; r++) {
+    // 3. Draw the Modular 1x1 Green Blocks for each column (Col 0 .. Col 7) from bottom row (r = 0) up to r = maxElev
+    const maxElev = Math.max(2, ...elevations)
+    for (let r = 0; r <= maxElev; r++) {
       for (let col = 0; col < cols; col++) {
         const elev = elevations[col] ?? 0
         if (elev < r) continue
@@ -1846,7 +2774,7 @@ export class SpriteRegistry {
         const hasLeftNeighbor = col > 0 && (elevations[col - 1] ?? 0) >= r
         const hasRightNeighbor =
           col < cols - 1 && (elevations[col + 1] ?? 0) >= r
-        const hasBottomNeighbor = r > 0
+        const hasBottomNeighbor = r > 0 || isPuzzle
 
         this.drawModularGreenUnitBlock(
           ctx,
@@ -1862,6 +2790,92 @@ export class SpriteRegistry {
     }
 
     ctx.restore()
+  }
+
+  /**
+   * Draws narrow Tricky-Towers-style vertical wooden/stone pillar trunks rising out of the water
+   * directly beneath each active column (`elev >= 0`) in Puzzle Mode.
+   */
+  private drawPuzzlePillarTrunks(
+    ctx: CanvasRenderingContext2D,
+    cols: number,
+    u: number,
+    height: number,
+    elevations: readonly number[],
+    risePx: number
+  ): void {
+    const trunkTopY = height / 2
+    const trunkDepthPx = 5.5 * u + risePx
+
+    for (let col = 0; col < cols; col++) {
+      const elev = elevations[col] ?? -2
+      if (elev < 0) continue
+
+      const colX = (-cols / 2 + col) * u
+      const hasLeft = col > 0 && (elevations[col - 1] ?? -2) >= 0
+      const hasRight = col < cols - 1 && (elevations[col + 1] ?? -2) >= 0
+
+      ctx.save()
+
+      // Main vertical ribbed wooden/terracotta trunk body
+      const trunkGrad = ctx.createLinearGradient(colX, trunkTopY, colX + u, trunkTopY)
+      trunkGrad.addColorStop(0, '#9A5B32')
+      trunkGrad.addColorStop(0.5, '#7C4221')
+      trunkGrad.addColorStop(1, '#5C2E14')
+      ctx.fillStyle = trunkGrad
+      ctx.fillRect(colX, trunkTopY, u, trunkDepthPx)
+
+      // Vertical carved wood grain ribs inside the column
+      ctx.fillStyle = 'rgba(42, 18, 6, 0.26)'
+      ctx.fillRect(colX + u * 0.22, trunkTopY, 3, trunkDepthPx)
+      ctx.fillRect(colX + u * 0.68, trunkTopY, 3, trunkDepthPx)
+
+      // Horizontal stone/brick ring bands every 1.0u down the trunk (shows the +0.5u rise steps clearly!)
+      const numRings = Math.ceil(trunkDepthPx / u)
+      for (let r = 0; r < numRings; r++) {
+        const ry = trunkTopY + r * u
+        // Stone collar under top grass row (r === 0)
+        if (r === 0) {
+          ctx.fillStyle = '#64748B'
+          ctx.fillRect(colX + 1, ry, u - 2, 8)
+          ctx.fillStyle = '#94A3B8'
+          ctx.fillRect(colX + 2, ry + 1, u - 4, 3)
+        } else {
+          ctx.strokeStyle = 'rgba(24, 20, 37, 0.45)'
+          ctx.lineWidth = 1.6
+          ctx.beginPath()
+          ctx.moveTo(colX + 1, ry)
+          ctx.lineTo(colX + u - 1, ry)
+          ctx.stroke()
+        }
+      }
+
+      // Outer dark cartoon border on exposed left/right edges of the pillar
+      ctx.strokeStyle = '#181425'
+      ctx.lineWidth = 2.4
+      ctx.beginPath()
+      if (!hasLeft) {
+        ctx.moveTo(colX + 1, trunkTopY)
+        ctx.lineTo(colX + 1, trunkTopY + trunkDepthPx)
+      } else {
+        ctx.strokeStyle = 'rgba(24, 20, 37, 0.35)'
+        ctx.lineWidth = 1.2
+        ctx.moveTo(colX, trunkTopY)
+        ctx.lineTo(colX, trunkTopY + trunkDepthPx)
+      }
+      ctx.stroke()
+
+      ctx.strokeStyle = '#181425'
+      ctx.lineWidth = 2.4
+      ctx.beginPath()
+      if (!hasRight) {
+        ctx.moveTo(colX + u - 1, trunkTopY)
+        ctx.lineTo(colX + u - 1, trunkTopY + trunkDepthPx)
+      }
+      ctx.stroke()
+
+      ctx.restore()
+    }
   }
 
   /**
@@ -3401,10 +4415,15 @@ export class SpriteRegistry {
       powerEffect?: PiecePowerEffect
       isStaticAnchor?: boolean
       isGlued?: boolean
+      isPetrified?: boolean
+      isLaserBurning?: boolean
+      isCountedHighlight?: boolean
+      countOrderNumber?: number
       colorPaletteIndex?: number
     }
   ): void {
     const powerEffect = options?.powerEffect || 'NONE'
+    const isPetrified = Boolean(options?.isPetrified)
     const slot = this.getPieceSlot(type, variant)
     const paletteIdx =
       (((options?.colorPaletteIndex ?? DEFAULT_PALETTE_BY_TYPE[type] ?? 0) %
@@ -3413,12 +4432,12 @@ export class SpriteRegistry {
       PIECE_COLOR_PALETTE.length
     const selectedColorTheme = PIECE_COLOR_PALETTE[paletteIdx] || slot.placeholder
     const theme =
-      powerEffect === 'STATIC_BRICK'
+      isPetrified || powerEffect === 'STATIC_BRICK'
         ? {
-            fill: '#475569',
-            border: '#0F172A',
-            highlight: '#E2E8F0',
-            label: 'Bloco de Ferro',
+            fill: '#64748B',
+            border: '#1E293B',
+            highlight: '#CBD5E1',
+            label: 'Pedra Petrificada',
           }
         : powerEffect === 'SLICK_BRICK'
           ? {
@@ -3467,7 +4486,7 @@ export class SpriteRegistry {
     } else {
       const solidColoredSource = slot.multiColorCanvases?.[paletteIdx]
       const drawableSource: CanvasImageSource | null =
-        powerEffect === 'STATIC_BRICK' && slot.staticBrickCanvas
+        (isPetrified || powerEffect === 'STATIC_BRICK') && slot.staticBrickCanvas
           ? slot.staticBrickCanvas
           : powerEffect === 'SLICK_BRICK' && slot.iceBrickCanvas
             ? slot.iceBrickCanvas
@@ -3551,8 +4570,57 @@ export class SpriteRegistry {
       ctx.restore()
     }
 
-    // Overlay FX for active/settled Power Effects
+    // Overlay FX for active/settled Power Effects & Puzzle States
     if (!options?.isGhost) {
+      if (isPetrified) {
+        ctx.save()
+        ctx.strokeStyle = 'rgba(30, 41, 59, 0.55)'
+        ctx.lineWidth = 1.4 * scale
+        for (const cell of cells) {
+          const x0 = cell.x * cellPx - cellPx / 2
+          const y0 = cell.y * cellPx - cellPx / 2
+          ctx.beginPath()
+          ctx.moveTo(x0 + 4 * scale, y0 + 6 * scale)
+          ctx.lineTo(x0 + 11 * scale, y0 + 10 * scale)
+          ctx.lineTo(x0 + 8 * scale, y0 + 16 * scale)
+          ctx.stroke()
+        }
+        ctx.restore()
+      }
+
+      if (options?.isLaserBurning) {
+        const pulse = 0.55 + 0.45 * Math.sin(performance.now() * 0.025)
+        ctx.save()
+        ctx.fillStyle = `rgba(239, 68, 68, ${(0.38 * pulse).toFixed(3)})`
+        ctx.strokeStyle = `rgba(254, 240, 138, ${(0.95 * pulse).toFixed(3)})`
+        ctx.lineWidth = 2.6 * scale
+        ctx.shadowColor = '#EF4444'
+        ctx.shadowBlur = 12 * scale
+        for (const cell of cells) {
+          const x0 = cell.x * cellPx - cellPx / 2
+          const y0 = cell.y * cellPx - cellPx / 2
+          ctx.fillRect(x0 + 1, y0 + 1, cellPx - 2, cellPx - 2)
+          ctx.strokeRect(x0 + 1, y0 + 1, cellPx - 2, cellPx - 2)
+        }
+        ctx.restore()
+      }
+
+      if (options?.isCountedHighlight) {
+        ctx.save()
+        ctx.fillStyle = 'rgba(250, 204, 21, 0.28)'
+        ctx.strokeStyle = '#FEF08A'
+        ctx.lineWidth = 2.4 * scale
+        ctx.shadowColor = '#FACC15'
+        ctx.shadowBlur = 10 * scale
+        for (const cell of cells) {
+          const x0 = cell.x * cellPx - cellPx / 2
+          const y0 = cell.y * cellPx - cellPx / 2
+          ctx.fillRect(x0 + 1, y0 + 1, cellPx - 2, cellPx - 2)
+          ctx.strokeRect(x0 + 1, y0 + 1, cellPx - 2, cellPx - 2)
+        }
+        ctx.restore()
+      }
+
       if (powerEffect === 'SUPER_GLUE' || options?.isGlued) {
         this.drawPieceSuperGlueDecoration(
           ctx,

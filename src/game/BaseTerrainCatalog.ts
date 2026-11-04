@@ -1,4 +1,5 @@
 import { hashSeedString } from './SeededRandomizer'
+import { GameMode } from '../types/game'
 
 export type BasePresetId =
   | 'CLASSIC_FLAT'
@@ -19,6 +20,14 @@ export type BasePresetId =
   | 'MINI_FOUR'
   | 'COMPACT_CRADLE_SIX'
   | 'SPLIT_TWIN_ISLANDS'
+  | 'PUZZLE_STEPPED_CLIFF'
+  | 'PUZZLE_NOTCHED_TOTEM'
+  | 'PUZZLE_THREE_NEEDLES'
+  | 'PUZZLE_MICRO_PILLAR_2'
+  | 'PUZZLE_TWIN_STILTS'
+  | 'PUZZLE_CANTILEVER_HOOK'
+  | 'PUZZLE_ZIGZAG_SPIRES'
+  | 'PUZZLE_NARROW_T_HEAD'
 
 export interface BaseTerrainPreset {
   id: BasePresetId
@@ -27,8 +36,7 @@ export interface BaseTerrainPreset {
   /**
    * 8-column elevation array [Col 0 .. Col 7]:
    * -  0: normal green base surface (Y = 0)
-   * -  1: +1 extra green 1x1 block stacked on top (Y = -1u)
-   * -  2: +2 extra green 1x1 blocks stacked on top (Y = -2u)
+   * -  1..4: +1..+4 extra green 1x1 blocks stacked on top (Y = -1u .. -4u)
    * - -1: 1x1 hole/pit in the first green row exposing the cottage roof (Y = +1u)
    * - -2: void / absent column (for smaller/narrower platforms — open abyss with no roof or block)
    */
@@ -43,9 +51,10 @@ export interface BaseTerrainPreset {
     number,
   ]
   description: string
+  isPuzzleIsland?: boolean
 }
 
-export const BASE_TERRAIN_CATALOG: readonly BaseTerrainPreset[] = [
+export const STANDARD_BASE_TERRAIN_CATALOG: readonly BaseTerrainPreset[] = [
   {
     id: 'CLASSIC_FLAT',
     index: 1,
@@ -192,6 +201,90 @@ export const BASE_TERRAIN_CATALOG: readonly BaseTerrainPreset[] = [
   },
 ]
 
+/**
+ * Dedicated ultra-narrow, asymmetric, stepped, and multi-needle islands
+ * exclusively for Puzzle Mode ("Abaixo do Laser" - 9m), modeled after Tricky Towers Puzzle levels.
+ */
+export const PUZZLE_BASE_TERRAIN_CATALOG: readonly BaseTerrainPreset[] = [
+  {
+    id: 'PUZZLE_STEPPED_CLIFF',
+    index: 19,
+    name: '19. Penhasco em Degraus (Puzzle 4 Col)',
+    elevations: [-2, -2, 0, 1, 3, 3, -2, -2],
+    description:
+      'Pilar estreito de 4 colunas em escada íngreme! Exige criar contrapesos laterais para a esquerda antes de encostar no laser.',
+    isPuzzleIsland: true,
+  },
+  {
+    id: 'PUZZLE_NOTCHED_TOTEM',
+    index: 20,
+    name: '20. Totem Entalhado (Puzzle 3 Col)',
+    elevations: [-2, -2, -2, 2, 3, 1, -2, -2],
+    description:
+      'Apenas 3 blocos de largura com degraus irregulares no topo. Prenda peças L, J e T nas quinas para abrir asas no ar!',
+    isPuzzleIsland: true,
+  },
+  {
+    id: 'PUZZLE_THREE_NEEDLES',
+    index: 21,
+    name: '21. Três Agulhas (Puzzle 3×1 Col)',
+    elevations: [-2, 2, -2, -2, 1, -2, 3, -2],
+    description:
+      'Três pilares finos de 1 bloco separados por abismos! Conecte as agulhas com vigas ou equilibre mini-torres independentes.',
+    isPuzzleIsland: true,
+  },
+  {
+    id: 'PUZZLE_MICRO_PILLAR_2',
+    index: 22,
+    name: '22. Micro-Pilar Duplo (Puzzle 2 Col)',
+    elevations: [-2, -2, -2, 2, 2, -2, -2, -2],
+    description:
+      'Absurdamente estreito: apenas 2 blocos centrais! Toda a construção precisa se expandir em V usando contrapeso perfeito.',
+    isPuzzleIsland: true,
+  },
+  {
+    id: 'PUZZLE_TWIN_STILTS',
+    index: 23,
+    name: '23. Pernas de Pau (Puzzle 2×1 Col)',
+    elevations: [-2, -2, 2, -2, -2, 3, -2, -2],
+    description:
+      'Duas colunas unitárias em alturas diferentes com um vão de 2 blocos no meio. Crie uma ponte baixa para aproveitar o vão!',
+    isPuzzleIsland: true,
+  },
+  {
+    id: 'PUZZLE_CANTILEVER_HOOK',
+    index: 24,
+    name: '24. Gancho de Contrapeso (Puzzle 3 Col)',
+    elevations: [-2, -2, -2, 3, 0, 0, -2, -2],
+    description:
+      'Um dente alto na esquerda e um degrau baixo de 2 blocos na direita — ideal para travar peças em balanço sobre a água.',
+    isPuzzleIsland: true,
+  },
+  {
+    id: 'PUZZLE_ZIGZAG_SPIRES',
+    index: 25,
+    name: '25. Pilares Partidos (Puzzle 3 Col)',
+    elevations: [-2, -2, 2, 0, -2, 2, -2, -2],
+    description:
+      'Pilar duplo em degrau na esquerda e uma agulha isolada na direita. Exige encaixes cirúrgicos abaixo do laser!',
+    isPuzzleIsland: true,
+  },
+  {
+    id: 'PUZZLE_NARROW_T_HEAD',
+    index: 26,
+    name: '26. Agulha Assimétrica (Puzzle 2 Col)',
+    elevations: [-2, -2, -2, 1, 3, -2, -2, -2],
+    description:
+      'Apenas 2 colunas com 2 blocos de desnível entre elas. Use o Socão para encaixar peças nos flancos do pilar!',
+    isPuzzleIsland: true,
+  },
+]
+
+export const BASE_TERRAIN_CATALOG: readonly BaseTerrainPreset[] = [
+  ...STANDARD_BASE_TERRAIN_CATALOG,
+  ...PUZZLE_BASE_TERRAIN_CATALOG,
+]
+
 export function getBasePresetById(
   id: BasePresetId | null | undefined
 ): BaseTerrainPreset {
@@ -205,9 +298,18 @@ export function getBasePresetById(
 /**
  * Deterministically picks a Base Terrain Preset from `matchSeed`
  * so all players in a seeded / multiplayer match start with the exact same modular base.
+ * In `PUZZLE` mode, exclusively selects from `PUZZLE_BASE_TERRAIN_CATALOG` (ultra-narrow islands).
  */
-export function selectBasePresetForSeed(matchSeed: string): BaseTerrainPreset {
+export function selectBasePresetForSeed(
+  matchSeed: string,
+  gameMode: GameMode = 'RACE'
+): BaseTerrainPreset {
+  if (gameMode === 'PUZZLE') {
+    const hash = hashSeedString(`${matchSeed}_PUZZLE_ISLAND`)
+    const idx = hash % PUZZLE_BASE_TERRAIN_CATALOG.length
+    return PUZZLE_BASE_TERRAIN_CATALOG[idx]
+  }
   const hash = hashSeedString(`${matchSeed}_MODULAR_BASE`)
-  const idx = hash % BASE_TERRAIN_CATALOG.length
-  return BASE_TERRAIN_CATALOG[idx]
+  const idx = hash % STANDARD_BASE_TERRAIN_CATALOG.length
+  return STANDARD_BASE_TERRAIN_CATALOG[idx]
 }

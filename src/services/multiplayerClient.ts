@@ -71,6 +71,10 @@ export interface MatchPlayerRealtimeState {
   islands?: FloatingIslandSnapshot[]
   isEliminated: boolean
   eliminationOrder?: number
+  puzzleBaseRiseUnits?: number
+  isPetrified?: boolean
+  countedPieces?: number
+  laserOverloadRemainingMs?: number | null
   updatedAt: number
 }
 
@@ -110,6 +114,7 @@ export interface MatchStartPayload {
   victoryCondition?: VictoryCondition
   cupTargetPoints?: number
   roundNumber?: number
+  isTiebreakerRound?: boolean
   startedAt: string
   players: Array<{
     handle: string
@@ -158,6 +163,7 @@ export interface MatchGameOverPayload {
   cupTargetPoints?: number
   roundNumber?: number
   isCupFinished?: boolean
+  isTiebreaker?: boolean
   roundWinnerHandle?: string
   roundWinnerNick?: string
   roundWinnerSkin?: string
@@ -601,6 +607,18 @@ function connect(): void {
       if (typeof remoteState.fogAnchorY === 'number') {
         existing.fogAnchorY = remoteState.fogAnchorY
       }
+      if (typeof remoteState.puzzleBaseRiseUnits === 'number') {
+        existing.puzzleBaseRiseUnits = remoteState.puzzleBaseRiseUnits
+      }
+      if (typeof remoteState.isPetrified === 'boolean') {
+        existing.isPetrified = remoteState.isPetrified
+      }
+      if (typeof remoteState.countedPieces === 'number') {
+        existing.countedPieces = remoteState.countedPieces
+      }
+      if (remoteState.laserOverloadRemainingMs !== undefined) {
+        existing.laserOverloadRemainingMs = remoteState.laserOverloadRemainingMs
+      }
 
       const incomingDebuffs = remoteState.activeDebuffs || []
       const incomingBlindMs = remoteState.blindManualRemainingMs ?? 0
@@ -753,7 +771,9 @@ function connect(): void {
   socket.on('match:game_over', (payload: MatchGameOverPayload) => {
     const isSurvival =
       payload.gameMode === 'SURVIVAL' ||
-      state.activeMatch?.gameMode === 'SURVIVAL'
+      payload.gameMode === 'ENDLESS' ||
+      state.activeMatch?.gameMode === 'SURVIVAL' ||
+      state.activeMatch?.gameMode === 'ENDLESS'
     const winnerHandleNorm = normalizeHandle(payload.winnerHandle || '')
 
     let podium = (payload.podium || []).map((p) => {
@@ -812,6 +832,16 @@ function connect(): void {
       })
     }
 
+    const vc =
+      payload.victoryCondition ||
+      state.activeMatch?.victoryCondition ||
+      state.room?.victoryCondition ||
+      'CUP_6'
+    const cupTarget =
+      payload.cupTargetPoints ||
+      (vc === 'SINGLE_WIN' ? 3 : vc === 'CUP_12' ? 12 : 6)
+    const wasTiebreakerRound = Boolean(state.activeMatch?.isTiebreakerRound)
+
     podium = podium.map((p) => {
       const h = normalizeHandle(p.handle)
       const earned =
@@ -819,6 +849,10 @@ function connect(): void {
         (p.rank === 1 ? 3 : p.rank === 2 ? 2 : p.rank === 3 ? 1 : 0)
       const prevPts =
         p.previousCupPoints ?? Math.max(0, (p.cupPoints ?? earned) - earned)
+      const nextPts = wasTiebreakerRound
+        ? prevPts + earned
+        : Math.min(cupTarget, prevPts + earned)
+      const effectiveEarned = Math.max(0, nextPts - prevPts)
       const prevMedals = (state.pointMedalsByHandle[h] || []).slice(0, prevPts)
       while (prevMedals.length < prevPts) {
         prevMedals.push(1)
@@ -826,21 +860,44 @@ function connect(): void {
       const medalRank: 1 | 2 | 3 =
         p.rank === 1 ? 1 : p.rank === 2 ? 2 : 3
       const nextMedals: Array<1 | 2 | 3> = [...prevMedals]
-      for (let i = 0; i < earned; i++) {
+      for (let i = 0; i < effectiveEarned; i++) {
         nextMedals.push(medalRank)
       }
       state.pointMedalsByHandle[h] = nextMedals
       return {
         ...p,
-        pointsEarned: earned,
+        pointsEarned: effectiveEarned,
         previousCupPoints: prevPts,
-        cupPoints: prevPts + earned,
+        cupPoints: nextPts,
         pointMedals: nextMedals,
       }
     })
 
+    const cupChampions = podium.filter((p) => (p.cupPoints ?? 0) >= cupTarget)
+    const allEliminatedInMultiplayerSurvival =
+      podium.length > 1 &&
+      isSurvival &&
+      podium.every((p) => p.isEliminated || p.lives <= 0)
+    const computedTiebreaker =
+      payload.isTiebreaker !== undefined
+        ? payload.isTiebreaker
+        : !wasTiebreakerRound &&
+          podium.length > 1 &&
+          ((vc !== 'SINGLE_WIN' && cupChampions.length >= 2) ||
+            (vc === 'SINGLE_WIN' && allEliminatedInMultiplayerSurvival))
+
+    const computedCupFinished = computedTiebreaker
+      ? false
+      : payload.isCupFinished !== undefined
+        ? payload.isCupFinished
+        : wasTiebreakerRound ||
+          vc === 'SINGLE_WIN' ||
+          cupChampions.length >= 1
+
     const normalized: MatchGameOverPayload = {
       ...payload,
+      isTiebreaker: computedTiebreaker,
+      isCupFinished: computedCupFinished,
       winnerCustomNick:
         payload.winnerCustomNick || payload.winnerNick || 'VENCEDOR',
       winnerNick:
@@ -1325,6 +1382,10 @@ function emitMatchSyncState(payload: {
   fogAnchorY?: number
   islands?: FloatingIslandSnapshot[]
   isEliminated: boolean
+  puzzleBaseRiseUnits?: number
+  isPetrified?: boolean
+  countedPieces?: number
+  laserOverloadRemainingMs?: number | null
 }): void {
   if (payload.lives <= 0 || payload.isEliminated) {
     const myHandle = normalizeHandle(authStore.state.user?.handle || '')
@@ -1491,6 +1552,10 @@ function stepInterpolation(dtMs: number): void {
         prev.powerEffect = targetBlock.powerEffect
         prev.variant = targetBlock.variant
         prev.colorPaletteIndex = targetBlock.colorPaletteIndex
+        prev.isPetrified = targetBlock.isPetrified
+        prev.isLaserBurning = targetBlock.isLaserBurning
+        prev.isCountedHighlight = targetBlock.isCountedHighlight
+        prev.countOrderNumber = targetBlock.countOrderNumber
         nextRenderBlocks.push(prev)
       }
     }

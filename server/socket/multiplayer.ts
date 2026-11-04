@@ -26,11 +26,26 @@ export interface RoomSlotDTO {
   lastPointsEarned: number
 }
 
-export type RoomSelectableGameMode = 'RACE' | 'SURVIVAL' | 'RANDOM'
-export type RoomActiveGameMode = 'RACE' | 'SURVIVAL'
+export type RoomSelectableGameMode =
+  | 'RACE'
+  | 'PUZZLE'
+  | 'SURVIVAL'
+  | 'ENDLESS'
+  | 'RANDOM'
+export type RoomActiveGameMode = 'RACE' | 'PUZZLE' | 'SURVIVAL' | 'ENDLESS'
 export type RoomVictoryCondition = 'SINGLE_WIN' | 'CUP_6' | 'CUP_12'
 
 const TRICKY_TOWERS_RANK_POINTS = [3, 2, 1, 0] as const
+
+function resolveRoomActiveGameMode(
+  selected: RoomSelectableGameMode
+): RoomActiveGameMode {
+  if (selected === 'RANDOM') {
+    const pool: RoomActiveGameMode[] = ['RACE', 'PUZZLE', 'SURVIVAL', 'ENDLESS']
+    return pool[Math.floor(Math.random() * pool.length)]
+  }
+  return selected
+}
 
 function getCupTargetPoints(victoryCondition: RoomVictoryCondition): number {
   if (victoryCondition === 'CUP_6') return 6
@@ -64,6 +79,10 @@ export interface MatchLaneSyncPayload {
   goalCountdownMs: number | null
   elapsedTimeMs: number
   blindManualRemainingMs: number
+  puzzleBaseRiseUnits?: number
+  isPetrified?: boolean
+  countedPieces?: number
+  laserOverloadRemainingMs?: number | null
   inventoryPower: {
     selfPower: string | null
     attackPower: string | null
@@ -91,6 +110,10 @@ export interface MatchLaneSyncPayload {
     sleeping: boolean
     isStaticAnchor?: boolean
     isGlued?: boolean
+    isPetrified?: boolean
+    isLaserBurning?: boolean
+    isCountedHighlight?: boolean
+    countOrderNumber?: number
   }>
   islands?: Array<{
     id: string
@@ -150,6 +173,8 @@ interface InternalRoom {
   victoryCondition: RoomVictoryCondition
   cupTargetPoints: number
   roundNumber: number
+  isTiebreakerRound?: boolean
+  isCupFinished?: boolean
   eliminationCounter: number
   survivalClimaxWinnerHandle: string | null
   survivalClimaxTimer: ReturnType<typeof setTimeout> | null
@@ -318,17 +343,14 @@ function startRoomCountdownIfEligible(room: InternalRoom): void {
       room.countdownSeconds = null
       room.status = 'IN_MATCH'
       room.roundNumber = 1
+      room.isTiebreakerRound = false
+      room.isCupFinished = false
       room.eliminationCounter = 0
       room.survivalClimaxWinnerHandle = null
       clearSurvivalClimaxTimer(room)
       room.cupTargetPoints = getCupTargetPoints(room.victoryCondition)
       room.pieceSeed = generateSharedPieceSeed()
-      room.activeGameMode =
-        room.selectedGameMode === 'RANDOM'
-          ? Math.random() < 0.5
-            ? 'RACE'
-            : 'SURVIVAL'
-          : room.selectedGameMode
+      room.activeGameMode = resolveRoomActiveGameMode(room.selectedGameMode)
 
       for (const s of room.slots) {
         s.lastTowerHeight = 0
@@ -360,6 +382,7 @@ function startRoomCountdownIfEligible(room: InternalRoom): void {
         victoryCondition: room.victoryCondition,
         cupTargetPoints: room.cupTargetPoints,
         roundNumber: room.roundNumber,
+        isTiebreakerRound: false,
         players,
       })
     }
@@ -408,10 +431,24 @@ async function concludeMultiplayerRound(
     }
   }
 
+  // No Modo Quebra-Cabeça (PUZZLE), quem tiver mais peças empilhadas abaixo do laser vence a rodada!
+  let effectiveWinnerSlot = winnerSlot
+  if (room.activeGameMode === 'PUZZLE' && occupied.length > 0) {
+    const byPieces = [...occupied].sort(
+      (a, b) => b.lastTowerHeight - a.lastTowerHeight
+    )
+    if (byPieces[0]) {
+      effectiveWinnerSlot = byPieces[0]
+    }
+  }
+
   const sorted = [...occupied].sort((a, b) => {
-    if (a.handle === winnerSlot.handle) return -1
-    if (b.handle === winnerSlot.handle) return 1
-    if (room.activeGameMode === 'SURVIVAL') {
+    if (a.handle === effectiveWinnerSlot.handle) return -1
+    if (b.handle === effectiveWinnerSlot.handle) return 1
+    if (
+      room.activeGameMode === 'SURVIVAL' ||
+      room.activeGameMode === 'ENDLESS'
+    ) {
       const aAlive = a.lastLives > 0 ? 1 : 0
       const bAlive = b.lastLives > 0 ? 1 : 0
       if (bAlive !== aAlive) return bAlive - aAlive
@@ -432,8 +469,11 @@ async function concludeMultiplayerRound(
 
   const isSoloEliminated =
     occupied.length === 1 &&
-    room.activeGameMode === 'SURVIVAL' &&
+    (room.activeGameMode === 'SURVIVAL' ||
+      room.activeGameMode === 'ENDLESS') &&
     winnerSlot.lastLives <= 0
+
+  const wasTiebreakerRound = Boolean(room.isTiebreakerRound)
 
   const podium: PodiumEntryDTO[] = sorted.map((s, idx) => {
     const effectiveRank = isSoloEliminated ? 4 : idx + 1
@@ -441,7 +481,9 @@ async function concludeMultiplayerRound(
       ? 0
       : (TRICKY_TOWERS_RANK_POINTS[idx] ?? 0)
     const previousCupPoints = s.cupPoints
-    const nextCupPoints = Math.min(cupTargetPoints, s.cupPoints + pointsEarned)
+    const nextCupPoints = wasTiebreakerRound
+      ? s.cupPoints + pointsEarned
+      : Math.min(cupTargetPoints, s.cupPoints + pointsEarned)
     s.cupPoints = nextCupPoints
     s.lastPointsEarned = pointsEarned
     return {
@@ -454,7 +496,10 @@ async function concludeMultiplayerRound(
       towerHeight: Number(s.lastTowerHeight.toFixed(1)),
       lives: s.lastLives,
       eliminationOrder: s.eliminationOrder,
-      isEliminated: room.activeGameMode === 'SURVIVAL' && s.lastLives <= 0,
+      isEliminated:
+        (room.activeGameMode === 'SURVIVAL' ||
+          room.activeGameMode === 'ENDLESS') &&
+        s.lastLives <= 0,
       pointsEarned,
       previousCupPoints,
       cupPoints: nextCupPoints,
@@ -466,12 +511,31 @@ async function concludeMultiplayerRound(
 
   const isSingleWin = room.victoryCondition === 'SINGLE_WIN'
   const cupChampions = podium.filter((p) => p.cupPoints >= cupTargetPoints)
+  const allEliminatedInMultiplayerSurvival =
+    occupied.length > 1 &&
+    (room.activeGameMode === 'SURVIVAL' ||
+      room.activeGameMode === 'ENDLESS') &&
+    podium.every((p) => p.isEliminated || p.lives <= 0)
+
+  // Se houver empate ao atingir a pontuação final da copa (2+ jogadores atingiram a meta na mesma rodada)
+  // ou se todos caíram juntos sem sobrevivente, força mais uma rodada com todos os jogadores para o desempate final!
+  const isTiebreaker =
+    !wasTiebreakerRound &&
+    !isSoloEliminated &&
+    ((!isSingleWin && cupChampions.length >= 2) ||
+      (isSingleWin && allEliminatedInMultiplayerSurvival))
+
   const isCupFinished =
-    (!isSoloEliminated && isSingleWin) || cupChampions.length > 0
+    !isTiebreaker &&
+    (wasTiebreakerRound ||
+      isSingleWin ||
+      (!isSoloEliminated && cupChampions.length >= 1))
+
+  room.isTiebreakerRound = isTiebreaker
+  room.isCupFinished = isCupFinished
 
   let cupWinnerEntry = podium[0]
-  if (isCupFinished && !isSingleWin && cupChampions.length > 0) {
-    // Prioriza quem atingiu a meta e ficou melhor colocado nesta rodada
+  if (isCupFinished && !wasTiebreakerRound && !isSingleWin && cupChampions.length > 0) {
     cupWinnerEntry = [...cupChampions].sort((a, b) => {
       if (b.cupPoints !== a.cupPoints) return b.cupPoints - a.cupPoints
       return a.rank - b.rank
@@ -480,7 +544,9 @@ async function concludeMultiplayerRound(
 
   for (const entry of podium) {
     entry.isCupWinner =
-      isCupFinished && entry.handle === cupWinnerEntry?.handle
+      !isSoloEliminated &&
+      isCupFinished &&
+      entry.handle === cupWinnerEntry?.handle
   }
 
   const participantHandles = occupied.map((s) => s.handle!)
@@ -513,6 +579,7 @@ async function concludeMultiplayerRound(
     cupTargetPoints,
     roundNumber: room.roundNumber,
     isCupFinished,
+    isTiebreaker,
     roundWinnerHandle: winnerSlot.handle,
     roundWinnerNick: winnerSlot.customNick,
     roundWinnerSkin: winnerSlot.equippedSkin,
@@ -528,7 +595,10 @@ async function concludeMultiplayerRound(
 async function checkSurvivalLastPlayerStanding(
   room: InternalRoom
 ): Promise<void> {
-  if (room.status !== 'IN_MATCH' || room.activeGameMode !== 'SURVIVAL') {
+  if (
+    room.status !== 'IN_MATCH' ||
+    (room.activeGameMode !== 'SURVIVAL' && room.activeGameMode !== 'ENDLESS')
+  ) {
     return
   }
 
@@ -1030,7 +1100,9 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
             : undefined
 
         const initialMode: RoomSelectableGameMode =
+          reqOpts?.selectedGameMode === 'PUZZLE' ||
           reqOpts?.selectedGameMode === 'SURVIVAL' ||
+          reqOpts?.selectedGameMode === 'ENDLESS' ||
           reqOpts?.selectedGameMode === 'RANDOM'
             ? reqOpts.selectedGameMode
             : 'RACE'
@@ -1093,7 +1165,14 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
           countdownTimer: null,
           pieceSeed: null,
           selectedGameMode: initialMode,
-          activeGameMode: initialMode === 'SURVIVAL' ? 'SURVIVAL' : 'RACE',
+          activeGameMode:
+            initialMode === 'SURVIVAL'
+              ? 'SURVIVAL'
+              : initialMode === 'PUZZLE'
+                ? 'PUZZLE'
+                : initialMode === 'ENDLESS'
+                  ? 'ENDLESS'
+                  : 'RACE',
           victoryCondition: initialVictory,
           cupTargetPoints: getCupTargetPoints(initialVictory),
           roundNumber: 1,
@@ -1173,7 +1252,10 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
 
         const requested = payload?.gameMode
         const nextMode: RoomSelectableGameMode =
-          requested === 'SURVIVAL' || requested === 'RANDOM'
+          requested === 'PUZZLE' ||
+          requested === 'SURVIVAL' ||
+          requested === 'ENDLESS' ||
+          requested === 'RANDOM'
             ? requested
             : 'RACE'
 
@@ -1481,7 +1563,9 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
         if (payloadOrAck && typeof payloadOrAck === 'object' && isHostOrSolo) {
           if (
             payloadOrAck.selectedGameMode === 'RACE' ||
+            payloadOrAck.selectedGameMode === 'PUZZLE' ||
             payloadOrAck.selectedGameMode === 'SURVIVAL' ||
+            payloadOrAck.selectedGameMode === 'ENDLESS' ||
             payloadOrAck.selectedGameMode === 'RANDOM'
           ) {
             room.selectedGameMode = payloadOrAck.selectedGameMode
@@ -1560,9 +1644,19 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
 
       const mySlot = room.slots.find((s) => s.handle === session.handle)
       if (mySlot) {
-        mySlot.lastTowerHeight = Number(packet.towerHeight || 0)
+        if (room.activeGameMode === 'PUZZLE') {
+          const pieces =
+            typeof packet.countedPieces === 'number'
+              ? packet.countedPieces
+              : Array.isArray(packet.settledBlocks)
+                ? packet.settledBlocks.length
+                : Number(packet.towerHeight || 0)
+          mySlot.lastTowerHeight = pieces
+        } else {
+          mySlot.lastTowerHeight = Number(packet.towerHeight || 0)
+        }
         mySlot.lastLives = Number(packet.lives ?? 3)
-        if (mySlot.lastLives <= 0) {
+        if (mySlot.lastLives <= 0 && room.activeGameMode !== 'PUZZLE') {
           markSlotEliminatedIfNeeded(room, mySlot)
           void checkSurvivalLastPlayerStanding(room)
         }
@@ -1731,12 +1825,9 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
       if (!room) return
       const occupiedCount = room.slots.filter((s) => Boolean(s.handle)).length
       if (room.status !== 'POST_MATCH' && occupiedCount > 1) return
+      if (room.isCupFinished) return
 
       const cupTargetPoints = getCupTargetPoints(room.victoryCondition)
-      const hasCupWinner = room.slots.some(
-        (s) => Boolean(s.handle) && s.cupPoints >= cupTargetPoints
-      )
-      if (hasCupWinner) return
 
       clearSurvivalClimaxTimer(room)
       room.survivalClimaxWinnerHandle = null
@@ -1745,12 +1836,7 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
       room.roundNumber += 1
       room.cupTargetPoints = cupTargetPoints
       room.pieceSeed = generateSharedPieceSeed()
-      room.activeGameMode =
-        room.selectedGameMode === 'RANDOM'
-          ? Math.random() < 0.5
-            ? 'RACE'
-            : 'SURVIVAL'
-          : room.selectedGameMode
+      room.activeGameMode = resolveRoomActiveGameMode(room.selectedGameMode)
 
       for (const s of room.slots) {
         s.lastTowerHeight = 0
@@ -1781,6 +1867,7 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
         victoryCondition: room.victoryCondition,
         cupTargetPoints: room.cupTargetPoints,
         roundNumber: room.roundNumber,
+        isTiebreakerRound: Boolean(room.isTiebreakerRound),
         players,
       })
     })
@@ -1796,6 +1883,8 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
       room.status = 'LOBBY'
       room.countdownSeconds = null
       room.roundNumber = 1
+      room.isTiebreakerRound = false
+      room.isCupFinished = false
       for (const s of room.slots) {
         s.isReady = false
         s.cupPoints = 0

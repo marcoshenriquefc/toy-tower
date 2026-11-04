@@ -14,9 +14,14 @@ export type PiecePowerEffect =
   | 'TURBO_DROP'
   | 'CASTLE_ROOF'
 
-export type GameMode = 'RACE' | 'SURVIVAL'
+export type GameMode = 'RACE' | 'SURVIVAL' | 'PUZZLE' | 'ENDLESS'
 
-export type SelectableGameMode = 'RACE' | 'SURVIVAL' | 'RANDOM'
+export type SelectableGameMode =
+  | 'RACE'
+  | 'PUZZLE'
+  | 'SURVIVAL'
+  | 'ENDLESS'
+  | 'RANDOM'
 
 export type VictoryCondition = 'SINGLE_WIN' | 'CUP_6' | 'CUP_12'
 
@@ -28,6 +33,9 @@ export type MatchState =
   | 'RESPAWN_DELAY'
   | 'GOAL_COUNTDOWN'
   | 'ROOF_DROP'
+  | 'LASER_OVERLOAD'
+  | 'PETRIFIED_WAITING'
+  | 'PUZZLE_COUNTING'
   | 'VICTORY'
   | 'GAME_OVER'
 
@@ -50,12 +58,36 @@ export const GAME_CONSTANTS = {
   ISLAND_FRICTION: 0.8,
   /** Finish Line height in units above the top of the base plate */
   GOAL_HEIGHT_UNITS: 30,
+  /** Fixed Laser Beam height in units in Puzzle Mode ("Abaixo do Laser" - 9m) */
+  PUZZLE_LASER_HEIGHT_UNITS: 9,
+  /** Base rise increment in units whenever a piece falls in the water in Puzzle Mode (+0.5 block) */
+  PUZZLE_BASE_RISE_UNITS: 0.5,
+  /** Laser Overload countdown duration in ms before burning touching blocks and petrifying the rest (3.0 seconds) */
+  PUZZLE_LASER_OVERLOAD_MS: 3000,
+  /** Step interval in ms per block during the final bottom-to-top counting phase in Puzzle Mode */
+  PUZZLE_COUNT_STEP_MS: 210,
   /** Initial lives in Survival Mode (3 Hearts) */
   SURVIVAL_INITIAL_LIVES: 3,
   /** Target number of stabilized pieces to win Survival Mode */
   SURVIVAL_GOAL_PIECES: 50,
   /** Invulnerability duration in ms after losing a life in Survival Mode (3 seconds = 3000ms blinking stabilization window) */
   SURVIVAL_LIFE_LOSS_COOLDOWN_MS: 3000,
+  /** Hold time in ms at Checkpoint line in Endless Mode (1.5 seconds = 1500ms) */
+  ENDLESS_CHECKPOINT_HOLD_MS: 1500,
+  /** Vertical step in units when an Endless checkpoint is validated (+8m) */
+  ENDLESS_STEP_UNITS: 8,
+  /** Preparation time in ms before the Rising Abyss begins climbing in Multiplayer Endless Mode (5 seconds) */
+  ENDLESS_ABYSS_PREP_MS: 5000,
+  /** Base rising speed of the Abyss line in Multiplayer Endless Mode (0.4 blocks/second) */
+  ENDLESS_ABYSS_BASE_SPEED_UNITS_PER_SEC: 0.4,
+  /** Time in ms when Multiplayer Endless enters Overload ("ABISMO ACELERANDO!") phase (90 seconds) */
+  ENDLESS_OVERTIME_START_MS: 90000,
+  /** Interval in ms for each +25% speed step during Overload phase (15 seconds) */
+  ENDLESS_OVERTIME_STEP_MS: 15000,
+  /** Maximum match time in ms for Multiplayer Endless Mode before locking abyss & measuring highest tower (150 seconds) */
+  ENDLESS_MAX_MATCH_TIME_MS: 150000,
+  /** Consecutive pieces lost into the abyss that cause Game Over (collapse of active base) */
+  ENDLESS_MAX_CONSECUTIVE_FALLS: 5,
   /** Wind activation threshold in units above the base plate */
   WIND_START_HEIGHT_UNITS: 15,
   /** Checkpoint height interval in units (8m, 16m, 24m) */
@@ -64,8 +96,8 @@ export const GAME_CONSTANTS = {
   CHECKPOINT_HOLD_MS: 500,
   /** Grace window upon touching the piece below to allow a final sideways step or Socão (0.2 second = 200ms) */
   BOTTOM_TOUCH_GRACE_MS: 200,
-  /** Active piece always spawns 15 units above highest resting block (or base) so it drops from higher up */
-  SPAWN_OFFSET_UNITS: 15,
+  /** Active piece always spawns 16.5 units above highest resting block (or base) so it drops from higher up */
+  SPAWN_OFFSET_UNITS: 16.5,
   /** Hold time at Finish Line during GOAL_COUNTDOWN to win and spawn Castle Roof (3 seconds) */
   GOAL_HOLD_MS: 3000,
   /** Penalty delay when active controlled piece falls into abyss (1.0 second) */
@@ -136,6 +168,10 @@ export interface SettledBlockSnapshot {
   sleeping: boolean
   isStaticAnchor?: boolean
   isGlued?: boolean
+  isPetrified?: boolean
+  isLaserBurning?: boolean
+  isCountedHighlight?: boolean
+  countOrderNumber?: number
 }
 
 export interface FloatingIslandSnapshot {
@@ -172,6 +208,23 @@ export interface TowerSnapshot {
   maxTowerHeight: number
   elapsedTimeMs: number
   towerHeight: number
+  puzzleBaseRiseUnits?: number
+  puzzleLaserHeightUnits?: number
+  laserOverloadRemainingMs?: number | null
+  isPetrified?: boolean
+  countedPieces?: number
+  /** Endless Mode: current score (+1 per stabilized piece, -1 per piece lost below petrification line) */
+  endlessScore?: number
+  /** Endless Mode: current height (in units) of the Petrification / Abyss Line */
+  petrifyLineHeightUnits?: number
+  /** Endless Mode: height (in units) of the next Checkpoint flag line */
+  nextCheckpointHeightUnits?: number
+  /** Endless Mode: number of consecutive pieces lost into the abyss */
+  consecutiveAbyssFalls?: number
+  /** Endless Multiplayer: true when elapsedTimeMs >= 90s ("ABISMO ACELERANDO!") */
+  isAbyssOvertime?: boolean
+  /** Endless Multiplayer: remaining match time in ms before 150s max time tiebreaker */
+  abyssTimeRemainingMs?: number | null
   state: MatchState
   countdownRemainingMs: number
   goalCountdownMs: number | null

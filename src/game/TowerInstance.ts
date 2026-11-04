@@ -59,6 +59,10 @@ export interface TowerPieceEntity {
   settledAtMs: number
   isStaticAnchor?: boolean
   isGlued?: boolean
+  isPetrified?: boolean
+  isLaserBurning?: boolean
+  isCountedHighlight?: boolean
+  countOrderNumber?: number
 }
 
 export interface RemoteLaneRenderData {
@@ -81,6 +85,10 @@ export interface RemoteLaneRenderData {
   mascotCastAnimMs: number
   mascotCastCategory: 'POSITIVE' | 'NEGATIVE' | null
   lastLifeLostAtMs?: number
+  puzzleBaseRiseUnits?: number
+  isPetrified?: boolean
+  countedPieces?: number
+  laserOverloadRemainingMs?: number | null
 }
 
 export interface FallFeedbackCallout {
@@ -219,7 +227,7 @@ export interface DissolvingBrick {
   startX: number
   startY: number
   angle: number
-  reason: 'LATERAL' | 'WATER'
+  reason: 'LATERAL' | 'WATER' | 'LASER'
 }
 
 export type PieceAlteringPowerId =
@@ -308,6 +316,29 @@ export class TowerInstance {
   public countdownRemainingMs: number = GAME_CONSTANTS.START_COUNTDOWN_MS
   public respawnDelayRemainingMs: number = 0
   public goalCountdownMs: number | null = null
+
+  /** Puzzle Mode ("Abaixo do Laser" - 9m) state fields */
+  public puzzleBaseRiseUnits: number = 0
+  private pendingPuzzleBaseRiseUnits: number = 0
+  private puzzleBaseRiseTargetUnits: number = 0
+  private puzzleLaserBurnPhaseMs: number = 0
+  public laserOverloadRemainingMs: number | null = null
+  public isPetrified: boolean = false
+  public countedPieces: number = 0
+  private puzzleCountTimerMs: number = 0
+  private puzzleSortedCountPieces: TowerPieceEntity[] = []
+  private puzzlePostCountDelayMs: number = 0
+
+  /** Endless / Rising Abyss Mode ("Infinito / Abismo") state fields */
+  public endlessScore: number = 0
+  public consecutiveAbyssFalls: number = 0
+  public petrifyLineHeightUnits: number = 0
+  public targetPetrifyLineHeightUnits: number = 0
+  public nextEndlessCheckpointUnits: number = GAME_CONSTANTS.ENDLESS_STEP_UNITS
+  public endlessCheckpointsCount: number = 0
+  public isAbyssOvertime: boolean = false
+  public isAbyssMaxTimeLocked: boolean = false
+  private lastOvertimeStepNotified: number = -1
 
   public towerHeight: number = 0
   public windForce: number = 0 // -1.0 (left) to +1.0 (right)
@@ -442,6 +473,14 @@ export class TowerInstance {
     if (config.gameMode) {
       this.gameMode = config.gameMode
     }
+    if (this.gameMode === 'PUZZLE') {
+      this.inventoryPower = {
+        selfPower: 'SUPER_GLUE',
+        attackPower: null,
+        sourceCheckpoint: 0,
+      }
+      this.cameraCenterHeightUnits = 1.8
+    }
     this.onSnapshot = config.onSnapshot
     this.onEventBanner = config.onEventBanner
     this.onPowerCast = config.onPowerCast
@@ -467,11 +506,11 @@ export class TowerInstance {
 
   /**
    * Builds the Modular 8-Column Static Base (`Col 0` to `Col 7`, X from `-4u` to `+4u`):
-   * - Selects the terrain profile from `this.forcedBasePresetId` (if set in Dev Mode) or deterministically from `this.matchSeed`.
+   * - Selects the terrain profile from `this.forcedBasePresetId` (if set in Dev Mode) or deterministically from `this.matchSeed` and `this.gameMode`.
    * - Creates a compound static `this.baseBody` combining:
-   *   1. The solid Cottage Roof foundation floor (`Y = +1.0u` to `+2.0u`) under active columns (`elev >= -1`)
+   *   1. The solid foundation floor (`Y = +1.0u` to `+2.0u`) under active columns (`elev >= -1`)
    *      so `-1` holes act as 1-block-deep pits while `-2` void columns remain open abysses for smaller platforms.
-   *   2. Merged horizontal static rectangles for Layer `0` (`Y = 0..+1u`), Layer `1` (`Y = -1u..0`), and Layer `2` (`Y = -2u..-1u`)
+   *   2. Merged horizontal static rectangles for Layer `0` (`Y = 0..+1u`) up to `maxElev`
    *      according to `this.currentBasePreset.elevations`.
    */
   private initWorld(): void {
@@ -481,12 +520,14 @@ export class TowerInstance {
 
     this.currentBasePreset = this.forcedBasePresetId
       ? getBasePresetById(this.forcedBasePresetId)
-      : selectBasePresetForSeed(this.matchSeed)
+      : selectBasePresetForSeed(this.matchSeed, this.gameMode)
 
     const elevations = this.currentBasePreset.elevations
+    const maxElev = Math.max(2, ...elevations)
+    const riseOffsetPx = -this.puzzleBaseRiseUnits * u
     const partBodies: Matter.Body[] = []
 
-    // 1. Solid Cottage Roof floor under Layer 0 (from Y = +1.0u to +2.0u, centerY = +1.5u)
+    // 1. Solid foundation floor under Layer 0 (from Y = +1.0u to +2.0u, centerY = +1.5u)
     // Built only under columns where `elev >= -1` so `-1` acts as a 1-block-deep pit and `-2` is open abyss!
     let roofCol = 0
     while (roofCol < cols) {
@@ -502,7 +543,7 @@ export class TowerInstance {
         const centerX = (leftWorldX + rightWorldX) * 0.5
 
         partBodies.push(
-          Bodies.rectangle(centerX, 1.5 * u, spanCols * u, u, {
+          Bodies.rectangle(centerX, 1.5 * u + riseOffsetPx, spanCols * u, u, {
             isStatic: true,
             friction: 1.4,
             frictionStatic: 4.5,
@@ -515,8 +556,8 @@ export class TowerInstance {
       }
     }
 
-    // 2. Modular 1x1 Static Green Block Layers (r = 0: surface Y=0, r = 1: Y=-1u, r = 2: Y=-2u)
-    for (let r = 0; r <= 2; r++) {
+    // 2. Modular 1x1 Static Green Block Layers (r = 0: surface Y=0 up to r = maxElev)
+    for (let r = 0; r <= maxElev; r++) {
       let c = 0
       while (c < cols) {
         if ((elevations[c] ?? 0) >= r) {
@@ -533,7 +574,7 @@ export class TowerInstance {
           // r = 0 -> centerY = +0.5u (+16px, top at Y = 0)
           // r = 1 -> centerY = -0.5u (-16px, top at Y = -1u)
           // r = 2 -> centerY = -1.5u (-48px, top at Y = -2u)
-          const centerY = (0.5 - r) * u
+          const centerY = (0.5 - r) * u + riseOffsetPx
 
           // Slight lateral inset on exposed step walls so falling pieces slide past vertical steps without snagging
           const insetLeft =
@@ -699,6 +740,25 @@ export class TowerInstance {
     this.countdownRemainingMs = GAME_CONSTANTS.START_COUNTDOWN_MS
     this.respawnDelayRemainingMs = 0
     this.goalCountdownMs = null
+    this.puzzleBaseRiseUnits = 0
+    this.pendingPuzzleBaseRiseUnits = 0
+    this.puzzleBaseRiseTargetUnits = 0
+    this.puzzleLaserBurnPhaseMs = 0
+    this.laserOverloadRemainingMs = null
+    this.isPetrified = false
+    this.countedPieces = 0
+    this.puzzleCountTimerMs = 0
+    this.puzzleSortedCountPieces = []
+    this.puzzlePostCountDelayMs = 0
+    this.endlessScore = 0
+    this.consecutiveAbyssFalls = 0
+    this.petrifyLineHeightUnits = 0
+    this.targetPetrifyLineHeightUnits = 0
+    this.nextEndlessCheckpointUnits = GAME_CONSTANTS.ENDLESS_STEP_UNITS
+    this.endlessCheckpointsCount = 0
+    this.isAbyssOvertime = false
+    this.isAbyssMaxTimeLocked = false
+    this.lastOvertimeStepNotified = -1
     this.towerHeight = 0
     this.maxTowerHeight = 0
     this.lives = GAME_CONSTANTS.SURVIVAL_INITIAL_LIVES
@@ -716,11 +776,18 @@ export class TowerInstance {
     this.checkpointsReached = []
     this.checkpointHoldTarget = null
     this.checkpointHoldTimerMs = 0
-    this.inventoryPower = {
-      selfPower: null,
-      attackPower: null,
-      sourceCheckpoint: null,
-    }
+    this.inventoryPower =
+      this.gameMode === 'PUZZLE'
+        ? {
+            selfPower: 'SUPER_GLUE',
+            attackPower: null,
+            sourceCheckpoint: 0,
+          }
+        : {
+            selfPower: null,
+            attackPower: null,
+            sourceCheckpoint: null,
+          }
     this.pendingNextPiecePower = 'NONE'
     this.slickBrickRemaining = 0
     this.lockRotateRemaining = 0
@@ -752,7 +819,7 @@ export class TowerInstance {
     this.hasBottomSupportThisTick = false
     this.settlingTimerMs = 0
     this.snapshotAccumulatorMs = 0
-    this.cameraCenterHeightUnits = 0
+    this.cameraCenterHeightUnits = this.gameMode === 'PUZZLE' ? 1.8 : 0
     this.cameraZoom = 1.0
     this.mascotHoverXUnits = 6.2
     this.mascotHoverYUnits = 3.5
@@ -768,9 +835,10 @@ export class TowerInstance {
   }
 
   /**
-   * Updates the active game mode ('RACE' or 'SURVIVAL') and resets lives.
+   * Updates the active game mode ('RACE', 'SURVIVAL', 'PUZZLE', or 'ENDLESS') and resets mode-specific state.
    */
   public setGameMode(mode: GameMode): void {
+    const prevMode = this.gameMode
     this.gameMode = mode
     this.lives = GAME_CONSTANTS.SURVIVAL_INITIAL_LIVES
     this.maxLives = GAME_CONSTANTS.SURVIVAL_INITIAL_LIVES
@@ -779,6 +847,50 @@ export class TowerInstance {
     this.mascotFallReactionMs = 0
     this.fallFeedbackCallouts = []
     this.extraLifeBalloons = []
+    this.puzzleBaseRiseUnits = 0
+    this.pendingPuzzleBaseRiseUnits = 0
+    this.puzzleBaseRiseTargetUnits = 0
+    this.puzzleLaserBurnPhaseMs = 0
+    this.laserOverloadRemainingMs = null
+    this.isPetrified = false
+    this.countedPieces = 0
+    this.puzzleCountTimerMs = 0
+    this.puzzleSortedCountPieces = []
+    this.puzzlePostCountDelayMs = 0
+    this.endlessScore = 0
+    this.consecutiveAbyssFalls = 0
+    this.petrifyLineHeightUnits = 0
+    this.targetPetrifyLineHeightUnits = 0
+    this.nextEndlessCheckpointUnits = GAME_CONSTANTS.ENDLESS_STEP_UNITS
+    this.endlessCheckpointsCount = 0
+    this.isAbyssOvertime = false
+    this.isAbyssMaxTimeLocked = false
+    this.lastOvertimeStepNotified = -1
+    this.inventoryPower =
+      mode === 'PUZZLE'
+        ? {
+            selfPower: 'SUPER_GLUE',
+            attackPower: null,
+            sourceCheckpoint: 0,
+          }
+        : {
+            selfPower: null,
+            attackPower: null,
+            sourceCheckpoint: null,
+          }
+    if (mode === 'PUZZLE') {
+      this.cameraCenterHeightUnits = 1.8
+      this.windActive = false
+      this.windForce = 0
+    }
+    if (
+      prevMode !== mode &&
+      (mode === 'PUZZLE' || prevMode === 'PUZZLE') &&
+      this.baseBody
+    ) {
+      World.remove(this.engine.world, this.baseBody)
+      this.initWorld()
+    }
     this.emitSnapshotNow()
   }
 
@@ -1160,8 +1272,13 @@ export class TowerInstance {
     const u = GAME_CONSTANTS.UNIT_PX
     const basePeakUnits = Math.max(0, ...this.currentBasePreset.elevations)
     const spawnHeightUnits =
-      Math.max(basePeakUnits, this.towerHeight) +
-      GAME_CONSTANTS.SPAWN_OFFSET_UNITS
+      this.gameMode === 'PUZZLE'
+        ? Math.max(
+            GAME_CONSTANTS.PUZZLE_LASER_HEIGHT_UNITS + 6.5,
+            this.towerHeight + 5.5
+          )
+        : Math.max(basePeakUnits, this.towerHeight) +
+          GAME_CONSTANTS.SPAWN_OFFSET_UNITS
     const leftEdgeOffsetUnits = this.getCell0LeftEdgeOffsetUnits(piece, 0)
     const desiredLeftEdgeUnits = -1.0
     const spawnXUnits = desiredLeftEdgeUnits - leftEdgeOffsetUnits
@@ -2228,10 +2345,25 @@ export class TowerInstance {
       this.triggerSurvivalVictory()
       return
     }
+    if (this.gameMode === 'PUZZLE' && this.isPetrified) {
+      return
+    }
 
     const basePeakUnits = Math.max(0, ...this.currentBasePreset.elevations)
     const spawnHeightUnits =
-      Math.max(basePeakUnits, this.towerHeight) + GAME_CONSTANTS.SPAWN_OFFSET_UNITS
+      this.gameMode === 'PUZZLE'
+        ? Math.max(
+            GAME_CONSTANTS.PUZZLE_LASER_HEIGHT_UNITS + 6.5,
+            this.towerHeight + 5.5
+          )
+        : this.gameMode === 'ENDLESS'
+          ? Math.max(
+              basePeakUnits,
+              this.towerHeight,
+              this.petrifyLineHeightUnits + 4
+            ) + GAME_CONSTANTS.SPAWN_OFFSET_UNITS
+          : Math.max(basePeakUnits, this.towerHeight) +
+            GAME_CONSTANTS.SPAWN_OFFSET_UNITS
 
     const spec = this.randomizer.nextPiece()
     if (spec.variant === 'GIANT' && this.giantPieceRemaining > 0) {
@@ -2315,6 +2447,10 @@ export class TowerInstance {
         14
       )
       this.settledPieces.push(piece)
+      if (this.gameMode === 'ENDLESS') {
+        this.endlessScore += 1
+        this.consecutiveAbyssFalls = 0
+      }
       this.updateSettledBlocksAndHeight()
       this.onPieceSettled?.(this.towerHeight, this.settledPieces.length)
       this.state = 'SETTLING'
@@ -2357,6 +2493,10 @@ export class TowerInstance {
     this.evaluatePinSnapForPiece(piece)
 
     this.settledPieces.push(piece)
+    if (this.gameMode === 'ENDLESS') {
+      this.endlessScore += 1
+      this.consecutiveAbyssFalls = 0
+    }
     this.updateSettledBlocksAndHeight()
     this.onPieceSettled?.(this.towerHeight, this.settledPieces.length)
     this.state = 'SETTLING'
@@ -3922,6 +4062,28 @@ export class TowerInstance {
       return
     }
 
+    if (this.state === 'PUZZLE_COUNTING') {
+      this.updatePuzzleCountingPhase(dtMs)
+      this.updateCamera(dtMs)
+      this.updateNudgeEffects(dtMs)
+      this.tickSnapshots(dtMs)
+      return
+    }
+
+    if (this.state === 'PETRIFIED_WAITING') {
+      const allRemotesPetrified =
+        this.isSinglePlayer ||
+        this.remoteLanesToRender.length === 0 ||
+        this.remoteLanesToRender.every((r) => r.isPetrified || r.isEliminated)
+      if (allRemotesPetrified) {
+        this.startPuzzleCountingPhase()
+      }
+      this.updateCamera(dtMs)
+      this.updateNudgeEffects(dtMs)
+      this.tickSnapshots(dtMs)
+      return
+    }
+
     const clampedDt = Math.min(16.667, dtMs)
 
     // 1. Handle initial 3, 2, 1, GO! countdown
@@ -3942,12 +4104,19 @@ export class TowerInstance {
       )
     }
 
-    // 2. State Machine transitions (Note: GOAL_COUNTDOWN and ROOF_DROP pause normal piece spawning!)
+    // 1b. Smooth Earth-Rising animation in PUZZLE mode (+0.5 block when a piece falls in the water)
+    if (this.gameMode === 'PUZZLE' && this.pendingPuzzleBaseRiseUnits > 0.0001) {
+      this.updatePuzzleBaseRiseAnimation(clampedDt)
+    }
+
+    // 2. State Machine transitions (Note: GOAL_COUNTDOWN, LASER_OVERLOAD, and ROOF_DROP pause normal piece spawning!)
     if (this.state === 'SPAWNING') {
-      this.spawnNextPiece()
+      if (!this.isPuzzleWaitingForWaterOrBaseRise()) {
+        this.spawnNextPiece()
+      }
     } else if (this.state === 'SETTLING') {
       this.settlingTimerMs -= dtMs
-      if (this.settlingTimerMs <= 0) {
+      if (this.settlingTimerMs <= 0 && !this.isPuzzleWaitingForWaterOrBaseRise()) {
         this.state = 'SPAWNING'
       }
     } else if (this.state === 'RESPAWN_DELAY') {
@@ -3955,7 +4124,10 @@ export class TowerInstance {
         0,
         this.respawnDelayRemainingMs - dtMs
       )
-      if (this.respawnDelayRemainingMs <= 0) {
+      if (
+        this.respawnDelayRemainingMs <= 0 &&
+        !this.isPuzzleWaitingForWaterOrBaseRise()
+      ) {
         this.state = 'SPAWNING'
       }
     }
@@ -3978,12 +4150,14 @@ export class TowerInstance {
       (this.state === 'FALLING' || this.state === 'ROOF_DROP')
     ) {
       const body = this.activePiece.body
+      const isPausedForPuzzleRise =
+        this.gameMode === 'PUZZLE' && this.pendingPuzzleBaseRiseUnits > 0.0005
       const isRestingOnBottom =
         this.state === 'FALLING' &&
         (this.hasBottomSupportThisTick || this.isPieceSupportedBelow(body))
 
-      if (isRestingOnBottom) {
-        // Hold piece gently on top of the lower piece during the 0.5s (500ms) grace window
+      if (isRestingOnBottom || isPausedForPuzzleRise) {
+        // Hold piece gently during the 0.5s grace window or while the puzzle island is rising smoothly
         Body.setVelocity(body, { x: 0, y: 0 })
         Body.setAngularVelocity(body, 0)
         this.softDropTrail = []
@@ -4022,8 +4196,10 @@ export class TowerInstance {
       }
     }
 
-    // 4. Environmental Wind Gusts (active once tower reaches 15 units, continues during GOAL_COUNTDOWN!)
-    this.updateWind(clampedDt)
+    // 4. Environmental Wind Gusts (disabled in PUZZLE mode)
+    if (this.gameMode !== 'PUZZLE') {
+      this.updateWind(clampedDt)
+    }
 
     // 5. Step Matter.js 2D Physics Engine
     Engine.update(this.engine, clampedDt)
@@ -4073,11 +4249,15 @@ export class TowerInstance {
       this.landActivePiece()
     }
 
-    // 6. Check Abyss Falls, Pin Snaps, Tower Height, Checkpoints (with 0.5s hold), and Climax State Machine
+    // 6. Check Abyss Falls, Pin Snaps, Tower Height, Checkpoints (with 0.5s/1.5s hold), and Climax / Laser / Endless State Machine
     this.checkAbyssAndPrune()
     this.updateSettledBlocksAndHeight()
-    this.updateCheckpoints(dtMs)
-    this.updateGoalCountdown(dtMs)
+    if (this.gameMode === 'PUZZLE') {
+      this.updatePuzzleLaserAndOverload(dtMs)
+    } else {
+      this.updateCheckpoints(dtMs)
+      this.updateGoalCountdown(dtMs)
+    }
     this.updateCamera(dtMs)
     this.updateNudgeEffects(dtMs)
 
@@ -4685,12 +4865,48 @@ export class TowerInstance {
 
   /**
    * 2. Verifica todas as peças da torre a cada frame para sumir se invadirem a Zona de Desintegração Lateral
-   * (`KILL_ZONE_X = ±7.5` unidades) ou caírem na água lá embaixo (`KILL_LIMIT_Y` / Abismo).
+   * (`KILL_ZONE_X = ±8.5` unidades) ou caírem na água / abaixo da Linha de Petrificação (`petrifyLineY` no modo ENDLESS).
+   * Também realiza Garbage Collection de blocos estáticos muito abaixo da câmera para manter 60fps com 500+ peças.
    */
   private checkAbyssAndPrune(): void {
     const u = GAME_CONSTANTS.UNIT_PX
-    const abyssPhysY = 4.5 * u
-    const waterSurfaceY = 2.8 * u
+    const isEndlessWithAbyss =
+      this.gameMode === 'ENDLESS' && this.petrifyLineHeightUnits > 0.1
+    const petrifyWorldY = -this.petrifyLineHeightUnits * u
+    const abyssPhysY = isEndlessWithAbyss
+      ? Math.min(4.5 * u, petrifyWorldY + 1.15 * u)
+      : 4.5 * u
+    const waterSurfaceY = isEndlessWithAbyss
+      ? Math.min(2.8 * u, petrifyWorldY + 0.25 * u)
+      : 2.8 * u
+
+    // Garbage Collection (Limpeza de Memória no modo ENDLESS):
+    // Qualquer bloco estático totalmente abaixo da borda inferior da câmera (cameraBottomY + 150px)
+    // é removido do mundo físico para rodar liso mesmo com 500+ peças no SCORE!
+    if (this.gameMode === 'ENDLESS' && this.cameraCenterHeightUnits > 8) {
+      const cameraBottomWorldY =
+        -(this.cameraCenterHeightUnits - 6.5) * u + 150
+      for (let i = this.settledPieces.length - 1; i >= 0; i--) {
+        const piece = this.settledPieces[i]
+        const body = piece.body
+        if (body.isStatic && body.bounds.min.y > cameraBottomWorldY) {
+          for (let j = this.glueWeldLinks.length - 1; j >= 0; j--) {
+            const link = this.glueWeldLinks[j]
+            if (link.bodyA === body || link.bodyB === body) {
+              this.glueWeldLinks.splice(j, 1)
+            }
+          }
+          for (let j = this.glueVines.length - 1; j >= 0; j--) {
+            const v = this.glueVines[j]
+            if (v.bodyA === body || v.bodyB === body) {
+              this.glueVines.splice(j, 1)
+            }
+          }
+          World.remove(this.engine.world, body)
+          this.settledPieces.splice(i, 1)
+        }
+      }
+    }
 
     if (this.activePiece && this.activePiece.body.position.y > abyssPhysY) {
       // If the Castle Roof in ROOF_DROP somehow missed the tower completely, snap it onto the top of the tower and win!
@@ -4708,13 +4924,30 @@ export class TowerInstance {
       }
 
       const activeLocalX = this.activePiece.body.position.x - this.offsetX
-      this.spawnWaterSplashParticles(activeLocalX, waterSurfaceY)
+      if (this.gameMode === 'ENDLESS') {
+        this.activePiece.isStaticAnchor = true
+        this.dissolvingBricks.push({
+          body: this.activePiece.body,
+          piece: this.activePiece,
+          progress: 0,
+          ageMs: 0,
+          durationMs: 280,
+          startX: activeLocalX,
+          startY: this.activePiece.body.position.y,
+          angle: this.activePiece.body.angle,
+          reason: 'WATER',
+        })
+        this.spawnColoredBurst(activeLocalX, waterSurfaceY, '#475569', 10)
+      } else {
+        this.spawnWaterSplashParticles(activeLocalX, waterSurfaceY)
+      }
 
       World.remove(this.engine.world, this.activePiece.body)
       this.activePiece = null
       this.isSoftDropping = false
       this.state = 'RESPAWN_DELAY'
-      this.respawnDelayRemainingMs = GAME_CONSTANTS.RESPAWN_PENALTY_MS
+      this.respawnDelayRemainingMs =
+        this.gameMode === 'PUZZLE' ? 280 : GAME_CONSTANTS.RESPAWN_PENALTY_MS
       this.handleSurvivalOrRaceLifeLoss('ACTIVE_WATER', activeLocalX, waterSurfaceY)
     }
 
@@ -4726,13 +4959,17 @@ export class TowerInstance {
       const piece = this.settledPieces[i]
       const body = piece.body
 
-      // Ignora a base estática, ilhas flutuantes e blocos-âncora estáticos
+      // Ignora a base estática, ilhas flutuantes e blocos-âncora/petrificados estáticos
       if (body.isStatic) continue
 
       const localX = body.position.x - this.offsetX
       const outLeft = localX < -this.KILL_LIMIT_X
       const outRight = localX > this.KILL_LIMIT_X
-      const outBottom = body.position.y > abyssPhysY
+      const outBottom =
+        body.position.y > 4.5 * u ||
+        (isEndlessWithAbyss &&
+          body.position.y > abyssPhysY &&
+          body.velocity.y > 0.35)
 
       if (outLeft || outRight || outBottom) {
         for (let j = this.glueWeldLinks.length - 1; j >= 0; j--) {
@@ -4746,6 +4983,11 @@ export class TowerInstance {
           if (v.bodyA === body || v.bodyB === body) {
             this.glueVines.splice(j, 1)
           }
+        }
+
+        // No modo ENDLESS, peça solta que cai abaixo de petrifyLineY é pintada de cinza escuro, perde colisão e despenca no abismo!
+        if (this.gameMode === 'ENDLESS') {
+          piece.isStaticAnchor = true
         }
 
         // A. Desativa a colisão imediatamente e remove do mundo físico para não interferir em mais nada
@@ -4766,7 +5008,7 @@ export class TowerInstance {
           reason: outBottom ? 'WATER' : 'LATERAL',
         })
 
-        // C. Efeito de partículas: estrelinhas/poeira na borda lateral ou splash na água
+        // C. Efeito de partículas: estrelinhas/poeira na borda lateral ou splash na água/abismo
         if (outLeft || outRight) {
           this.spawnVaporizeParticles(
             localX,
@@ -4774,7 +5016,11 @@ export class TowerInstance {
             outLeft ? -1 : 1
           )
         } else if (outBottom) {
-          this.spawnWaterSplashParticles(localX, waterSurfaceY)
+          if (this.gameMode === 'ENDLESS') {
+            this.spawnColoredBurst(localX, waterSurfaceY, '#475569', 10)
+          } else {
+            this.spawnWaterSplashParticles(localX, waterSurfaceY)
+          }
         }
 
         settledLostReason = outBottom ? 'SETTLED_WATER' : 'SETTLED_LATERAL'
@@ -4793,25 +5039,63 @@ export class TowerInstance {
   }
 
   /**
-   * Handles life deduction, 3-second blinking invulnerability, white flash feedback,
+   * Handles life/score deduction, 3-second blinking invulnerability, white flash feedback,
    * and Wizard shock reaction when a piece falls into the abyss or disintegrates laterally.
-   * - In `RACE` mode: triggers white flash + Wizard shock reaction + floating callout (`⚠️ PEÇA CAIU!`),
-   *   and active piece abyss drops apply the +1.0s respawn penalty banner.
-   * - In `SURVIVAL` mode:
-   *   - If `this.invulnerableRemainingMs > 0` (player is blinking invulnerable during the 3-second
-   *     stabilization window), NO life is lost and a `"🛡️ INVULNERÁVEL!"` deflection callout is shown.
-   *   - Otherwise, deducts 1 heart, triggers a 3-second (`3000ms`) blinking invulnerability window,
-   *     flashes the player & tower in bright white, triggers the Wizard's panic reaction, and spawns
-   *     a dramatic `"💔 -1 VIDA! • 🛡️ 3.0s INVULNERÁVEL"` callout.
    */
   private handleSurvivalOrRaceLifeLoss(
     reason: 'ACTIVE_WATER' | 'SETTLED_WATER' | 'SETTLED_LATERAL',
     dropLocalX: number = 0,
     dropLocalY: number = 0
   ): void {
+    if (this.gameMode === 'PUZZLE') {
+      this.handlePuzzleWaterDrop(reason, dropLocalX, dropLocalY)
+      return
+    }
+
     const u = GAME_CONSTANTS.UNIT_PX
     const calloutStartX = Math.max(-5.5 * u, Math.min(5.5 * u, dropLocalX))
     const calloutStartY = Math.min(-1.2 * u, dropLocalY - 1.2 * u)
+
+    if (this.gameMode === 'ENDLESS') {
+      if (this.state === 'GAME_OVER' || this.state === 'VICTORY') return
+
+      this.endlessScore = Math.max(0, this.endlessScore - 1)
+      this.consecutiveAbyssFalls += 1
+      this.fallWhiteFlashMs = 740
+      this.mascotFallReactionMs = 2100
+      this.shakeTimerMs = 190
+      this.lastFallFeedbackAtMs = this.elapsedTimeMs
+      this.playCountdownAbortedBuzzer()
+      this.spawnColoredBurst(calloutStartX, dropLocalY, '#94A3B8', 12)
+      this.fallFeedbackCallouts.push({
+        x: calloutStartX,
+        y: calloutStartY,
+        startY: calloutStartY,
+        title: '🪨 -1 PONTO NO ABISMO!',
+        subtitle: `QUEDAS SEGUIDAS: ${this.consecutiveAbyssFalls}/${GAME_CONSTANTS.ENDLESS_MAX_CONSECUTIVE_FALLS}`,
+        tone: 'LIFE_LOSS',
+        ageMs: 0,
+        maxAgeMs: 1550,
+      })
+      this.onLifeLost?.()
+
+      if (
+        this.consecutiveAbyssFalls >=
+        GAME_CONSTANTS.ENDLESS_MAX_CONSECUTIVE_FALLS
+      ) {
+        this.triggerEndlessGameOver(
+          'COLAPSO DA BASE ATIVA (5 PEÇAS PERDIDAS SEGUIDAS NO ABISMO)!'
+        )
+        return
+      }
+
+      this.onEventBanner?.(
+        `🪨 -1 Ponto! Peça caiu no Abismo (Score: ${this.endlessScore} • Quedas seguidas: ${this.consecutiveAbyssFalls}/${GAME_CONSTANTS.ENDLESS_MAX_CONSECUTIVE_FALLS})`,
+        'danger'
+      )
+      this.emitSnapshotNow()
+      return
+    }
 
     if (this.gameMode === 'RACE') {
       if (reason === 'ACTIVE_WATER') {
@@ -4930,6 +5214,254 @@ export class TowerInstance {
   }
 
   /**
+   * Ends the match in `ENDLESS` mode (either from losing 5 pieces in a row into the abyss
+   * or having 100% of the tower swallowed below the Rising Abyss line).
+   */
+  public triggerEndlessGameOver(reasonMessage: string): void {
+    if (this.state === 'GAME_OVER' || this.state === 'VICTORY') return
+
+    this.updateSettledBlocksAndHeight()
+    this.lives = 0
+    const finalScore = this.endlessScore
+    this.survivalFinalPiecesCount = finalScore
+
+    if (this.activePiece) {
+      const lx = this.activePiece.body.position.x - this.offsetX
+      const ly = this.activePiece.body.position.y
+      this.spawnMagicSmokePoof(lx, ly)
+      World.remove(this.engine.world, this.activePiece.body)
+      this.activePiece = null
+    }
+    if (this.heldActivePiece) {
+      World.remove(this.engine.world, this.heldActivePiece.body)
+      this.heldActivePiece = null
+    }
+
+    this.pieceRecallAnim = null
+    this.extraLifeBalloons = []
+    this.isSoftDropping = false
+    this.pendingLandPiece = false
+    this.goalCountdownMs = null
+    this.state = 'GAME_OVER'
+
+    this.emitSnapshotNow()
+    this.onGameOver?.(
+      this.elapsedTimeMs,
+      this.maxTowerHeight,
+      finalScore
+    )
+    this.onEventBanner?.(
+      `💀 FIM DE JOGO! ${reasonMessage} • SCORE FINAL: ${finalScore} • Altura Máx: ${this.maxTowerHeight.toFixed(1)}m`,
+      'danger'
+    )
+  }
+
+  /**
+   * Endless / Rising Abyss Mode ("Infinito / Abismo") per-tick state machine:
+   * - Singleplayer: 3 moving vertical zones (Zone 1: Petrification Line `petrifyLineY`, Zone 2: Active Construction Zone,
+   *   Zone 3: Checkpoint Flags `nextEndlessCheckpointUnits` with 1.5s hold that advances +8m and grants 1 Positive Power).
+   * - Multiplayer ("Abismo Ascendente"): After 5s preparation, `petrifyLineY` rises continuously at 0.4 blocks/sec,
+   *   entering Overload ("ABISMO ACELERANDO!") at 90s (+25% speed every 15s) and locking at 150s (2m30s) to declare
+   *   the surviving player with the highest tower as winner!
+   */
+  private updateEndlessMode(dtMs: number): void {
+    if (
+      this.state === 'GAME_OVER' ||
+      this.state === 'VICTORY' ||
+      this.state === 'ROOF_DROP' ||
+      this.state === 'COUNTDOWN'
+    ) {
+      return
+    }
+
+    const u = GAME_CONSTANTS.UNIT_PX
+    const isMultiplayer =
+      !this.isSinglePlayer && this.remoteLanesToRender.length > 0
+
+    // 1. Update Petrification / Rising Abyss Line height (`petrifyLineHeightUnits`)
+    if (isMultiplayer) {
+      if (this.elapsedTimeMs >= GAME_CONSTANTS.ENDLESS_MAX_MATCH_TIME_MS) {
+        if (!this.isAbyssMaxTimeLocked) {
+          this.isAbyssMaxTimeLocked = true
+          // Compare highest stabilized tower among surviving players at the 150s final whistle!
+          const aliveRemotes = this.remoteLanesToRender.filter(
+            (r) => !r.isEliminated && r.lives > 0
+          )
+          const maxRemoteHeight = aliveRemotes.reduce(
+            (max, r) => Math.max(max, r.towerHeight),
+            0
+          )
+          if (this.towerHeight >= maxRemoteHeight) {
+            this.onEventBanner?.(
+              `⏱️ TEMPO LIMITE (2m30s)! Feixe de Medição: SUA TORRE É A MAIS ALTA (${this.towerHeight.toFixed(1)}m)!`,
+              'success'
+            )
+            this.triggerSurvivalCastleClimax()
+          } else {
+            this.triggerEndlessGameOver(
+              `TEMPO LIMITE (2m30s)! Torre mais alta adversária: ${maxRemoteHeight.toFixed(1)}m`
+            )
+          }
+          return
+        }
+      } else if (this.elapsedTimeMs >= GAME_CONSTANTS.ENDLESS_ABYSS_PREP_MS) {
+        let speedUnitsPerSec =
+          GAME_CONSTANTS.ENDLESS_ABYSS_BASE_SPEED_UNITS_PER_SEC
+        if (this.elapsedTimeMs >= GAME_CONSTANTS.ENDLESS_OVERTIME_START_MS) {
+          this.isAbyssOvertime = true
+          const overtimeStep = Math.floor(
+            (this.elapsedTimeMs - GAME_CONSTANTS.ENDLESS_OVERTIME_START_MS) /
+              GAME_CONSTANTS.ENDLESS_OVERTIME_STEP_MS
+          )
+          speedUnitsPerSec *= Math.pow(1.25, overtimeStep + 1)
+          if (overtimeStep > this.lastOvertimeStepNotified) {
+            this.lastOvertimeStepNotified = overtimeStep
+            const pctBoost = Math.round((Math.pow(1.25, overtimeStep + 1) - 1) * 100)
+            this.onEventBanner?.(
+              `⚡ ABISMO ACELERANDO! Velocidade de subida +${pctBoost}%!`,
+              'danger'
+            )
+          }
+        }
+        this.targetPetrifyLineHeightUnits += speedUnitsPerSec * (dtMs / 1000)
+        this.petrifyLineHeightUnits = this.targetPetrifyLineHeightUnits
+      }
+    } else {
+      // Singleplayer: smooth lerp toward targetPetrifyLineHeightUnits (+8m per checkpoint)
+      this.petrifyLineHeightUnits +=
+        (this.targetPetrifyLineHeightUnits - this.petrifyLineHeightUnits) *
+        Math.min(1, dtMs * 0.0045)
+    }
+
+    // 2. Herança de Terreno (Dynamic Petrification below petrifyLineY):
+    // Any settled piece whose center of mass (body.position.y) falls below petrifyLineY is frozen at its exact angle
+    // (Body.setStatic(body, true)), receiving gray stone texture (isStaticAnchor = true).
+    if (this.petrifyLineHeightUnits > 0.05) {
+      const petrifyWorldY = -this.petrifyLineHeightUnits * u
+      for (const piece of this.settledPieces) {
+        const body = piece.body
+        if (body.isStatic) continue
+        if (body.position.y >= petrifyWorldY && body.velocity.y <= 1.6) {
+          Body.setVelocity(body, { x: 0, y: 0 })
+          Body.setAngularVelocity(body, 0)
+          Body.setStatic(body, true)
+          piece.isStaticAnchor = true
+          piece.isPetrified = true
+          piece.snapped = true
+          this.spawnColoredBurst(
+            body.position.x - this.offsetX,
+            body.position.y,
+            '#94A3B8',
+            5
+          )
+        }
+      }
+    }
+
+    this.updateSettledBlocksAndHeight()
+
+    // 3. Eliminação Instantânea (Totalmente Consumido pelo Abismo):
+    // Se a linha do abismo já subiu acima da ilha inicial (>= 2.2m) e 100% dos blocos da torre ficaram abaixo da linha
+    // (sem nenhuma superfície no topo acima da linha para apoiar a próxima peça), o jogador é eliminado!
+    if (
+      this.petrifyLineHeightUnits >= 2.2 &&
+      this.towerHeight < this.petrifyLineHeightUnits - 0.15
+    ) {
+      this.triggerEndlessGameOver(
+        isMultiplayer
+          ? 'ENGOLIDO PELA NÉVOA DO ABISMO ASCENDENTE!'
+          : 'COLAPSO TOTAL DA BASE ATIVA ABAIXO DA LINHA DE PETRIFICAÇÃO!'
+      )
+      return
+    }
+
+    // 4. Zona 3 — As Bandeiras de Checkpoint (1.5s = 1500ms hold):
+    const cp = this.nextEndlessCheckpointUnits
+    if (this.towerHeight >= cp) {
+      if (this.checkpointHoldTarget !== cp) {
+        this.checkpointHoldTarget = cp
+        this.checkpointHoldTimerMs = 0
+      }
+      this.checkpointHoldTimerMs += dtMs
+
+      if (
+        this.checkpointHoldTimerMs >= GAME_CONSTANTS.ENDLESS_CHECKPOINT_HOLD_MS
+      ) {
+        this.checkpointsReached.push(cp)
+        this.endlessCheckpointsCount += 1
+        this.checkpointHoldTarget = null
+        this.checkpointHoldTimerMs = 0
+
+        this.checkpointConsumeEffects.push({
+          heightUnits: cp,
+          ageMs: 0,
+          maxAgeMs: 950,
+        })
+        for (let x = -160; x <= 160; x += 32) {
+          this.spawnColoredBurst(x, -cp * u, '#38BDF8', 4)
+        }
+
+        // Advance checkpointLineY by +8m; in Singleplayer also advance petrifyLineY by +8m!
+        this.nextEndlessCheckpointUnits = cp + GAME_CONSTANTS.ENDLESS_STEP_UNITS
+        if (!isMultiplayer) {
+          this.targetPetrifyLineHeightUnits = Math.max(
+            0,
+            this.nextEndlessCheckpointUnits - 9.5
+          )
+        }
+
+        // Grant 1 Positive Power in the mascot's bubble (BRICK_REMOVER, STATIC_BRICK, SUPER_GLUE, or SIDE_ISLAND)
+        const excludePositive: PowerId[] = ['EXTRA_LIFE']
+        if (this.hasSpawnedSideIsland) excludePositive.push('SIDE_ISLAND')
+        const rolled = rollCheckpointPowers(
+          !isMultiplayer,
+          () => this.randomizer.nextFloat(),
+          excludePositive
+        )
+        this.inventoryPower = {
+          selfPower: rolled.selfPower.id,
+          attackPower: rolled.attackPower ? rolled.attackPower.id : null,
+          sourceCheckpoint: cp,
+        }
+
+        // Every 3 checkpoints, trigger a light weather event (lateral wind gust or occasional ice/giant piece)
+        let weatherSuffix = ''
+        if (this.endlessCheckpointsCount % 3 === 0) {
+          if (this.randomizer.nextFloat() < 0.5) {
+            this.windActive = true
+            weatherSuffix = ' • 💨 Rajada de Vento Lateral Ativa!'
+          } else if (this.randomizer.nextFloat() < 0.5) {
+            this.slickBrickRemaining = Math.max(this.slickBrickRemaining, 1)
+            weatherSuffix = ' • 🧊 Clima Glacial (Peça de Gelo)!'
+          } else {
+            const stableGiantTypes: PieceType[] = ['I', 'O', 'T', 'L', 'J']
+            const gType =
+              stableGiantTypes[
+                Math.floor(this.randomizer.nextFloat() * stableGiantTypes.length)
+              ]
+            this.giantPieceRemaining = Math.max(this.giantPieceRemaining, 1)
+            this.randomizer.enqueueCustomPiece({
+              type: gType,
+              variant: 'GIANT',
+              label: `🦣 Anomalia Climática: Mega-Bloco 2x "${gType}"!`,
+            })
+            weatherSuffix = ' • 🦣 Anomalia Climática (Peça Gigante)!'
+          }
+        }
+
+        this.onEventBanner?.(
+          `🚩 Checkpoint ${cp}m validado! Base petrificada (+8m) • Poder: [Espaço] ${rolled.selfPower.icon} ${rolled.selfPower.shortName}${weatherSuffix}`,
+          'success'
+        )
+        this.emitSnapshotNow()
+      }
+    } else {
+      this.checkpointHoldTarget = null
+      this.checkpointHoldTimerMs = 0
+    }
+  }
+
+  /**
    * Transitions the instance into `GAME_OVER` when all 3 lives are lost in `SURVIVAL` mode.
    * All active and settled pieces dissolve/disappear cleanly.
    */
@@ -5041,6 +5573,573 @@ export class TowerInstance {
    */
   public triggerSurvivalVictory(): void {
     this.triggerSurvivalCastleClimax()
+  }
+
+  /**
+   * Puzzle Mode ("Abaixo do Laser") Water Drop Penalty (`+0.5 Bloco na Base`):
+   * Whenever an active or settled piece falls into the water (or disintegrates laterally),
+   * queues a smooth `+0.5` block (`16px`) upward rise of the player's narrow island base toward the `9m` laser,
+   * animating the earth and all stacked pieces smoothly before the next falling block spawns!
+   */
+  private handlePuzzleWaterDrop(
+    reason: 'ACTIVE_WATER' | 'SETTLED_WATER' | 'SETTLED_LATERAL',
+    dropLocalX: number = 0,
+    dropLocalY: number = 0
+  ): void {
+    // Ao queimar uma peça no laser (LASER_OVERLOAD ou após), a torre/base NÃO pode mais subir mesmo se cair alguma peça na água!
+    if (
+      this.isPetrified ||
+      this.state === 'LASER_OVERLOAD' ||
+      this.puzzleLaserBurnPhaseMs > 0 ||
+      this.laserOverloadRemainingMs !== null ||
+      this.state === 'PETRIFIED_WAITING' ||
+      this.state === 'PUZZLE_COUNTING' ||
+      this.state === 'VICTORY' ||
+      this.state === 'GAME_OVER'
+    ) {
+      return
+    }
+
+    const u = GAME_CONSTANTS.UNIT_PX
+    const riseUnits = GAME_CONSTANTS.PUZZLE_BASE_RISE_UNITS // 0.5 block
+
+    this.puzzleBaseRiseTargetUnits = Number(
+      (this.puzzleBaseRiseTargetUnits + riseUnits).toFixed(2)
+    )
+    this.pendingPuzzleBaseRiseUnits = Math.max(
+      0,
+      this.puzzleBaseRiseTargetUnits - this.puzzleBaseRiseUnits
+    )
+
+    // Hold the next block spawn until the smooth earth-rising animation finishes!
+    if (
+      !this.activePiece &&
+      (this.state === 'SPAWNING' ||
+        this.state === 'SETTLING' ||
+        this.state === 'RESPAWN_DELAY')
+    ) {
+      this.state = 'RESPAWN_DELAY'
+      this.respawnDelayRemainingMs = Math.max(this.respawnDelayRemainingMs, 660)
+    }
+
+    const calloutStartX = Math.max(-5.5 * u, Math.min(5.5 * u, dropLocalX))
+    const calloutStartY = Math.min(-1.2 * u, dropLocalY - 1.2 * u)
+
+    this.fallWhiteFlashMs = 680
+    this.mascotFallReactionMs = 1950
+    this.shakeTimerMs = 190
+    this.lastFallFeedbackAtMs = this.elapsedTimeMs
+    this.playCountdownAbortedBuzzer()
+    this.spawnColoredBurst(calloutStartX, dropLocalY, '#38BDF8', 12)
+    this.spawnColoredBurst(calloutStartX, dropLocalY, '#EF4444', 8)
+
+    this.fallFeedbackCallouts.push({
+      x: calloutStartX,
+      y: calloutStartY,
+      startY: calloutStartY,
+      title: '🌊 +0.5 BLOCO NA BASE!',
+      subtitle: `ILHA SUBINDO (+${this.puzzleBaseRiseTargetUnits.toFixed(1)}m) → LASER!`,
+      tone: 'PIECE_DROP',
+      ageMs: 0,
+      maxAgeMs: 1550,
+    })
+
+    this.onLifeLost?.()
+    const dropLabel =
+      reason === 'ACTIVE_WATER' ? 'Peça caiu na água!' : 'Bloco caiu na água!'
+    this.onEventBanner?.(
+      `🌊 ${dropLabel} Sua ilha está subindo +0.5 bloco (+${this.puzzleBaseRiseTargetUnits.toFixed(1)}m) em direção ao Laser (9m)!`,
+      'warning'
+    )
+
+    this.emitSnapshotNow()
+  }
+
+  /**
+   * Smoothly animates the island base (`this.baseBody`), floating side islands, and all settled blocks
+   * upward when `pendingPuzzleBaseRiseUnits > 0` before the next piece spawns.
+   */
+  private updatePuzzleBaseRiseAnimation(dtMs: number): void {
+    // Se já queimou peça no laser, trava imediatamente qualquer subida da base/torre
+    if (
+      this.isPetrified ||
+      this.state === 'LASER_OVERLOAD' ||
+      this.puzzleLaserBurnPhaseMs > 0 ||
+      this.laserOverloadRemainingMs !== null ||
+      this.state === 'PETRIFIED_WAITING' ||
+      this.state === 'PUZZLE_COUNTING' ||
+      this.state === 'VICTORY'
+    ) {
+      this.pendingPuzzleBaseRiseUnits = 0
+      this.puzzleBaseRiseTargetUnits = Number(
+        this.puzzleBaseRiseUnits.toFixed(2)
+      )
+      return
+    }
+
+    if (this.pendingPuzzleBaseRiseUnits <= 0.0001) return
+
+    const u = GAME_CONSTANTS.UNIT_PX
+    const speedMult = Math.max(
+      0.7,
+      Math.min(1.65, this.pendingPuzzleBaseRiseUnits / 0.32)
+    )
+    const stepUnits = Math.min(
+      this.pendingPuzzleBaseRiseUnits,
+      (GAME_CONSTANTS.PUZZLE_BASE_RISE_UNITS / 580) * dtMs * speedMult
+    )
+    const deltaY = -stepUnits * u
+
+    this.puzzleBaseRiseUnits += stepUnits
+    this.pendingPuzzleBaseRiseUnits = Math.max(
+      0,
+      this.pendingPuzzleBaseRiseUnits - stepUnits
+    )
+
+    if (this.pendingPuzzleBaseRiseUnits <= 0.0008) {
+      this.puzzleBaseRiseUnits = this.puzzleBaseRiseTargetUnits
+      this.pendingPuzzleBaseRiseUnits = 0
+    }
+
+    if (this.baseBody) {
+      Body.setPosition(this.baseBody, {
+        x: this.baseBody.position.x,
+        y: this.baseBody.position.y + deltaY,
+      })
+    }
+    for (const isl of this.islands) {
+      Body.setPosition(isl.body, {
+        x: isl.body.position.x,
+        y: isl.body.position.y + deltaY,
+      })
+      isl.y = Number((isl.y + stepUnits).toFixed(3))
+    }
+    for (const p of this.settledPieces) {
+      this.setBodyPositionClean(
+        p.body,
+        p.body.position.x,
+        p.body.position.y + deltaY
+      )
+    }
+
+    // Subtle rising water/earth foam particles at the base while the island smoothly rises
+    if (Math.random() < 0.38) {
+      const rx = (Math.random() - 0.5) * 4.2 * u
+      const ry = (0.8 - this.puzzleBaseRiseUnits) * u
+      this.impactParticles.push({
+        x: rx,
+        y: ry,
+        vx: (Math.random() - 0.5) * 1.4,
+        vy: -0.6 - Math.random() * 1.1,
+        radius: 2.0 + Math.random() * 2.2,
+        ageMs: 0,
+        maxAgeMs: 220 + Math.random() * 90,
+        kind: 'spark',
+        color: Math.random() < 0.6 ? '#38BDF8' : '#86EFAC',
+      })
+    }
+
+    this.updateSettledBlocksAndHeight()
+  }
+
+  /**
+   * Returns `true` in `PUZZLE` mode while the island earth is still smoothly rising (`pendingPuzzleBaseRiseUnits > 0`)
+   * or while an unbalanced block is actively plummeting below the island toward the water, so the next block only
+   * spawns AFTER the earth finishes its smooth upward animation!
+   */
+  private isPuzzleWaitingForWaterOrBaseRise(): boolean {
+    if (this.gameMode !== 'PUZZLE') return false
+    if (this.pendingPuzzleBaseRiseUnits > 0.0005) return true
+
+    const u = GAME_CONSTANTS.UNIT_PX
+    const baseBottomThresholdY = (0.75 - this.puzzleBaseRiseUnits) * u
+    for (const p of this.settledPieces) {
+      if (p.body.isStatic) continue
+      if (p.body.position.y > baseBottomThresholdY && p.body.velocity.y > 1.05) {
+        return true
+      }
+    }
+    return false
+  }
+
+  /**
+   * Immediately shines and burns a settled piece that touched the 9m laser line,
+   * removing it from the physics world and starting its bright incandescent laser disintegration.
+   */
+  private burnSettledPieceInLaser(indexInSettled: number): void {
+    const piece = this.settledPieces[indexInSettled]
+    if (!piece) return
+    const body = piece.body
+
+    for (let j = this.glueWeldLinks.length - 1; j >= 0; j--) {
+      const link = this.glueWeldLinks[j]
+      if (link.bodyA === body || link.bodyB === body) {
+        this.glueWeldLinks.splice(j, 1)
+      }
+    }
+    for (let j = this.glueVines.length - 1; j >= 0; j--) {
+      const v = this.glueVines[j]
+      if (v.bodyA === body || v.bodyB === body) {
+        this.glueVines.splice(j, 1)
+      }
+    }
+
+    const localX = body.position.x - this.offsetX
+    const localY = body.position.y
+    piece.isLaserBurning = true
+    body.isSensor = true
+    World.remove(this.engine.world, body)
+    this.settledPieces.splice(indexInSettled, 1)
+
+    this.dissolvingBricks.push({
+      body,
+      piece,
+      progress: 0,
+      ageMs: 0,
+      durationMs: 440,
+      startX: localX,
+      startY: localY,
+      angle: body.angle,
+      reason: 'LASER',
+    })
+
+    // Intense incandescent flash + sparks at the laser burn point
+    this.spawnColoredBurst(localX, localY, '#FFFFFF', 10)
+    this.spawnColoredBurst(localX, localY, '#FEF08A', 12)
+    this.spawnColoredBurst(localX, localY, '#EF4444', 14)
+    this.impactParticles.push({
+      x: localX,
+      y: localY,
+      vx: 0,
+      vy: 0,
+      radius: 16,
+      ageMs: 0,
+      maxAgeMs: 320,
+      kind: 'ring',
+    })
+    this.shakeTimerMs = 190
+    this.playCountdownAbortedBuzzer()
+  }
+
+  /**
+   * Puzzle Mode ("Abaixo do Laser" - 9m) Laser Contact, Instant Burn, 3-Second Post-Burn Countdown & Petrification:
+   * 1. Active falling pieces (`this.activePiece`) pass through the `9m` laser beam freely while controlled.
+   * 2. If a placed/settled piece (`this.settledPieces`) touches or crosses the `9m` laser line, it INSTANTLY
+   *    shines brightly and burns (`burnSettledPieceInLaser` over `440ms`).
+   * 3. The 3-second countdown (`3, 2, 1`) ONLY starts counting AFTER the piece finishes burning!
+   * 4. After the 3 seconds pass (`laserOverloadRemainingMs <= 0`), all remaining pieces below the laser turn into solid grey stone!
+   */
+  private updatePuzzleLaserAndOverload(dtMs: number): void {
+    if (
+      this.isPetrified ||
+      this.state === 'PETRIFIED_WAITING' ||
+      this.state === 'PUZZLE_COUNTING' ||
+      this.state === 'VICTORY' ||
+      this.state === 'GAME_OVER' ||
+      this.state === 'COUNTDOWN'
+    ) {
+      return
+    }
+
+    const u = GAME_CONSTANTS.UNIT_PX
+    const laserWorldY = -GAME_CONSTANTS.PUZZLE_LASER_HEIGHT_UNITS * u // -288px (9m)
+
+    // Check if repeated water drops pushed the island base itself up to the 9m laser
+    const maxBaseElev = Math.max(0, ...this.currentBasePreset.elevations)
+    const baseTopUnits = maxBaseElev + 1 + this.puzzleBaseRiseUnits
+    if (baseTopUnits >= GAME_CONSTANTS.PUZZLE_LASER_HEIGHT_UNITS) {
+      this.pendingPuzzleBaseRiseUnits = 0
+      this.puzzleBaseRiseTargetUnits = Number(
+        this.puzzleBaseRiseUnits.toFixed(2)
+      )
+      this.triggerPuzzleLaserBurnAndPetrify()
+      return
+    }
+
+    // 1. Check if any settled/placed piece touched the 9m laser — if so, it INSTANTLY shines and burns!
+    let burnedAnyThisTick = false
+    for (let i = this.settledPieces.length - 1; i >= 0; i--) {
+      const piece = this.settledPieces[i]
+      const body = piece.body
+      let minPartY = Infinity
+      for (let k = 1; k < body.parts.length; k++) {
+        const part = body.parts[k]
+        if (part.bounds.min.y < minPartY) {
+          minPartY = part.bounds.min.y
+        }
+      }
+
+      if (minPartY <= laserWorldY + 1.5) {
+        this.burnSettledPieceInLaser(i)
+        burnedAnyThisTick = true
+      }
+    }
+
+    if (burnedAnyThisTick) {
+      // Ao queimar a peça, a base/torre para de subir imediatamente!
+      this.pendingPuzzleBaseRiseUnits = 0
+      this.puzzleBaseRiseTargetUnits = Number(
+        this.puzzleBaseRiseUnits.toFixed(2)
+      )
+      this.updateSettledBlocksAndHeight()
+
+      // Clear any active or held falling piece so no more pieces drop
+      if (this.activePiece) {
+        const lx = this.activePiece.body.position.x - this.offsetX
+        const ly = this.activePiece.body.position.y
+        this.spawnMagicSmokePoof(lx, ly)
+        World.remove(this.engine.world, this.activePiece.body)
+        this.activePiece = null
+      }
+      if (this.heldActivePiece) {
+        World.remove(this.engine.world, this.heldActivePiece.body)
+        this.heldActivePiece = null
+      }
+
+      this.isSoftDropping = false
+      this.pendingLandPiece = false
+
+      if (this.state !== 'LASER_OVERLOAD') {
+        this.state = 'LASER_OVERLOAD'
+        // Wait for the piece's bright 440ms laser burn animation to finish BEFORE starting the 3s countdown!
+        this.puzzleLaserBurnPhaseMs = 440
+        this.laserOverloadRemainingMs = null
+        this.emitSnapshotNow()
+      } else if (this.laserOverloadRemainingMs === null) {
+        this.puzzleLaserBurnPhaseMs = Math.max(this.puzzleLaserBurnPhaseMs, 440)
+      }
+    }
+
+    // 2. If in LASER_OVERLOAD: first finish the piece burn phase, then count down 3 seconds, then petrify into stone!
+    if (this.state === 'LASER_OVERLOAD') {
+      if (this.puzzleLaserBurnPhaseMs > 0) {
+        this.puzzleLaserBurnPhaseMs = Math.max(
+          0,
+          this.puzzleLaserBurnPhaseMs - dtMs
+        )
+        if (
+          this.puzzleLaserBurnPhaseMs <= 0 &&
+          this.laserOverloadRemainingMs === null
+        ) {
+          this.laserOverloadRemainingMs =
+            GAME_CONSTANTS.PUZZLE_LASER_OVERLOAD_MS
+          this.emitSnapshotNow()
+        }
+      } else if (this.laserOverloadRemainingMs !== null) {
+        this.laserOverloadRemainingMs = Math.max(
+          0,
+          this.laserOverloadRemainingMs - dtMs
+        )
+        if (this.laserOverloadRemainingMs <= 0) {
+          this.triggerPuzzleLaserBurnAndPetrify()
+        }
+      }
+    }
+  }
+
+  /**
+   * Cancels the laser overload if needed (kept for compatibility).
+   */
+  private abortPuzzleLaserOverload(): void {
+    this.laserOverloadRemainingMs = null
+    this.puzzleLaserBurnPhaseMs = 0
+    for (const p of this.settledPieces) {
+      p.isLaserBurning = false
+    }
+    this.state = 'SPAWNING'
+    this.emitSnapshotNow()
+  }
+
+  /**
+   * Executed when the 3-second post-burn countdown reaches `0.0s`:
+   * 1. Any remaining settled piece touching the `9m` laser line is burned and discounted.
+   * 2. All remaining pieces below the laser immediately petrify into static grey stone (`isPetrified = true`).
+   * 3. Transitions to `PUZZLE_COUNTING` (if Solo or all Multiplayer lanes are petrified) or `PETRIFIED_WAITING` ("FINALIZADO").
+   */
+  public triggerPuzzleLaserBurnAndPetrify(): void {
+    if (this.isPetrified) return
+
+    const u = GAME_CONSTANTS.UNIT_PX
+    const laserWorldY = -GAME_CONSTANTS.PUZZLE_LASER_HEIGHT_UNITS * u
+
+    if (this.activePiece) {
+      World.remove(this.engine.world, this.activePiece.body)
+      this.activePiece = null
+    }
+    if (this.heldActivePiece) {
+      World.remove(this.engine.world, this.heldActivePiece.body)
+      this.heldActivePiece = null
+    }
+
+    for (let i = this.settledPieces.length - 1; i >= 0; i--) {
+      const piece = this.settledPieces[i]
+      const body = piece.body
+      let minPartY = Infinity
+      for (let k = 1; k < body.parts.length; k++) {
+        if (body.parts[k].bounds.min.y < minPartY) {
+          minPartY = body.parts[k].bounds.min.y
+        }
+      }
+
+      if (piece.isLaserBurning || minPartY <= laserWorldY + 1.5) {
+        this.burnSettledPieceInLaser(i)
+      }
+    }
+
+    // Petrify all remaining valid pieces below the laser into static grey stone
+    for (const p of this.settledPieces) {
+      p.isPetrified = true
+      p.isLaserBurning = false
+      p.snapped = true
+      Body.setVelocity(p.body, { x: 0, y: 0 })
+      Body.setAngularVelocity(p.body, 0)
+      Body.setStatic(p.body, true)
+      this.spawnColoredBurst(
+        p.body.position.x - this.offsetX,
+        p.body.position.y,
+        '#CBD5E1',
+        5
+      )
+    }
+
+    this.isPetrified = true
+    this.puzzleLaserBurnPhaseMs = 0
+    this.laserOverloadRemainingMs = null
+    this.pieceRecallAnim = null
+    this.isSoftDropping = false
+    this.pendingLandPiece = false
+    this.inventoryPower = {
+      selfPower: null,
+      attackPower: null,
+      sourceCheckpoint: null,
+    }
+    this.survivalFinalPiecesCount = this.settledPieces.length
+    this.countedPieces = this.settledPieces.length
+    this.shakeTimerMs = 240
+    this.playCountdownAbortedBuzzer()
+    this.updateSettledBlocksAndHeight()
+
+    const allRemotesPetrified =
+      this.isSinglePlayer ||
+      this.remoteLanesToRender.length === 0 ||
+      this.remoteLanesToRender.every((r) => r.isPetrified || r.isEliminated)
+
+    if (allRemotesPetrified) {
+      this.startPuzzleCountingPhase()
+    } else {
+      this.state = 'PETRIFIED_WAITING'
+      this.onEventBanner?.(
+        `🪨 FINALIZADO! Torre petrificada com ${this.settledPieces.length} peças válidas — aguardando oponentes...`,
+        'warning'
+      )
+      this.emitSnapshotNow()
+    }
+  }
+
+  /**
+   * Starts the synchronized bottom-to-top piece counting animation (`PUZZLE_COUNTING`)
+   * once all players in the match have petrified.
+   */
+  public startPuzzleCountingPhase(): void {
+    if (this.state === 'PUZZLE_COUNTING' || this.state === 'VICTORY') return
+
+    this.state = 'PUZZLE_COUNTING'
+    this.puzzleCountTimerMs = 0
+    this.puzzlePostCountDelayMs = 0
+    this.countedPieces = 0
+
+    // Sort valid petrified pieces from bottom (largest world Y) to top (smallest world Y)
+    this.puzzleSortedCountPieces = [...this.settledPieces].sort((a, b) => {
+      const dy = b.body.position.y - a.body.position.y
+      if (Math.abs(dy) > 4) return dy
+      return a.body.position.x - b.body.position.x
+    })
+
+    for (const p of this.settledPieces) {
+      p.isCountedHighlight = false
+      p.countOrderNumber = undefined
+    }
+
+    for (const lane of this.remoteLanesToRender) {
+      lane.countedPieces = 0
+      lane.settledBlocks.sort((a, b) => a.y - b.y)
+      for (const blk of lane.settledBlocks) {
+        blk.isCountedHighlight = false
+        blk.countOrderNumber = undefined
+      }
+    }
+
+    this.onEventBanner?.(
+      '🔢 APURAÇÃO FINAL! Contando peças válidas abaixo do Laser de baixo para cima...',
+      'info'
+    )
+    this.emitSnapshotNow()
+  }
+
+  /**
+   * Steps the bottom-to-top piece counting animation (`PUZZLE_COUNTING` -> `VICTORY`).
+   */
+  private updatePuzzleCountingPhase(dtMs: number): void {
+    this.puzzleCountTimerMs += dtMs
+    const stepMs = GAME_CONSTANTS.PUZZLE_COUNT_STEP_MS
+    const targetStepCount = Math.floor(this.puzzleCountTimerMs / stepMs)
+
+    const maxRemotePieces = this.remoteLanesToRender.reduce(
+      (max, r) => Math.max(max, r.settledBlocks.length),
+      0
+    )
+    const maxTotalPieces = Math.max(
+      this.puzzleSortedCountPieces.length,
+      maxRemotePieces
+    )
+
+    while (
+      this.countedPieces < targetStepCount &&
+      this.countedPieces < this.puzzleSortedCountPieces.length
+    ) {
+      const idx = this.countedPieces
+      const piece = this.puzzleSortedCountPieces[idx]
+      this.countedPieces = idx + 1
+      if (piece) {
+        piece.isCountedHighlight = true
+        piece.countOrderNumber = this.countedPieces
+        this.spawnColoredBurst(
+          piece.body.position.x - this.offsetX,
+          piece.body.position.y,
+          '#FACC15',
+          8
+        )
+      }
+    }
+
+    for (const lane of this.remoteLanesToRender) {
+      const laneCount = Math.min(lane.settledBlocks.length, targetStepCount)
+      lane.countedPieces = laneCount
+      for (let i = 0; i < lane.settledBlocks.length; i++) {
+        lane.settledBlocks[i].isCountedHighlight = i < laneCount
+        lane.settledBlocks[i].countOrderNumber =
+          i < laneCount ? i + 1 : undefined
+      }
+    }
+
+    if (targetStepCount >= maxTotalPieces) {
+      this.puzzlePostCountDelayMs += dtMs
+      if (this.puzzlePostCountDelayMs >= 1600) {
+        const finalCount = this.settledPieces.length
+        this.countedPieces = finalCount
+        this.survivalFinalPiecesCount = finalCount
+        const u = GAME_CONSTANTS.UNIT_PX
+        this.spawnVictoryConfetti(0, -Math.max(2, this.towerHeight) * u, 48)
+        this.playVictoryFanfareSound()
+        this.state = 'VICTORY'
+        this.emitSnapshotNow()
+        this.onVictory?.(this.elapsedTimeMs, finalCount)
+        this.onEventBanner?.(
+          `🏆 CONTAGEM FINALIZADA! Você encaixou ${finalCount} peça(s) abaixo do Laser!`,
+          'success'
+        )
+      }
+    }
   }
 
   /**
@@ -5590,13 +6689,22 @@ export class TowerInstance {
         ? refLowHeight * 0.58
         : 3.48 + (refLowHeight - 6) * 0.94
     const targetPanUnits =
-      !isMultiplayer && isClimax
-        ? Math.max(baseVerticalPan, this.towerHeight - 8.5)
-        : baseVerticalPan
+      this.gameMode === 'PUZZLE'
+        ? 1.8
+        : this.gameMode === 'ENDLESS'
+          ? Math.max(baseVerticalPan, this.petrifyLineHeightUnits + 3.2)
+          : !isMultiplayer && isClimax
+            ? Math.max(baseVerticalPan, this.towerHeight - 8.5)
+            : baseVerticalPan
 
-    const lerpFactor = Math.min(1, dtMs * 0.0055)
-    this.cameraCenterHeightUnits +=
-      (targetPanUnits - this.cameraCenterHeightUnits) * lerpFactor
+    if (this.gameMode === 'PUZZLE') {
+      // No Modo Quebra-Cabeça a tela fica SEMPRE fixa, sem nunca subir
+      this.cameraCenterHeightUnits = 1.8
+    } else {
+      const lerpFactor = Math.min(1, dtMs * 0.0055)
+      this.cameraCenterHeightUnits +=
+        (targetPanUnits - this.cameraCenterHeightUnits) * lerpFactor
+    }
 
     const targetParallaxX = this.activePiece
       ? Math.max(
@@ -5612,7 +6720,7 @@ export class TowerInstance {
 
     let targetZoom =
       this.state === 'GOAL_COUNTDOWN'
-        ? 1.14
+        ? 1.08
         : this.state === 'ROOF_DROP'
           ? 1.1
           : 1.0
@@ -5634,10 +6742,10 @@ export class TowerInstance {
         availWidthPx / Math.max(1, totalHorizontalSpanPx)
 
       // Zoom out automaticamente se um jogador estiver muito pra baixo e outro muito pra cima
-      const verticalSpanUnits = Math.max(
-        14,
-        highestVisibleUnits - targetPanUnits + 1.2
-      )
+      const verticalSpanUnits =
+        this.gameMode === 'PUZZLE'
+          ? 15.5
+          : Math.max(14, highestVisibleUnits - targetPanUnits + 1.2)
       const availHeightPx = Math.max(240, this.lastCanvasHeight - 112 - 56)
       const verticalFitZoom = availHeightPx / (verticalSpanUnits * u)
 
@@ -5706,8 +6814,19 @@ export class TowerInstance {
         sleeping: b.isSleeping,
         isStaticAnchor: p.isStaticAnchor,
         isGlued: p.isGlued,
+        isPetrified: p.isPetrified,
+        isLaserBurning: p.isLaserBurning,
+        isCountedHighlight: p.isCountedHighlight,
+        countOrderNumber: p.countOrderNumber,
       }
     })
+
+    const effectivePieceCount =
+      this.state === 'PUZZLE_COUNTING'
+        ? this.countedPieces
+        : this.gameMode === 'ENDLESS'
+          ? this.endlessScore
+          : this.survivalFinalPiecesCount ?? this.settledPieces.length
 
     return {
       playerId: this.id,
@@ -5718,9 +6837,31 @@ export class TowerInstance {
       maxLives: this.maxLives,
       invulnerableRemainingMs: Math.ceil(this.invulnerableRemainingMs),
       fallFlashRemainingMs: Math.ceil(this.fallWhiteFlashMs),
-      piecesPlaced: this.survivalFinalPiecesCount ?? this.settledPieces.length,
+      piecesPlaced: effectivePieceCount,
       survivalGoalPieces: GAME_CONSTANTS.SURVIVAL_GOAL_PIECES,
       maxTowerHeight: this.maxTowerHeight,
+      puzzleBaseRiseUnits: this.puzzleBaseRiseUnits,
+      puzzleLaserHeightUnits: GAME_CONSTANTS.PUZZLE_LASER_HEIGHT_UNITS,
+      laserOverloadRemainingMs:
+        this.laserOverloadRemainingMs !== null
+          ? Math.ceil(this.laserOverloadRemainingMs)
+          : null,
+      isPetrified: this.isPetrified,
+      countedPieces: effectivePieceCount,
+      endlessScore: this.endlessScore,
+      petrifyLineHeightUnits: Number(this.petrifyLineHeightUnits.toFixed(2)),
+      nextCheckpointHeightUnits: this.nextEndlessCheckpointUnits,
+      consecutiveAbyssFalls: this.consecutiveAbyssFalls,
+      isAbyssOvertime: this.isAbyssOvertime,
+      abyssTimeRemainingMs:
+        !this.isSinglePlayer && this.gameMode === 'ENDLESS'
+          ? Math.max(
+              0,
+              Math.ceil(
+                GAME_CONSTANTS.ENDLESS_MAX_MATCH_TIME_MS - this.elapsedTimeMs
+              )
+            )
+          : null,
       basePresetId: this.currentBasePreset.id,
       basePresetName: this.currentBasePreset.name,
       baseElevations: [...this.currentBasePreset.elevations],
@@ -5740,7 +6881,10 @@ export class TowerInstance {
               height: this.checkpointHoldTarget,
               progressRatio: Math.min(
                 1,
-                this.checkpointHoldTimerMs / GAME_CONSTANTS.CHECKPOINT_HOLD_MS
+                this.checkpointHoldTimerMs /
+                  (this.gameMode === 'ENDLESS'
+                    ? GAME_CONSTANTS.ENDLESS_CHECKPOINT_HOLD_MS
+                    : GAME_CONSTANTS.CHECKPOINT_HOLD_MS)
               ),
             }
           : null,
@@ -5751,7 +6895,10 @@ export class TowerInstance {
       nextQueue:
         this.state === 'ROOF_DROP' ||
         this.state === 'VICTORY' ||
-        this.state === 'GAME_OVER'
+        this.state === 'GAME_OVER' ||
+        this.state === 'PETRIFIED_WAITING' ||
+        this.state === 'PUZZLE_COUNTING' ||
+        this.isPetrified
           ? []
           : this.randomizer.peekQueue(
               this.gameMode === 'SURVIVAL'
@@ -5851,7 +6998,7 @@ export class TowerInstance {
 
     const animTimeMs = this.elapsedTimeMs + this.victoryAnimTimeMs
 
-    // 1. Full-screen Tricky Towers Parallax Background Scenery
+    // 1. Full-screen Tricky Towers Parallax Background Scenery (with dynamic Endless sky progression or Survivor storm map)
     spriteRegistry.drawTrickyTowersSceneryBackground(
       ctx,
       canvasWidth,
@@ -5860,7 +7007,9 @@ export class TowerInstance {
       effectiveSceneryOriginY,
       animTimeMs,
       this.windForce,
-      this.cameraParallaxX
+      this.cameraParallaxX,
+      this.gameMode === 'ENDLESS' ? this.endlessScore : undefined,
+      this.gameMode === 'SURVIVAL'
     )
 
     // 1b. Synchronized Negative Power Sky Darkening (`rgba(15, 10, 35, 0.45)`)
@@ -5889,7 +7038,7 @@ export class TowerInstance {
       ctx.translate(-pivotX, -focusY)
     }
 
-    // 2. Finish Line (30m) & Checkpoint lines in the sky
+    // 2. Finish Line (30m) & Checkpoint lines (or 9m Puzzle Laser Beam) in the sky
     this.renderHeightGridAndMarkers(ctx, canvasWidth)
 
     // 2a. Render Remote Online Friends' Lanes (2-4 Players)
@@ -5908,12 +7057,18 @@ export class TowerInstance {
       this.renderActivePieceGuide(ctx, this.activePiece)
     }
 
-    // 4. Modular 8-Column Green Base Plate + Cottage Pedestal (`assets/sprites/other/base.png`)
+    // 4. Modular 8-Column Green Base Plate + Cottage Pedestal (`assets/sprites/other/base.png`) or Narrow Puzzle Pillar Island
     spriteRegistry.drawBasePlate(
       ctx,
       0,
-      u / 2,
-      this.currentBasePreset.elevations
+      u / 2 - this.puzzleBaseRiseUnits * u,
+      this.currentBasePreset.elevations,
+      {
+        isPuzzleMode:
+          this.gameMode === 'PUZZLE' ||
+          Boolean(this.currentBasePreset.isPuzzleIsland),
+        riseUnits: this.puzzleBaseRiseUnits,
+      }
     )
 
     // 4b. Positive Power 4: Floating Side Islands (`SIDE_ISLAND` — 2.5x1.5 static outriggers)
@@ -5939,6 +7094,32 @@ export class TowerInstance {
     // 6. Active Falling Piece (with 4px/80ms piston animation during Impulse Nudge)
     if (this.activePiece) {
       this.renderPieceEntity(ctx, this.activePiece, true)
+    }
+
+    // 6-endless. In Endless / Abyss Mode, render Zone 1 (Petrification Line, Dark Curtain & Clouds) and Zone 3 (Checkpoint Flags & Cyan Diamond Line)
+    if (this.gameMode === 'ENDLESS') {
+      this.renderEndlessZonesAndAbyss(ctx, canvasWidth, animTimeMs)
+    }
+
+    // 6-puzzle. In Puzzle Mode, draw the Giant Piece Counter / Visual Podium (ONLY at the end of the match), 3s Laser Overload timer, and "FINALIZADO" stamp
+    if (this.gameMode === 'PUZZLE') {
+      const isEndCounting =
+        this.state === 'PUZZLE_COUNTING' || this.state === 'VICTORY'
+      const localCount =
+        this.state === 'PUZZLE_COUNTING'
+          ? this.countedPieces
+          : this.state === 'VICTORY'
+            ? this.settledPieces.length
+            : 0
+      this.renderPuzzleLaneOverlay(
+        ctx,
+        localCount,
+        this.isPetrified,
+        isEndCounting,
+        this.laserOverloadRemainingMs,
+        this.puzzleBaseRiseUnits,
+        this.settledPieces.length
+      )
     }
 
     // 6a. Floating Extra Life Balloons (`EXTRA_LIFE` — must be caught with the controlled piece before floating away!)
@@ -5979,13 +7160,15 @@ export class TowerInstance {
 
     ctx.restore()
 
-    // 9. Foreground Ocean Water (Abyss at bottom of world)
+    // 9. Foreground Ocean Water or Survivor Stalagmites + Smoke (Abyss at bottom of world)
     spriteRegistry.drawTrickyTowersOceanForeground(
       ctx,
       canvasWidth,
       canvasHeight,
       effectiveSceneryOriginY,
-      animTimeMs
+      animTimeMs,
+      this.gameMode === 'SURVIVAL',
+      this.cameraParallaxX + shakeOffsetX
     )
   }
 
@@ -6187,7 +7370,7 @@ export class TowerInstance {
     ctx.fillStyle = color
 
     const x0 = -w / 2
-    const r = Math.min(18, h * 0.24)
+    const r = Math.min(20, h * 0.34)
 
     ctx.beginPath()
     ctx.moveTo(x0 + r, 0)
@@ -6283,7 +7466,12 @@ export class TowerInstance {
       )
     }
 
-    if (this.rankBadge || this.gameMode === 'SURVIVAL') {
+    if (
+      this.rankBadge ||
+      this.gameMode === 'SURVIVAL' ||
+      this.gameMode === 'PUZZLE' ||
+      this.gameMode === 'ENDLESS'
+    ) {
       const localDebuffs: string[] = []
       if (this.blindManualRemainingMs > 0) localDebuffs.push('BLIND_MANUAL')
       if (
@@ -6311,6 +7499,9 @@ export class TowerInstance {
         localDebuffs.push('GIANT_PIECE')
       }
 
+      const localPuzzlePieces =
+        this.state === 'PUZZLE_COUNTING' ? this.countedPieces : 0
+
       this.drawRankBadgeBelowMascot(
         ctx,
         cx,
@@ -6324,14 +7515,16 @@ export class TowerInstance {
         this.lives,
         this.state === 'GAME_OVER' || this.lives <= 0,
         this.invulnerableRemainingMs,
-        fallVis.whiteFlashAlpha
+        fallVis.whiteFlashAlpha,
+        localPuzzlePieces,
+        this.isPetrified
       )
     }
   }
 
   /**
    * Draws the real-time Rank Badge (`1ST`, `2ND`, `3RD`, `4TH`), Player Position (`P1`..`P4`),
-   * Nickname, Survival Mode Hearts (`❤️❤️❤️`), 3s Invulnerability Stabilization Bar, and any active negative power debuff pills directly below each floating mascot's cloud.
+   * Nickname, Survival Mode Hearts (`❤️❤️❤️`), Puzzle Mode Petrified Stamp, and any active negative power debuff pills directly below each floating mascot's cloud.
    */
   private drawRankBadgeBelowMascot(
     ctx: CanvasRenderingContext2D,
@@ -6346,7 +7539,9 @@ export class TowerInstance {
     lives: number = GAME_CONSTANTS.SURVIVAL_INITIAL_LIVES,
     isEliminated: boolean = false,
     invulnerableRemainingMs: number = 0,
-    whiteFlashAlpha: number = 0
+    whiteFlashAlpha: number = 0,
+    puzzlePiecesCount: number = 0,
+    isPetrified: boolean = false
   ): void {
     const theme =
       rank === '1ST'
@@ -6375,9 +7570,16 @@ export class TowerInstance {
     ctx.textBaseline = 'middle'
     ctx.fillText(rank, 0, 11.5)
 
-    // Player Slot Position (P1 / P2 / P3 / P4) + Nickname & Height tag below rank pill
+    // Player Slot Position (P1 / P2 / P3 / P4) + Nickname (& Height tag outside Puzzle Mode)
     const playerNumberTag = `P${Math.max(1, slotIndex + 1)}`
-    const label = `${playerNumberTag} • ${nick.slice(0, 11)} • ${heightUnits.toFixed(1)}m`
+    const isPuzzleEndCount =
+      this.state === 'PUZZLE_COUNTING' || this.state === 'VICTORY'
+    const label =
+      this.gameMode === 'PUZZLE'
+        ? isPuzzleEndCount
+          ? `${playerNumberTag} • ${nick.slice(0, 11)} • ${puzzlePiecesCount}`
+          : `${playerNumberTag} • ${nick.slice(0, 11)}`
+        : `${playerNumberTag} • ${nick.slice(0, 11)} • ${heightUnits.toFixed(1)}m`
     ctx.font = '800 10px Inter, system-ui, sans-serif'
     const textW = Math.max(82, ctx.measureText(label).width + 14)
     ctx.fillStyle = isLocal
@@ -6394,6 +7596,65 @@ export class TowerInstance {
     ctx.fillText(label, 0, 34.5)
 
     let offsetY = 47
+
+    // In Endless Mode, show elimination status or consecutive falls warning
+    if (this.gameMode === 'ENDLESS') {
+      if (!this.isSinglePlayer && isEliminated) {
+        const elimText = '🌫️ ENGOLIDO PELO ABISMO'
+        ctx.font = '900 9px Inter, system-ui, sans-serif'
+        const elimW = Math.max(96, ctx.measureText(elimText).width + 14)
+        ctx.fillStyle = 'rgba(88, 28, 135, 0.94)'
+        ctx.strokeStyle = '#C084FC'
+        ctx.lineWidth = 1.5
+        ctx.beginPath()
+        ctx.roundRect(-elimW / 2, offsetY, elimW, 18, 5)
+        ctx.fill()
+        ctx.stroke()
+        ctx.fillStyle = '#F3E8FF'
+        ctx.fillText(elimText, 0, offsetY + 9.5)
+        offsetY += 21
+      } else if (
+        this.isSinglePlayer &&
+        isLocal &&
+        this.consecutiveAbyssFalls > 0
+      ) {
+        const fallText = `⚠️ QUEDAS: ${this.consecutiveAbyssFalls}/${GAME_CONSTANTS.ENDLESS_MAX_CONSECUTIVE_FALLS}`
+        ctx.font = '900 9px Inter, system-ui, sans-serif'
+        const fallW = Math.max(82, ctx.measureText(fallText).width + 14)
+        ctx.fillStyle =
+          this.consecutiveAbyssFalls >= 3
+            ? 'rgba(153, 27, 27, 0.94)'
+            : 'rgba(30, 41, 59, 0.9)'
+        ctx.strokeStyle =
+          this.consecutiveAbyssFalls >= 3 ? '#F87171' : '#FACC15'
+        ctx.lineWidth = 1.5
+        ctx.beginPath()
+        ctx.roundRect(-fallW / 2, offsetY, fallW, 18, 5)
+        ctx.fill()
+        ctx.stroke()
+        ctx.fillStyle = '#FEF08A'
+        ctx.fillText(fallText, 0, offsetY + 9.5)
+        offsetY += 21
+      }
+    }
+
+    // In Puzzle Mode, only show "🪨 FINALIZADO" pill when petrified (no piece count during the match!)
+    if (this.gameMode === 'PUZZLE' && isPetrified && !isPuzzleEndCount) {
+      const statusText = '🪨 FINALIZADO'
+      ctx.font = '900 9.5px Inter, system-ui, sans-serif'
+      const statusW = Math.max(82, ctx.measureText(statusText).width + 16)
+      ctx.fillStyle = 'rgba(71, 85, 105, 0.94)'
+      ctx.strokeStyle = '#CBD5E1'
+      ctx.lineWidth = 1.6
+      ctx.beginPath()
+      ctx.roundRect(-statusW / 2, offsetY, statusW, 18, 5)
+      ctx.fill()
+      ctx.stroke()
+
+      ctx.fillStyle = '#F1F5F9'
+      ctx.fillText(statusText, 0, offsetY + 9.5)
+      offsetY += 21
+    }
 
     // In Survival Mode (3 Vidas), display the player's remaining hearts (or ELIMINADO) below their name tag!
     if (this.gameMode === 'SURVIVAL') {
@@ -6703,6 +7964,18 @@ export class TowerInstance {
         laneDebuffs.push('GIANT_PIECE')
       }
 
+      const isPuzzleEndCounting =
+        this.state === 'PUZZLE_COUNTING' || this.state === 'VICTORY'
+      const parallelStepCount =
+        this.state === 'PUZZLE_COUNTING'
+          ? Math.floor(
+              this.puzzleCountTimerMs / GAME_CONSTANTS.PUZZLE_COUNT_STEP_MS
+            )
+          : lane.settledBlocks.length
+      const lanePieceCount = isPuzzleEndCounting
+        ? Math.min(lane.settledBlocks.length, parallelStepCount)
+        : 0
+
       this.drawRankBadgeBelowMascot(
         ctx,
         mascotX,
@@ -6716,15 +7989,25 @@ export class TowerInstance {
         lane.lives,
         lane.isEliminated || lane.lives <= 0,
         remInvulnMs,
-        remFallVis.whiteFlashAlpha
+        remFallVis.whiteFlashAlpha,
+        lanePieceCount,
+        Boolean(lane.isPetrified)
       )
 
-      // 2. Remote Friend's Modular 8-Column Green Base Plate (only the wizard blinks, not the base or tower!)
+      const laneRiseUnits = lane.puzzleBaseRiseUnits ?? 0
+
+      // 2. Remote Friend's Modular Base Plate (or Narrow Puzzle Pillar Island rising with water drops)
       spriteRegistry.drawBasePlate(
         ctx,
         0,
-        u / 2,
-        this.currentBasePreset.elevations
+        u / 2 - laneRiseUnits * u,
+        this.currentBasePreset.elevations,
+        {
+          isPuzzleMode:
+            this.gameMode === 'PUZZLE' ||
+            Boolean(this.currentBasePreset.isPuzzleIsland),
+          riseUnits: laneRiseUnits,
+        }
       )
 
       // 2b. Remote Friend's Floating Side Islands (`SIDE_ISLAND`)
@@ -6743,14 +8026,47 @@ export class TowerInstance {
         }
       }
 
-      // 3. Remote Friend's Interpolated Settled Blocks (never blink; only the wizard blinks!)
-      for (const blk of lane.settledBlocks) {
-        this.renderSnapshotPieceOnLane(ctx, blk, false)
+      // 3. Remote Friend's Interpolated Settled Blocks (in Puzzle counting phase, light up bottom-to-top in parallel!)
+      const blocksToRender =
+        this.gameMode === 'PUZZLE' && isPuzzleEndCounting
+          ? [...lane.settledBlocks]
+              .sort((a, b) => {
+                const dy = a.y - b.y
+                if (Math.abs(dy) > 0.12) return dy
+                return a.x - b.x
+              })
+              .map((blk, idx) => ({
+                ...blk,
+                isCountedHighlight: idx < lanePieceCount,
+                countOrderNumber: idx < lanePieceCount ? idx + 1 : undefined,
+              }))
+          : lane.settledBlocks
+
+      for (const blk of blocksToRender) {
+        this.renderSnapshotPieceOnLane(
+          ctx,
+          blk,
+          false,
+          Boolean(lane.isPetrified)
+        )
       }
 
       // 4. Remote Friend's Interpolated Active Falling Piece
-      if (lane.activePiece && !lane.isEliminated) {
-        this.renderSnapshotPieceOnLane(ctx, lane.activePiece, true)
+      if (lane.activePiece && !lane.isEliminated && !lane.isPetrified) {
+        this.renderSnapshotPieceOnLane(ctx, lane.activePiece, true, false)
+      }
+
+      // 4-puzzle. Remote Friend's Giant Piece Counter / Visual Podium (ONLY at end of match) & "FINALIZADO" Stamp in Puzzle Mode
+      if (this.gameMode === 'PUZZLE') {
+        this.renderPuzzleLaneOverlay(
+          ctx,
+          lanePieceCount,
+          Boolean(lane.isPetrified),
+          isPuzzleEndCounting,
+          lane.laserOverloadRemainingMs ?? null,
+          laneRiseUnits,
+          lane.settledBlocks.length
+        )
       }
 
       // 5. Remote Friend's Active Fog Cloud (`BLIND_MANUAL` — "nuvem que esconde")
@@ -6778,7 +8094,8 @@ export class TowerInstance {
   private renderSnapshotPieceOnLane(
     ctx: CanvasRenderingContext2D,
     snap: ActivePieceSnapshot | SettledBlockSnapshot,
-    isActive: boolean
+    isActive: boolean,
+    forceLanePetrified: boolean = false
   ): void {
     const u = GAME_CONSTANTS.UNIT_PX
     const def = PIECE_CATALOG[snap.type] || PIECE_CATALOG.I
@@ -6865,6 +8182,20 @@ export class TowerInstance {
         isStaticAnchor: 'isStaticAnchor' in snap ? snap.isStaticAnchor : false,
         isGlued: 'isGlued' in snap ? snap.isGlued : false,
         colorPaletteIndex: snap.colorPaletteIndex ?? 0,
+        isPetrified:
+          !isActive &&
+          (forceLanePetrified ||
+            ('isPetrified' in snap && Boolean(snap.isPetrified))),
+        isLaserBurning:
+          !isActive && 'isLaserBurning' in snap && Boolean(snap.isLaserBurning),
+        isCountedHighlight:
+          !isActive &&
+          'isCountedHighlight' in snap &&
+          Boolean(snap.isCountedHighlight),
+        countOrderNumber:
+          !isActive && 'countOrderNumber' in snap
+            ? snap.countOrderNumber
+            : undefined,
       }
     )
     ctx.restore()
@@ -7087,6 +8418,322 @@ export class TowerInstance {
     }
   }
 
+  /**
+   * Renderiza as 3 Zonas Móveis do Modo Infinito / Abismo (`ENDLESS`):
+   * - Feixe de Luz Vertical suave no centro da construção.
+   * - Zona 3 (Topo): Duas bandeiras ligadas por uma linha pontilhada de losangos azuis/cianos (`checkpointLineY`) + progresso de 1.5s.
+   * - Zona 1 (Terço Inferior): Linha horizontal brilhante (`petrifyLineY` / `abyssLineY`), cortina escura/acinzentada semitransparente e nuvens escuras abaixo dela (ou feixe roxo/vermelho em sobrecarga no Multiplayer).
+   * - Feixe de Medição Final quando o tempo limite máximo (`150s`) é atingido no Multiplayer.
+   */
+  private renderEndlessZonesAndAbyss(
+    ctx: CanvasRenderingContext2D,
+    canvasWidth: number,
+    animTimeMs: number
+  ): void {
+    const u = GAME_CONSTANTS.UNIT_PX
+    const baseHalfW = (GAME_CONSTANTS.BASE_WIDTH_UNITS * u) / 2
+    const checkpointY = -this.nextEndlessCheckpointUnits * u
+    const petrifyY = -this.petrifyLineHeightUnits * u
+
+    let minSpanX = -Math.max(baseHalfW * 2.6, canvasWidth * 0.55)
+    let maxSpanX = Math.max(baseHalfW * 2.6, canvasWidth * 0.55)
+    if (this.remoteLanesToRender.length > 0) {
+      for (const r of this.remoteLanesToRender) {
+        const relX = r.laneOffsetX - this.offsetX
+        minSpanX = Math.min(minSpanX, relX - baseHalfW * 2.5)
+        maxSpanX = Math.max(maxSpanX, relX + baseHalfW * 2.5)
+      }
+    }
+
+    ctx.save()
+
+    // 0. Coluna de Luz Vertical suave no centro da torre (como na referência visual)
+    const beamTopY = checkpointY - 14 * u
+    const beamBotY = petrifyY
+    if (beamBotY > beamTopY) {
+      const beamW = 3.2 * u
+      const colGrad = ctx.createLinearGradient(0, beamTopY, 0, beamBotY)
+      colGrad.addColorStop(0, 'rgba(255, 255, 255, 0.22)')
+      colGrad.addColorStop(0.55, 'rgba(224, 242, 254, 0.10)')
+      colGrad.addColorStop(1, 'rgba(224, 242, 254, 0)')
+      ctx.fillStyle = colGrad
+      ctx.fillRect(-beamW / 2, beamTopY, beamW, beamBotY - beamTopY)
+    }
+
+    // 1. ZONA 3 — As Bandeiras de Checkpoint + Linha Pontilhada de Losangos Azuis/Cianos (Topo da Tela)
+    const isHoldingHere =
+      this.checkpointHoldTarget === this.nextEndlessCheckpointUnits
+    const holdRatio = isHoldingHere
+      ? Math.min(
+          1,
+          this.checkpointHoldTimerMs / GAME_CONSTANTS.ENDLESS_CHECKPOINT_HOLD_MS
+        )
+      : 0
+
+    const flagSpreadX = baseHalfW * 1.48
+    const diamondSpacing = 18
+    const totalW = flagSpreadX * 2
+    const countDiamonds = Math.floor(totalW / diamondSpacing)
+
+    for (let i = 0; i <= countDiamonds; i++) {
+      const dx = -flagSpreadX + i * diamondSpacing
+      const isLit = isHoldingHere && i / Math.max(1, countDiamonds) <= holdRatio
+      const pulse =
+        0.82 + 0.18 * Math.sin(animTimeMs * 0.006 + i * 0.45)
+
+      ctx.save()
+      ctx.translate(dx, checkpointY)
+      ctx.rotate(Math.PI / 4)
+      const sz = isLit ? 6.8 : 5.4
+      ctx.fillStyle = isLit ? '#FACC15' : '#38BDF8'
+      ctx.strokeStyle = isLit ? '#FEF08A' : '#E0F2FE'
+      ctx.lineWidth = 1.4
+      ctx.globalAlpha = pulse
+      if (isLit) {
+        ctx.shadowColor = '#FACC15'
+        ctx.shadowBlur = 10
+      } else {
+        ctx.shadowColor = '#0284C7'
+        ctx.shadowBlur = 6
+      }
+      ctx.fillRect(-sz / 2, -sz / 2, sz, sz)
+      ctx.strokeRect(-sz / 2, -sz / 2, sz, sz)
+      ctx.restore()
+    }
+
+    // Duas Bandeiras de Checkpoint (esquerda e direita)
+    const drawCheckpointFlag = (fx: number, side: -1 | 1) => {
+      ctx.save()
+      ctx.translate(fx, checkpointY)
+
+      // Pedestal circular da bandeira
+      ctx.fillStyle = '#E2E8F0'
+      ctx.strokeStyle = '#334155'
+      ctx.lineWidth = 2
+      ctx.beginPath()
+      ctx.ellipse(0, 6, 9, 4, 0, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.stroke()
+
+      // Mastro vertical
+      ctx.strokeStyle = '#F8FAFC'
+      ctx.lineWidth = 3.5
+      ctx.lineCap = 'round'
+      ctx.beginPath()
+      ctx.moveTo(0, 5)
+      ctx.lineTo(0, -34)
+      ctx.stroke()
+
+      // Pomo dourado no topo do mastro
+      ctx.fillStyle = '#FACC15'
+      ctx.strokeStyle = '#713F12'
+      ctx.lineWidth = 1.5
+      ctx.beginPath()
+      ctx.arc(0, -36, 4, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.stroke()
+
+      // Flâmula ondulante azul/ciano com estrela/losango
+      const wave = Math.sin(animTimeMs * 0.006 + side) * 3
+      ctx.fillStyle = isHoldingHere ? '#FACC15' : '#0284C7'
+      ctx.strokeStyle = '#FFFFFF'
+      ctx.lineWidth = 1.8
+      ctx.beginPath()
+      ctx.moveTo(0, -33)
+      ctx.quadraticCurveTo(
+        side * 16,
+        -29 + wave,
+        side * 30,
+        -22 + wave * 0.6
+      )
+      ctx.quadraticCurveTo(side * 16, -15 + wave, 0, -12)
+      ctx.closePath()
+      ctx.fill()
+      ctx.stroke()
+
+      ctx.restore()
+    }
+    drawCheckpointFlag(-flagSpreadX - 6, -1)
+    drawCheckpointFlag(flagSpreadX + 6, 1)
+
+    // Rótulo de validação do Checkpoint
+    ctx.save()
+    ctx.font = '800 11px Inter, system-ui, sans-serif'
+    const cpLabel = isHoldingHere
+      ? `⚡ VALIDANDO CHECKPOINT ${this.nextEndlessCheckpointUnits}m (${(
+          (GAME_CONSTANTS.ENDLESS_CHECKPOINT_HOLD_MS -
+            this.checkpointHoldTimerMs) /
+          1000
+        ).toFixed(1)}s)`
+      : `🏁 CHECKPOINT ${this.nextEndlessCheckpointUnits}m (+1 PODER)`
+    ctx.strokeStyle = '#0F172A'
+    ctx.lineWidth = 3.2
+    ctx.strokeText(cpLabel, flagSpreadX + 20, checkpointY + 4)
+    ctx.fillStyle = isHoldingHere ? '#FEF08A' : '#7DD3FC'
+    ctx.fillText(cpLabel, flagSpreadX + 20, checkpointY + 4)
+    ctx.restore()
+
+    // Efeito de dissolução ao validar o checkpoint anterior
+    for (const consumeFx of this.checkpointConsumeEffects) {
+      const cy = -consumeFx.heightUnits * u
+      const t = consumeFx.ageMs / consumeFx.maxAgeMs
+      const alpha = Math.max(0, 1 - t)
+      ctx.save()
+      ctx.globalAlpha = alpha
+      ctx.strokeStyle = '#FACC15'
+      ctx.shadowColor = '#FACC15'
+      ctx.shadowBlur = 18
+      ctx.lineWidth = 4.5 * (1 - t * 0.5)
+      ctx.beginPath()
+      ctx.moveTo(-flagSpreadX * (1 + t * 0.3), cy)
+      ctx.lineTo(flagSpreadX * (1 + t * 0.3), cy)
+      ctx.stroke()
+      ctx.restore()
+    }
+
+    // 2. ZONA 1 — A Linha de Petrificação / Abismo (`petrifyLineY` / `abyssLineY`) no Terço Inferior da Tela
+    if (this.petrifyLineHeightUnits > 0.02 || !this.isSinglePlayer) {
+      const curtainHeight = 28 * u
+      const isOvertime = this.isAbyssOvertime
+
+      // 2a. Cortina escura/acinzentada abaixo de petrifyLineY (mantendo as peças petrificadas visíveis ao fundo)
+      const curtainGrad = ctx.createLinearGradient(
+        0,
+        petrifyY,
+        0,
+        petrifyY + curtainHeight
+      )
+      if (isOvertime) {
+        curtainGrad.addColorStop(0, 'rgba(88, 28, 135, 0.58)')
+        curtainGrad.addColorStop(0.35, 'rgba(49, 10, 62, 0.78)')
+        curtainGrad.addColorStop(1, 'rgba(15, 10, 28, 0.94)')
+      } else {
+        curtainGrad.addColorStop(0, 'rgba(30, 41, 59, 0.54)')
+        curtainGrad.addColorStop(0.35, 'rgba(15, 23, 42, 0.76)')
+        curtainGrad.addColorStop(1, 'rgba(9, 13, 24, 0.94)')
+      }
+      ctx.fillStyle = curtainGrad
+      ctx.fillRect(minSpanX, petrifyY, maxSpanX - minSpanX, curtainHeight)
+
+      // 2b. Banco de nuvens escuras/acinzentadas abaixo da linha de petrificação
+      const cloudStep = 148
+      for (
+        let cx = minSpanX - 80;
+        cx <= maxSpanX + 80;
+        cx += cloudStep
+      ) {
+        const idx = Math.round(cx / cloudStep)
+        const driftX =
+          Math.sin(animTimeMs * 0.0014 + idx * 1.3) * 14
+        const bobY =
+          Math.cos(animTimeMs * 0.002 + idx * 0.9) * 4
+        this.drawBorderlessFogCloudUnit(
+          ctx,
+          cx + driftX,
+          petrifyY + 56 + (Math.abs(idx) % 2) * 14 + bobY,
+          196,
+          72,
+          isOvertime ? '#3B0764' : '#1E293B',
+          0.74,
+          idx % 2 === 0
+        )
+        this.drawBorderlessFogCloudUnit(
+          ctx,
+          cx + 64 - driftX * 0.7,
+          petrifyY + 96 + bobY,
+          210,
+          82,
+          isOvertime ? '#1E1B4B' : '#0F172A',
+          0.88,
+          idx % 2 !== 0
+        )
+      }
+
+      // 2c. Linha Horizontal Brilhante (`petrifyLineY`)
+      const pulse =
+        0.78 +
+        0.22 *
+          Math.sin(animTimeMs * (isOvertime ? 0.025 : 0.008))
+
+      const glowH = isOvertime ? 22 : 14
+      const lineGlow = ctx.createLinearGradient(
+        0,
+        petrifyY - glowH,
+        0,
+        petrifyY + glowH
+      )
+      lineGlow.addColorStop(0, 'rgba(255, 255, 255, 0)')
+      lineGlow.addColorStop(
+        0.5,
+        isOvertime
+          ? `rgba(192, 132, 252, ${(0.58 * pulse).toFixed(2)})`
+          : `rgba(186, 230, 253, ${(0.48 * pulse).toFixed(2)})`
+      )
+      lineGlow.addColorStop(1, 'rgba(255, 255, 255, 0)')
+      ctx.fillStyle = lineGlow
+      ctx.fillRect(minSpanX, petrifyY - glowH, maxSpanX - minSpanX, glowH * 2)
+
+      ctx.save()
+      ctx.strokeStyle = isOvertime ? '#E879F9' : '#E0F2FE'
+      ctx.shadowColor = isOvertime ? '#EF4444' : '#38BDF8'
+      ctx.shadowBlur = isOvertime ? 18 : 12
+      ctx.lineWidth = isOvertime ? 4.8 : 3.4
+      ctx.beginPath()
+      ctx.moveTo(minSpanX, petrifyY)
+      ctx.lineTo(maxSpanX, petrifyY)
+      ctx.stroke()
+
+      ctx.strokeStyle = '#FFFFFF'
+      ctx.lineWidth = 1.6
+      ctx.beginPath()
+      ctx.moveTo(minSpanX, petrifyY)
+      ctx.lineTo(maxSpanX, petrifyY)
+      ctx.stroke()
+
+      // Etiqueta da Linha de Petrificação / Abismo
+      ctx.shadowBlur = 0
+      ctx.font = '900 11px Inter, system-ui, sans-serif'
+      const lineTitle = isOvertime
+        ? `⚡ ABISMO ACELERANDO! (${this.petrifyLineHeightUnits.toFixed(1)}m)`
+        : this.isSinglePlayer
+          ? `🪨 LINHA DE PETRIFICAÇÃO (${this.petrifyLineHeightUnits.toFixed(1)}m)`
+          : `🌫️ ABISMO ASCENDENTE (${this.petrifyLineHeightUnits.toFixed(1)}m)`
+      ctx.strokeStyle = '#0F172A'
+      ctx.lineWidth = 3.2
+      ctx.strokeText(lineTitle, baseHalfW + 18, petrifyY - 8)
+      ctx.fillStyle = isOvertime ? '#FDE047' : '#E2E8F0'
+      ctx.fillText(lineTitle, baseHalfW + 18, petrifyY - 8)
+      ctx.restore()
+    }
+
+    // 3. Feixe Horizontal de Medição de Desempate (aos 2m30s no Multiplayer)
+    if (this.isAbyssMaxTimeLocked) {
+      const topY = -this.towerHeight * u
+      ctx.save()
+      ctx.strokeStyle = '#FACC15'
+      ctx.shadowColor = '#FACC15'
+      ctx.shadowBlur = 16
+      ctx.lineWidth = 4
+      ctx.setLineDash([10, 6])
+      ctx.beginPath()
+      ctx.moveTo(minSpanX, topY)
+      ctx.lineTo(maxSpanX, topY)
+      ctx.stroke()
+      ctx.setLineDash([])
+
+      ctx.font = '900 12px Inter, system-ui, sans-serif'
+      ctx.strokeStyle = '#451A03'
+      ctx.lineWidth = 3.5
+      const measureLabel = `📏 MEDIÇÃO FINAL DE ALTURA: ${this.towerHeight.toFixed(1)}m`
+      ctx.strokeText(measureLabel, baseHalfW + 18, topY - 8)
+      ctx.fillStyle = '#FEF08A'
+      ctx.fillText(measureLabel, baseHalfW + 18, topY - 8)
+      ctx.restore()
+    }
+
+    ctx.restore()
+  }
+
   private renderHeightGridAndMarkers(
     ctx: CanvasRenderingContext2D,
     canvasWidth: number
@@ -7104,6 +8751,15 @@ export class TowerInstance {
         ctx.lineTo(x, -GAME_CONSTANTS.GOAL_HEIGHT_UNITS * u - 10 * u)
         ctx.stroke()
       }
+    }
+
+    if (this.gameMode === 'ENDLESS') {
+      return
+    }
+
+    if (this.gameMode === 'PUZZLE') {
+      this.renderPuzzleLaserBeam(ctx, canvasWidth)
+      return
     }
 
     const markerHeights =
@@ -7264,6 +8920,334 @@ export class TowerInstance {
         ctx.fillText(`${h}m`, baseHalfW + 24, y + 3)
       }
     }
+  }
+
+  /**
+   * Renderiza o Feixe de Laser horizontal contínuo do Modo Quebra-Cabeça (9m)
+   * com emissores metálicos nas extremidades, núcleo incandescente e sobrecarga.
+   */
+  private renderPuzzleLaserBeam(
+    ctx: CanvasRenderingContext2D,
+    canvasWidth: number
+  ): void {
+    const u = GAME_CONSTANTS.UNIT_PX
+    const baseHalfW = (GAME_CONSTANTS.BASE_WIDTH_UNITS * u) / 2
+    const laserY = -GAME_CONSTANTS.PUZZLE_LASER_HEIGHT_UNITS * u
+    const now = performance.now()
+
+    const anyOverload =
+      (this.laserOverloadRemainingMs !== null &&
+        this.laserOverloadRemainingMs > 0) ||
+      this.remoteLanesToRender.some(
+        (r) =>
+          typeof r.laserOverloadRemainingMs === 'number' &&
+          r.laserOverloadRemainingMs > 0
+      )
+
+    let minLineX = -Math.max(baseHalfW * 2.35, canvasWidth * 0.28)
+    let maxLineX = Math.max(baseHalfW * 2.35, canvasWidth * 0.28)
+    if (this.remoteLanesToRender.length > 0) {
+      for (const r of this.remoteLanesToRender) {
+        const relX = r.laneOffsetX - this.offsetX
+        minLineX = Math.min(minLineX, relX - baseHalfW * 2.15)
+        maxLineX = Math.max(maxLineX, relX + baseHalfW * 2.15)
+      }
+    }
+
+    const pulse = anyOverload
+      ? 0.65 + 0.35 * Math.sin(now * 0.032)
+      : 0.78 + 0.22 * Math.sin(now * 0.008)
+
+    ctx.save()
+
+    // 1. Halo vermelho amplo
+    const haloH = anyOverload ? 26 : 16
+    const haloGrad = ctx.createLinearGradient(
+      0,
+      laserY - haloH,
+      0,
+      laserY + haloH
+    )
+    haloGrad.addColorStop(0, 'rgba(239, 68, 68, 0)')
+    haloGrad.addColorStop(
+      0.5,
+      anyOverload
+        ? `rgba(239, 68, 68, ${(0.55 * pulse).toFixed(2)})`
+        : `rgba(239, 68, 68, ${(0.32 * pulse).toFixed(2)})`
+    )
+    haloGrad.addColorStop(1, 'rgba(239, 68, 68, 0)')
+    ctx.fillStyle = haloGrad
+    ctx.fillRect(minLineX, laserY - haloH, maxLineX - minLineX, haloH * 2)
+
+    // 2. Feixe vermelho principal
+    ctx.strokeStyle = anyOverload ? '#EF4444' : '#F87171'
+    ctx.shadowColor = '#EF4444'
+    ctx.shadowBlur = anyOverload ? 20 : 12
+    ctx.lineWidth = anyOverload ? 6.5 : 4.2
+    ctx.beginPath()
+    ctx.moveTo(minLineX, laserY)
+    ctx.lineTo(maxLineX, laserY)
+    ctx.stroke()
+
+    // 3. Núcleo branco-amarelado incandescente
+    ctx.strokeStyle = anyOverload ? '#FEF08A' : '#FEE2E2'
+    ctx.shadowBlur = 4
+    ctx.lineWidth = anyOverload ? 2.6 : 1.6
+    ctx.beginPath()
+    ctx.moveTo(minLineX, laserY)
+    ctx.lineTo(maxLineX, laserY)
+    ctx.stroke()
+
+    // 4. Emissores de laser metálicos nas extremidades esquerda e direita
+    const drawEmitter = (ex: number, dir: 1 | -1) => {
+      ctx.save()
+      ctx.translate(ex, laserY)
+      ctx.fillStyle = '#334155'
+      ctx.strokeStyle = '#0F172A'
+      ctx.lineWidth = 2.2
+      ctx.beginPath()
+      ctx.roundRect(dir === 1 ? -22 : -4, -11, 26, 22, 5)
+      ctx.fill()
+      ctx.stroke()
+
+      // Lente vermelha brilhante do canhão de laser
+      ctx.fillStyle = anyOverload ? '#FEF08A' : '#EF4444'
+      ctx.shadowColor = '#EF4444'
+      ctx.shadowBlur = 10
+      ctx.beginPath()
+      ctx.arc(dir === 1 ? 3 : -3, 0, 5.5, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.restore()
+    }
+    drawEmitter(minLineX, 1)
+    drawEmitter(maxLineX, -1)
+
+    // 5. Etiqueta indicativa da barreira de laser (9m)
+    ctx.shadowBlur = 0
+    ctx.font = '900 12px Inter, system-ui, sans-serif'
+    const labelText = anyOverload
+      ? '⚠️ SOBRECARGA DO LASER! QUEIMANDO PEÇAS ACIMA DE 9m!'
+      : `⚡ BARREIRA DE LASER (${GAME_CONSTANTS.PUZZLE_LASER_HEIGHT_UNITS}m — ABAIXO DO LASER)`
+    ctx.strokeStyle = '#450A0A'
+    ctx.lineWidth = 3.5
+    ctx.strokeText(labelText, baseHalfW + 18, laserY - 9)
+    ctx.fillStyle = anyOverload ? '#FEF08A' : '#FCA5A5'
+    ctx.fillText(labelText, baseHalfW + 18, laserY - 9)
+
+    ctx.restore()
+  }
+
+  /**
+   * Renderiza os elementos visuais de cada raia no Modo Quebra-Cabeça:
+   * - Contagem regressiva (3, 2, 1) no topo após queima no laser (APENAS O NÚMERO)
+   * - Número da contagem de peças que vai SUBINDO e AUMENTANDO DE TAMANHO a cada peça contada, formando um Pódio Visual
+   * - Selo "FINALIZADO" sobre a construção petrificada em pedra cinza
+   * - Indicador de subida da base (+0.5 bloco por peça caída na água)
+   */
+  private renderPuzzleLaneOverlay(
+    ctx: CanvasRenderingContext2D,
+    pieceCount: number,
+    isPetrified: boolean,
+    isCountingPhase: boolean,
+    laserOverloadRemainingMs: number | null,
+    riseUnits: number,
+    totalPiecesInLane: number = pieceCount
+  ): void {
+    const u = GAME_CONSTANTS.UNIT_PX
+    const laserY = -GAME_CONSTANTS.PUZZLE_LASER_HEIGHT_UNITS * u
+    const now = performance.now()
+
+    ctx.save()
+
+    const isCountdownActive =
+      typeof laserOverloadRemainingMs === 'number' &&
+      laserOverloadRemainingMs > 0 &&
+      !isPetrified
+
+    if (isCountdownActive) {
+      // 1A. Contagem regressiva (3, 2, 1) pós-queima no topo da tela: APENAS O GRANDE NÚMERO
+      const countdownY = laserY - 58
+      const countdownText = `${Math.max(1, Math.ceil(laserOverloadRemainingMs / 1000))}`
+      const countdownScale = 1 + 0.16 * Math.sin(now * 0.028)
+
+      ctx.save()
+      ctx.translate(0, countdownY)
+      ctx.scale(countdownScale, countdownScale)
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.font = '900 64px "Fredoka", Inter, system-ui, sans-serif'
+      ctx.shadowColor = 'rgba(239, 68, 68, 0.9)'
+      ctx.shadowBlur = 20
+      ctx.strokeStyle = '#450A0A'
+      ctx.lineWidth = 10
+      ctx.lineJoin = 'round'
+      ctx.strokeText(countdownText, 0, 0)
+      ctx.fillStyle = '#FEF08A'
+      ctx.fillText(countdownText, 0, 0)
+      ctx.restore()
+    } else if (isCountingPhase) {
+      // 1B. Número da contagem de peças (APENAS NO FINAL DA PARTIDA, em paralelo entre todos os concorrentes):
+      // Começa ACIMA do laser e vai SUBINDO e AUMENTANDO DE TAMANHO a cada peça contada, formando um Pódio Visual!
+      const stepMs = GAME_CONSTANTS.PUZZLE_COUNT_STEP_MS
+      const currentGlobalStep = Math.floor(this.puzzleCountTimerMs / stepMs)
+      const isActivelyStepping =
+        this.state === 'PUZZLE_COUNTING' &&
+        pieceCount > 0 &&
+        currentGlobalStep <= totalPiecesInLane
+      const stepProg = isActivelyStepping
+        ? Math.min(1, (this.puzzleCountTimerMs % stepMs) / (stepMs * 0.75))
+        : 1
+      const smoothCount = isActivelyStepping
+        ? Math.max(0, pieceCount - 1 + stepProg)
+        : pieceCount
+
+      // Começa ACIMA da linha do laser (`laserY`) e sobe a cada peça contada dentro da tela fixa
+      const podiumBaseY = laserY - 12
+      const startY = laserY - 36
+      const linearRisePx = Math.min(18, smoothCount) * 8.5
+      const extraRisePx = Math.max(0, smoothCount - 18) * 4.0
+      const climbOffsetPx = Math.min(185, linearRisePx + extraRisePx)
+      const numberY = startY - climbOffsetPx
+
+      // Tamanho da fonte vai aumentando progressivamente a cada peça contada
+      const fontSizePx = Math.round(Math.min(96, 32 + smoothCount * 3.0))
+      const stepPopScale = isActivelyStepping
+        ? 1 + 0.25 * Math.sin(stepProg * Math.PI)
+        : 1 + 0.06 * Math.sin(now * 0.008)
+
+      // Coluna do Pódio Visual ACIMA do laser sustentando o número
+      if (smoothCount > 0) {
+        const podiumTopY = numberY + fontSizePx * 0.44
+        if (podiumBaseY > podiumTopY) {
+          const podiumHeight = podiumBaseY - podiumTopY
+          const podiumWidth = Math.min(118, 56 + smoothCount * 2.2)
+
+          ctx.save()
+          const podiumGrad = ctx.createLinearGradient(
+            0,
+            podiumTopY,
+            0,
+            podiumBaseY
+          )
+          podiumGrad.addColorStop(0, 'rgba(250, 204, 21, 0.48)')
+          podiumGrad.addColorStop(0.6, 'rgba(245, 158, 11, 0.30)')
+          podiumGrad.addColorStop(1, 'rgba(180, 83, 9, 0.14)')
+
+          ctx.fillStyle = podiumGrad
+          ctx.strokeStyle = 'rgba(253, 224, 71, 0.88)'
+          ctx.lineWidth = 2.5
+          ctx.shadowColor = 'rgba(250, 204, 21, 0.48)'
+          ctx.shadowBlur = 14
+          ctx.beginPath()
+          ctx.roundRect(
+            -podiumWidth / 2,
+            podiumTopY,
+            podiumWidth,
+            podiumHeight,
+            [10, 10, 4, 4]
+          )
+          ctx.fill()
+          ctx.stroke()
+
+          // Degraus horizontais no pódio representando cada peça contada acima do laser
+          ctx.shadowBlur = 0
+          ctx.strokeStyle = 'rgba(254, 240, 138, 0.38)'
+          ctx.lineWidth = 1.5
+          for (let i = 1; i <= pieceCount; i++) {
+            const stepLinear = Math.min(18, i) * 8.5
+            const stepExtra = Math.max(0, i - 18) * 4.0
+            const rungY =
+              startY - Math.min(185, stepLinear + stepExtra) + fontSizePx * 0.44
+            if (rungY > podiumTopY + 5 && rungY < podiumBaseY - 4) {
+              ctx.beginPath()
+              ctx.moveTo(-podiumWidth / 2 + 6, rungY)
+              ctx.lineTo(podiumWidth / 2 - 6, rungY)
+              ctx.stroke()
+            }
+          }
+
+          // Plataforma de topo do Pódio sustentando o número
+          const capWidth = podiumWidth + 18
+          ctx.fillStyle = '#FDE047'
+          ctx.strokeStyle = '#78350F'
+          ctx.lineWidth = 2.5
+          ctx.beginPath()
+          ctx.roundRect(-capWidth / 2, podiumTopY - 5, capWidth, 10, 5)
+          ctx.fill()
+          ctx.stroke()
+          ctx.restore()
+        }
+      }
+
+      // Renderiza APENAS O NÚMERO começando acima do laser, subindo e crescendo de tamanho
+      const scoreText = `${pieceCount}`
+      ctx.save()
+      ctx.translate(0, numberY)
+      ctx.scale(stepPopScale, stepPopScale)
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.font = `900 ${fontSizePx}px "Fredoka", Inter, system-ui, sans-serif`
+
+      ctx.shadowColor = 'rgba(250, 204, 21, 0.92)'
+      ctx.shadowBlur = 20
+
+      ctx.strokeStyle = '#0F172A'
+      ctx.lineWidth = Math.max(6, fontSizePx * 0.16)
+      ctx.lineJoin = 'round'
+      ctx.strokeText(scoreText, 0, 0)
+
+      ctx.fillStyle = '#FACC15'
+      ctx.fillText(scoreText, 0, 0)
+      ctx.restore()
+    }
+
+    // 2. Selo "FINALIZADO" sobre a torre petrificada
+    if (isPetrified && !isCountingPhase) {
+      ctx.save()
+      ctx.translate(0, -4.4 * u)
+      ctx.rotate(-0.06)
+
+      ctx.fillStyle = 'rgba(30, 41, 59, 0.94)'
+      ctx.strokeStyle = '#CBD5E1'
+      ctx.lineWidth = 3
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.55)'
+      ctx.shadowBlur = 12
+      ctx.beginPath()
+      ctx.roundRect(-82, -20, 164, 40, 10)
+      ctx.fill()
+      ctx.stroke()
+
+      ctx.shadowBlur = 0
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillStyle = '#F8FAFC'
+      ctx.font = '900 15px Inter, system-ui, sans-serif'
+      ctx.fillText('🪨 FINALIZADO', 0, 0)
+      ctx.restore()
+    }
+
+    // 3. Indicador de subida da ilha quando caiu peça na água (+0.5 bloco por queda)
+    if (riseUnits > 0) {
+      const baseTopY = -riseUnits * u
+      ctx.save()
+      ctx.translate(0, baseTopY + 18)
+      ctx.fillStyle = 'rgba(127, 29, 29, 0.88)'
+      ctx.strokeStyle = '#FCA5A5'
+      ctx.lineWidth = 1.6
+      ctx.beginPath()
+      ctx.roundRect(-58, -10, 116, 20, 6)
+      ctx.fill()
+      ctx.stroke()
+
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillStyle = '#FECACA'
+      ctx.font = '800 10px Inter, system-ui, sans-serif'
+      ctx.fillText(`⬆️ BASE +${riseUnits.toFixed(1)} BLOCO`, 0, 0)
+      ctx.restore()
+    }
+
+    ctx.restore()
   }
 
   private renderSideIslands(
@@ -7477,6 +9461,10 @@ export class TowerInstance {
         isStaticAnchor: piece.isStaticAnchor,
         isGlued: piece.isGlued,
         colorPaletteIndex: piece.colorPaletteIndex,
+        isPetrified: piece.isPetrified,
+        isLaserBurning: piece.isLaserBurning,
+        isCountedHighlight: piece.isCountedHighlight,
+        countOrderNumber: piece.countOrderNumber,
       }
     )
 
@@ -7743,9 +9731,18 @@ export class TowerInstance {
   private renderDissolvingBricks(ctx: CanvasRenderingContext2D): void {
     const u = GAME_CONSTANTS.UNIT_PX
     for (const item of this.dissolvingBricks) {
-      const alpha = Math.max(0, 1.0 - item.progress)
-      // Encolhe de 100% (1.0) para 30% (0.3) enquanto desaparece
-      const scale = 1.0 - item.progress * 0.7
+      const isLaser = item.reason === 'LASER'
+      const alpha = isLaser
+        ? item.progress < 0.42
+          ? 1.0
+          : Math.max(0, 1.0 - (item.progress - 0.42) / 0.58)
+        : Math.max(0, 1.0 - item.progress)
+      // Para LASER: primeiro infla levemente brilhando intenso (0..0.38) e depois queima/encolhe rápido
+      const scale = isLaser
+        ? item.progress < 0.38
+          ? 1.0 + Math.sin((item.progress / 0.38) * Math.PI) * 0.14
+          : Math.max(0.22, 1.0 - ((item.progress - 0.38) / 0.62) * 0.78)
+        : 1.0 - item.progress * 0.7
       const piece = item.piece
 
       ctx.save()
@@ -7753,8 +9750,10 @@ export class TowerInstance {
       ctx.rotate(item.angle)
       ctx.scale(scale, scale)
       ctx.globalAlpha = alpha
-      ctx.shadowColor = '#FFFFFF'
-      ctx.shadowBlur = 14 * (1 - item.progress * 0.4)
+      ctx.shadowColor = isLaser ? '#FEF08A' : '#FFFFFF'
+      ctx.shadowBlur = isLaser
+        ? 26 * (1 - item.progress * 0.35)
+        : 14 * (1 - item.progress * 0.4)
 
       spriteRegistry.drawPieceCells(
         ctx,
@@ -7768,16 +9767,22 @@ export class TowerInstance {
           showCenterOfMass: false,
           powerEffect: piece.powerEffect,
           colorPaletteIndex: piece.colorPaletteIndex,
+          isLaserBurning: isLaser,
         }
       )
 
-      // Brilho branco/transparente de vaporização sobre os blocos da peça
+      // Brilho de vaporização/queima sobre os blocos da peça
       const cellPx = u * piece.scale
-      ctx.fillStyle =
-        item.reason === 'WATER'
+      ctx.fillStyle = isLaser
+        ? item.progress < 0.35
+          ? 'rgba(254, 240, 138, 0.92)'
+          : 'rgba(239, 68, 68, 0.85)'
+        : item.reason === 'WATER'
           ? 'rgba(224, 242, 254, 0.55)'
           : 'rgba(255, 255, 255, 0.65)'
-      ctx.globalAlpha = alpha * (0.45 + 0.45 * item.progress)
+      ctx.globalAlpha = isLaser
+        ? alpha * (item.progress < 0.35 ? 0.88 : 0.72)
+        : alpha * (0.45 + 0.45 * item.progress)
       for (const c of piece.cellsFromCoM) {
         ctx.fillRect(
           c.x * cellPx - cellPx * 0.48,

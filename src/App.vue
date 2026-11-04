@@ -20,6 +20,7 @@ import { generateRandomMatchSeed } from './game/SeededRandomizer'
 import {
   BASE_TERRAIN_CATALOG,
   BasePresetId,
+  PUZZLE_BASE_TERRAIN_CATALOG,
   selectBasePresetForSeed,
 } from './game/BaseTerrainCatalog'
 import {
@@ -43,6 +44,12 @@ import {
   PowerVfxRenderData,
   RemoteLaneRenderData,
 } from './game/TowerInstance'
+import {
+  formatKeyCodeLabel,
+  KeybindActionId,
+  optionsStore,
+  playToySfx,
+} from './services/optionsStore'
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 const canvasWidth = ref<number>(window.innerWidth)
@@ -58,11 +65,11 @@ const seedInput = ref<string>(initialRandomSeed)
 const forcedBasePresetId = ref<BasePresetId | null>(null)
 const isShiftHeld = ref<boolean>(false)
 const showColliders = ref<boolean>(false)
-const showGhostPiece = ref<boolean>(false)
-const windEnabled = ref<boolean>(true)
+const showGhostPiece = ref<boolean>(optionsStore.state.showGhostPiece)
+const windEnabled = ref<boolean>(optionsStore.state.windEnabled)
 const slideLevel = ref<number>(50)
 const forcePlaceholders = ref<boolean>(spriteRegistry.forcePlaceholders)
-const dynamicTintEnabled = ref<boolean>(spriteRegistry.dynamicTintEnabled)
+const dynamicTintEnabled = ref<boolean>(optionsStore.state.dynamicTintEnabled)
 const spriteSlots = ref<SpriteSlot[]>(spriteRegistry.getAllSlots())
 const playerSkins = ref<PlayerSkinInfo[]>(spriteRegistry.getPlayerSkins())
 const activePlayerSkinId = ref<string>(spriteRegistry.getActivePlayerSkinId())
@@ -74,9 +81,23 @@ type ScreenFlowState =
   | 'MAIN_MENU'
   | 'LOCAL_LOBBY'
   | 'MULTIPLAYER_LOBBY'
+  | 'OPTIONS_SCREEN'
   | 'IN_GAME'
 const screenFlow = ref<ScreenFlowState>('TITLE_SCREEN')
-const selectedMenuCard = ref<'LOCAL' | 'MULTIPLAYER'>('LOCAL')
+const selectedMenuCard = ref<'LOCAL' | 'MULTIPLAYER' | 'OPTIONS'>('LOCAL')
+const isOptionsModalOpen = ref<boolean>(false)
+const optionsActiveTab = ref<'AUDIO' | 'CONTROLS' | 'GRAPHICS' | 'ACCOUNT'>(
+  'AUDIO'
+)
+const listeningKeybindAction = ref<KeybindActionId | null>(null)
+const isFullscreen = ref<boolean>(
+  Boolean(typeof document !== 'undefined' && document.fullscreenElement)
+)
+const optionsNickInput = ref<string>('')
+const liveFps = ref<number>(60)
+let fpsFrameCount = 0
+let fpsAccumMs = 0
+
 const isAuthModalOpen = ref<boolean>(false)
 const isOnlineMultiplayerMatch = ref<boolean>(false)
 const localPlayerLives = ref<number>(3)
@@ -317,8 +338,8 @@ const GAME_MODE_OPTIONS: GameModeOptionCard[] = [
   {
     id: 'RACE',
     title: 'MODO CORRIDA',
-    shortTitle: 'Corrida (30m)',
-    badge: 'CLÁSSICO',
+    shortTitle: 'Modo Corrida (30m)',
+    badge: 'CLÁSSICO • 30m',
     icon: '🏁',
     accentColor: '#3B82F6',
     description:
@@ -330,9 +351,24 @@ const GAME_MODE_OPTIONS: GameModeOptionCard[] = [
     ],
   },
   {
+    id: 'PUZZLE',
+    title: 'MODO QUEBRA-CABEÇA',
+    shortTitle: 'Modo Quebra-Cabeça (Abaixo do Laser - 9m)',
+    badge: 'ABAIXO DO LASER • 9m',
+    icon: '🧩',
+    accentColor: '#F59E0B',
+    description:
+      'Compactação extrema e contrapeso! Encaixe o máximo de peças em ilhas estreitas sem deixar peças estabilizadas tocarem o laser de 9m.',
+    rulesSummary: [
+      '⚡ Laser em 9m: Peça estabilizada no laser queima após 3s e petrifica a torre',
+      '🌊 Queda na Água (+0.5 Bloco): A ilha sobe 0.5 bloco em direção ao laser',
+      '🧴 1 Super Cola única no início • Vence quem petrificar mais peças abaixo do laser!',
+    ],
+  },
+  {
     id: 'SURVIVAL',
     title: 'MODO SOBREVIVÊNCIA',
-    shortTitle: 'Sobrevivência (3 Vidas • 50 Peças)',
+    shortTitle: 'Modo Sobrevivência',
     badge: '3 VIDAS • 50 PEÇAS',
     icon: '❤️',
     accentColor: '#EF4444',
@@ -345,6 +381,21 @@ const GAME_MODE_OPTIONS: GameModeOptionCard[] = [
     ],
   },
   {
+    id: 'ENDLESS',
+    title: 'MODO INFINITO / ABISMO',
+    shortTitle: 'Modo Infinito / Abismo',
+    badge: 'SCORE • ABISMO',
+    icon: '🌌',
+    accentColor: '#38BDF8',
+    description:
+      'Construa sem limite! A cada checkpoint validado por 1,5s a câmera e a linha de petrificação sobem +8m, transformando sua base em pedra. No Multiplayer, o Abismo sobe sem parar!',
+    rulesSummary: [
+      '🏔️ 3 Zonas Móveis: Linha de Petrificação + Zona Ativa + Bandeiras (+8m a cada 1,5s)',
+      '🏆 SCORE vs PERSONAL BEST: +1 pt por peça estabilizada, -1 pt se cair no abismo',
+      '🌋 Multiplayer Abismo Ascendente: Subida contínua (0,4 bl/s), sobrecarga aos 90s e desempate aos 150s!',
+    ],
+  },
+  {
     id: 'RANDOM',
     title: 'ALEATÓRIO',
     shortTitle: 'Aleatório',
@@ -352,9 +403,9 @@ const GAME_MODE_OPTIONS: GameModeOptionCard[] = [
     icon: '🎲',
     accentColor: '#A855F7',
     description:
-      'Não consegue decidir? O jogo sorteia automaticamente entre Modo Corrida e Modo Sobrevivência no início da partida!',
+      'Não consegue decidir? O jogo sorteia automaticamente entre Corrida, Quebra-Cabeça, Sobrevivência e Infinito/Abismo no início da partida!',
     rulesSummary: [
-      '🎲 Sorteia 50/50 entre Corrida (30m) e Sobrevivência (3 Vidas)',
+      '🎲 Sorteia entre Corrida (30m), Quebra-Cabeça (9m), Sobrevivência e Infinito/Abismo',
       '✨ Revela o modo sorteado assim que a partida começa',
       '🔄 Novo sorteio a cada revanche ou reinício',
     ],
@@ -478,8 +529,15 @@ const currentLobbyVictoryInfo = computed<VictoryConditionOptionCard>(() => {
   )
 })
 
+const showCupSelectionColumn = computed(
+  () => screenFlow.value === 'MULTIPLAYER_LOBBY'
+)
+
 function openGameModeModal() {
   isBurgerMenuOpen.value = false
+  if (!showCupSelectionColumn.value) {
+    selectedModeScreenColumn.value = 'MODE'
+  }
   isGameModeModalOpen.value = true
 }
 
@@ -530,7 +588,13 @@ const selectedModeScreenColumn = ref<'MODE' | 'CUP'>('MODE')
 
 function cycleGameModeOption(dir: -1 | 1) {
   selectedModeScreenColumn.value = 'MODE'
-  const order: SelectableGameMode[] = ['RACE', 'SURVIVAL', 'RANDOM']
+  const order: SelectableGameMode[] = [
+    'RACE',
+    'PUZZLE',
+    'SURVIVAL',
+    'ENDLESS',
+    'RANDOM',
+  ]
   const curIdx = order.indexOf(currentLobbySelectableMode.value)
   const nextIdx = (curIdx + dir + order.length) % order.length
   void selectGameModeOption(order[nextIdx])
@@ -836,6 +900,7 @@ const grandeCopaScoreboard = computed<{
   isOnline: boolean
   roundNumber: number
   isCupFinished: boolean
+  isTiebreaker: boolean
   victoryCondition: VictoryCondition
   cupTargetPoints: number
   cupTitle: string
@@ -853,6 +918,7 @@ const grandeCopaScoreboard = computed<{
       mpResult.cupTargetPoints ||
       (vc === 'SINGLE_WIN' ? 3 : vc === 'CUP_12' ? 12 : 6)
     const roundNum = mpResult.roundNumber || 1
+    const isTiebreaker = Boolean(mpResult.isTiebreaker)
     const rows: GrandeCopaScoreboardRow[] = (mpResult.podium || []).map(
       (entry, idx) => {
         const isLocal =
@@ -921,10 +987,11 @@ const grandeCopaScoreboard = computed<{
     return {
       isOnline: true,
       roundNumber: roundNum,
-      isCupFinished: mpResult.isCupFinished !== false,
+      isCupFinished: !isTiebreaker && mpResult.isCupFinished !== false,
+      isTiebreaker,
       victoryCondition: vc,
       cupTargetPoints: targetPts,
-      cupTitle: 'GRANDE COPA',
+      cupTitle: isTiebreaker ? 'DESEMPATE!' : 'GRANDE COPA',
       winnerNick:
         mpResult.winnerCustomNick || mpResult.winnerNick || 'VENCEDOR',
       roundWinnerNick:
@@ -979,13 +1046,16 @@ const grandeCopaScoreboard = computed<{
           isLocalPlayer: isLocal,
         }
       })
+      const championsCount = rows.filter((r) => r.isCupWinner).length
+      const isTiebreaker = vc !== 'SINGLE_WIN' && championsCount >= 2
       return {
         isOnline: true,
         roundNumber: multiplayerClient.state.activeMatch?.roundNumber || 1,
-        isCupFinished: rows.some((r) => r.isCupWinner),
+        isCupFinished: !isTiebreaker && championsCount === 1,
+        isTiebreaker,
         victoryCondition: vc,
         cupTargetPoints: targetPts,
-        cupTitle: 'GRANDE COPA',
+        cupTitle: isTiebreaker ? 'DESEMPATE!' : 'GRANDE COPA',
         winnerNick: rows[0]?.customNick || 'VOCÊ',
         roundWinnerNick: rows[0]?.customNick || 'VOCÊ',
         gameMode: snapshot.value.gameMode,
@@ -1050,6 +1120,7 @@ const grandeCopaScoreboard = computed<{
     isOnline: isOnlineMultiplayerMatch.value,
     roundNumber: localCupState.value.roundNumber || 1,
     isCupFinished: localCupState.value.isCupFinished,
+    isTiebreaker: false,
     victoryCondition: vc,
     cupTargetPoints: targetPts,
     cupTitle: 'GRANDE COPA',
@@ -1070,8 +1141,20 @@ function handleNextCupRound() {
 }
 
 function handleGrandeCopaContinue() {
+  if (
+    !isOnlineMultiplayerMatch.value &&
+    multiplayerClient.state.gameOverResult === null
+  ) {
+    restartMatch(true)
+    return
+  }
+
   if (isOnlineMultiplayerMatch.value && multiplayerClient.state.room) {
-    if (!grandeCopaScoreboard.value.isCupFinished) {
+    if (
+      grandeCopaScoreboard.value.isTiebreaker ||
+      (grandeCopaScoreboard.value.victoryCondition !== 'SINGLE_WIN' &&
+        !grandeCopaScoreboard.value.isCupFinished)
+    ) {
       handleNextCupRound()
     } else {
       handleReturnToLobbyFromMatch()
@@ -1080,7 +1163,12 @@ function handleGrandeCopaContinue() {
   }
 
   multiplayerClient.state.gameOverResult = null
-  if (grandeCopaScoreboard.value.isCupFinished && isOnlineMultiplayerMatch.value) {
+  if (
+    !grandeCopaScoreboard.value.isTiebreaker &&
+    (grandeCopaScoreboard.value.victoryCondition === 'SINGLE_WIN' ||
+      grandeCopaScoreboard.value.isCupFinished) &&
+    isOnlineMultiplayerMatch.value
+  ) {
     resetLocalCupState()
     handleReturnToLobbyFromMatch()
     return
@@ -1090,10 +1178,37 @@ function handleGrandeCopaContinue() {
 
 function resolveEffectiveGameMode(mode: SelectableGameMode): GameMode {
   if (mode === 'RANDOM') {
-    return Math.random() < 0.5 ? 'SURVIVAL' : 'RACE'
+    const pool: GameMode[] = ['RACE', 'PUZZLE', 'SURVIVAL', 'ENDLESS']
+    return pool[Math.floor(Math.random() * pool.length)]
   }
   return mode
 }
+
+const personalBestScore = ref<number>(authStore.getPersonalBest())
+
+const displayPersonalBest = computed<number>(() => {
+  const currentEndless =
+    snapshot.value.gameMode === 'ENDLESS'
+      ? (snapshot.value.endlessScore ?? 0)
+      : 0
+  return Math.max(
+    personalBestScore.value,
+    authStore.getPersonalBest(),
+    currentEndless
+  )
+})
+
+const formattedAbyssRemainingTime = computed<string>(() => {
+  const ms = Math.max(
+    0,
+    snapshot.value.abyssTimeRemainingMs ??
+      GAME_CONSTANTS.ENDLESS_MAX_MATCH_TIME_MS - snapshot.value.elapsedTimeMs
+  )
+  const totalSec = Math.ceil(ms / 1000)
+  const mins = Math.floor(totalSec / 60)
+  const secs = totalSec % 60
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+})
 
 const currentSelfPower = computed(() =>
   getPowerConfig(snapshot.value.inventoryPower.selfPower)
@@ -1605,6 +1720,7 @@ function handleDeclineIncomingRoomInvite() {
 
 function openLocalBattleLobby() {
   selectedMenuCard.value = 'LOCAL'
+  selectedModeScreenColumn.value = 'MODE'
   isBurgerMenuOpen.value = false
   isAuthModalOpen.value = false
   isFriendsModalOpen.value = false
@@ -1683,7 +1799,11 @@ function startGame(
       `🎲 Modo Aleatório sorteou: ${
         resolvedMode === 'SURVIVAL'
           ? '❤️ MODO SOBREVIVÊNCIA (3 VIDAS)'
-          : '🏁 MODO CORRIDA (30m)'
+          : resolvedMode === 'PUZZLE'
+            ? '🧩 MODO QUEBRA-CABEÇA (ABAIXO DO LASER - 9m)'
+            : resolvedMode === 'ENDLESS'
+              ? '🌌 MODO INFINITO / ABISMO'
+              : '🏁 MODO CORRIDA (30m)'
       }!`,
       'info'
     )
@@ -1727,6 +1847,10 @@ async function handleGoogleLogin() {
   try {
     const result = await authStore.loginWithGoogle()
     activePlayerSkinId.value = spriteRegistry.getActivePlayerSkinId()
+    personalBestScore.value = Math.max(
+      personalBestScore.value,
+      authStore.getPersonalBest()
+    )
     isAuthModalOpen.value = false
     multiplayerClient.connect()
     const pendingMode = pendingFriendsOpenAfterLogin.value
@@ -1785,6 +1909,8 @@ function returnToMainMenu() {
   isAuthModalOpen.value = false
   isFriendsModalOpen.value = false
   isGameModeModalOpen.value = false
+  isOptionsModalOpen.value = false
+  listeningKeybindAction.value = null
   lobbyCountdownMs.value = null
   if (towerInstance) {
     towerInstance.rankBadge = null
@@ -1798,6 +1924,184 @@ function returnToMainMenu() {
   menuRightSkinId.value = rightSkin
   titleTowerAlpha.value = 0
   screenFlow.value = 'MAIN_MENU'
+}
+
+function openOptionsScreen(asModal: boolean = false) {
+  selectedMenuCard.value = 'OPTIONS'
+  isBurgerMenuOpen.value = false
+  isSkinPickerOpen.value = false
+  listeningKeybindAction.value = null
+  optionsNickInput.value =
+    authStore.state.user?.customNick ||
+    fallbackLobbySlots.value[0]?.customNick ||
+    'ReiDosBlocos'
+  playToySfx('click')
+  if (asModal) {
+    isOptionsModalOpen.value = true
+  } else {
+    isAuthModalOpen.value = false
+    isFriendsModalOpen.value = false
+    isGameModeModalOpen.value = false
+    isOptionsModalOpen.value = false
+    screenFlow.value = 'OPTIONS_SCREEN'
+  }
+}
+
+function closeOptionsScreen() {
+  listeningKeybindAction.value = null
+  playToySfx('click')
+  if (isOptionsModalOpen.value) {
+    isOptionsModalOpen.value = false
+    return
+  }
+  returnToMainMenu()
+}
+
+function handleFullscreenChange() {
+  isFullscreen.value = Boolean(
+    typeof document !== 'undefined' && document.fullscreenElement
+  )
+}
+
+async function toggleFullscreen() {
+  if (typeof document === 'undefined') return
+  playToySfx('click')
+  try {
+    if (!document.fullscreenElement) {
+      await document.documentElement.requestFullscreen()
+      isFullscreen.value = true
+      triggerBanner('🖥️ Modo Tela Cheia ativado!', 'info')
+    } else {
+      await document.exitFullscreen()
+      isFullscreen.value = false
+      triggerBanner('🪟 Modo Janela ativado!', 'info')
+    }
+  } catch {
+    triggerBanner(
+      'Não foi possível alternar Tela Cheia neste navegador.',
+      'warning'
+    )
+  }
+}
+
+const controlsViewDevice = ref<'KEYBOARD' | 'GAMEPAD'>('KEYBOARD')
+
+function selectKeyboardPreset(
+  preset: 'TRICKY' | 'HYBRID' | 'ARROWS_ZXC' | 'WASD_QE'
+) {
+  controlsViewDevice.value = 'KEYBOARD'
+  listeningKeybindAction.value = null
+  optionsStore.applyPreset(preset)
+}
+
+function selectGamepadControlsView() {
+  controlsViewDevice.value = 'GAMEPAD'
+  listeningKeybindAction.value = null
+  playToySfx('click')
+}
+
+function getPrimaryKeycapLabel(actionId: KeybindActionId): string {
+  if (listeningKeybindAction.value === actionId) {
+    return '...'
+  }
+  const primary = optionsStore.state.keybinds[actionId]?.[0] || ''
+  return formatKeyCodeLabel(primary)
+}
+
+function startListeningKeybind(actionId: KeybindActionId) {
+  if (controlsViewDevice.value !== 'KEYBOARD') return
+  playToySfx('click')
+  listeningKeybindAction.value =
+    listeningKeybindAction.value === actionId ? null : actionId
+}
+
+function setMasterVolume(val: number) {
+  optionsStore.state.masterVolume = Math.max(0, Math.min(100, Math.round(val)))
+}
+
+function setBgmVolume(val: number) {
+  optionsStore.state.bgmVolume = Math.max(0, Math.min(100, Math.round(val)))
+}
+
+function setSfxVolume(val: number) {
+  optionsStore.state.sfxVolume = Math.max(0, Math.min(100, Math.round(val)))
+}
+
+function toggleMuteAudio() {
+  optionsStore.state.isMuted = !optionsStore.state.isMuted
+  if (!optionsStore.state.isMuted) {
+    playToySfx('click')
+  }
+  triggerBanner(
+    optionsStore.state.isMuted
+      ? '🔇 Áudio silenciado!'
+      : '🔊 Áudio reativado!',
+    'info'
+  )
+}
+
+function toggleScreenShakeOption() {
+  optionsStore.state.screenShakeEnabled = !optionsStore.state.screenShakeEnabled
+  playToySfx('click')
+}
+
+function toggleShowFpsPingOption() {
+  optionsStore.state.showFpsPing = !optionsStore.state.showFpsPing
+  playToySfx('click')
+}
+
+function toggleShowOpponentHandlesOption() {
+  optionsStore.state.showOpponentHandles =
+    !optionsStore.state.showOpponentHandles
+  playToySfx('click')
+}
+
+function toggleAllowInvitesInGameOption() {
+  optionsStore.state.allowInvitesInGame = !optionsStore.state.allowInvitesInGame
+  playToySfx('click')
+}
+
+function handleResetOptions() {
+  optionsStore.resetToDefaults()
+  listeningKeybindAction.value = null
+  showGhostPiece.value = optionsStore.state.showGhostPiece
+  windEnabled.value = optionsStore.state.windEnabled
+  dynamicTintEnabled.value = optionsStore.state.dynamicTintEnabled
+  if (towerInstance) {
+    towerInstance.showGhostPiece = showGhostPiece.value
+    towerInstance.setWindEnabled(windEnabled.value)
+  }
+  spriteRegistry.setDynamicTintEnabled(dynamicTintEnabled.value)
+  triggerBanner(
+    '🔄 Todas as opções foram restauradas para o padrão!',
+    'success'
+  )
+}
+
+async function saveOptionsCustomNick() {
+  const cleaned = optionsNickInput.value.trim()
+  if (cleaned.length < 2 || cleaned.length > 16) {
+    triggerBanner('O apelido deve ter entre 2 e 16 caracteres.', 'warning')
+    return
+  }
+  isSavingCustomNick.value = true
+  try {
+    if (authStore.state.user) {
+      await multiplayerClient.updateCustomNick(cleaned)
+    }
+    if (fallbackLobbySlots.value[0]) {
+      fallbackLobbySlots.value[0].customNick = cleaned
+    }
+    playToySfx('victory')
+    triggerBanner(`✨ Apelido atualizado para "${cleaned}"!`, 'success')
+  } catch (err) {
+    triggerBanner(
+      err instanceof Error ? err.message : 'Erro ao atualizar apelido.',
+      'danger'
+    )
+  } finally {
+    isSavingCustomNick.value = false
+  }
 }
 
 function pollMenuGamepad() {
@@ -1815,7 +2119,13 @@ function pollMenuGamepad() {
     if (screenFlow.value === 'TITLE_SCREEN') {
       transitionToMainMenu()
     } else if (screenFlow.value === 'MAIN_MENU') {
-      openLocalBattleLobby()
+      if (selectedMenuCard.value === 'OPTIONS') {
+        openOptionsScreen(false)
+      } else if (selectedMenuCard.value === 'MULTIPLAYER') {
+        handleMultiplayerCardClick()
+      } else {
+        openLocalBattleLobby()
+      }
     } else if (screenFlow.value === 'LOCAL_LOBBY' && !isGameModeModalOpen.value) {
       startGame()
     }
@@ -1842,11 +2152,13 @@ function computeLaneLayoutAndRanks(now: number) {
   const myHandle = (authStore.state.user?.handle || '@voce').toLowerCase()
   const myNick = authStore.state.user?.customNick || 'VOCÊ'
   const isSurvivalMode = snapshot.value.gameMode === 'SURVIVAL'
+  const isEndlessMode = snapshot.value.gameMode === 'ENDLESS'
+  const isPuzzleMode = snapshot.value.gameMode === 'PUZZLE'
 
-  // If in Survival Mode and all opponents have lost all their lives while we are alive,
+  // If in Survival or Endless (Rising Abyss) Mode and all opponents have been eliminated while we are alive,
   // trigger the Castle Roof Climax on our tower so we place the final Castle to finish!
   if (
-    isSurvivalMode &&
+    (isSurvivalMode || isEndlessMode) &&
     remoteEntries.length >= 1 &&
     snapshot.value.lives > 0 &&
     towerInstance.state === 'PLAYING' &&
@@ -1855,13 +2167,26 @@ function computeLaneLayoutAndRanks(now: number) {
     towerInstance.triggerSurvivalCastleClimax()
   }
 
+  // If in Puzzle Mode and ALL players in the room have petrified ("FINALIZADO"),
+  // start the synchronized block-by-block counting phase!
+  if (
+    isPuzzleMode &&
+    towerInstance.state === 'PETRIFIED_WAITING' &&
+    (remoteEntries.length === 0 ||
+      remoteEntries.every((r) => Boolean(r.isPetrified) || r.isEliminated))
+  ) {
+    towerInstance.startPuzzleCountingPhase()
+  }
+
   const elimMap = multiplayerClient.state.eliminationOrderByHandle
   const allHeights = [
     {
       handle: myHandle,
       height: snapshot.value.towerHeight,
       lives: snapshot.value.lives,
-      pieces: snapshot.value.piecesPlaced,
+      pieces: isPuzzleMode
+        ? (snapshot.value.countedPieces ?? snapshot.value.settledBlocks.length)
+        : snapshot.value.piecesPlaced,
       eliminationOrder: elimMap[myHandle] || 0,
     },
     ...remoteEntries.map((r) => {
@@ -1870,12 +2195,18 @@ function computeLaneLayoutAndRanks(now: number) {
         handle: h,
         height: r.towerHeight,
         lives: r.lives,
-        pieces: r.settledBlocks?.length ?? 0,
+        pieces: isPuzzleMode
+          ? (r.countedPieces ?? r.settledBlocks?.length ?? 0)
+          : (r.settledBlocks?.length ?? 0),
         eliminationOrder: r.eliminationOrder || elimMap[h] || 0,
       }
     }),
   ].sort((a, b) => {
-    if (isSurvivalMode) {
+    if (isPuzzleMode) {
+      if (b.pieces !== a.pieces) return b.pieces - a.pieces
+      return b.height - a.height
+    }
+    if (isSurvivalMode || isEndlessMode) {
       const aAlive = a.lives > 0 ? 1 : 0
       const bAlive = b.lives > 0 ? 1 : 0
       if (bAlive !== aAlive) return bAlive - aAlive
@@ -1883,8 +2214,10 @@ function computeLaneLayoutAndRanks(now: number) {
         // Reverse order of death: died later -> higher rank; died first -> last place
         return b.eliminationOrder - a.eliminationOrder
       }
-      if (b.pieces !== a.pieces) return b.pieces - a.pieces
-      if (b.lives !== a.lives) return b.lives - a.lives
+      if (isSurvivalMode) {
+        if (b.pieces !== a.pieces) return b.pieces - a.pieces
+        if (b.lives !== a.lives) return b.lives - a.lives
+      }
     }
     return b.height - a.height
   })
@@ -1942,7 +2275,7 @@ function computeLaneLayoutAndRanks(now: number) {
     return {
       laneOffsetX,
       slotIndex: r.slotIndex ?? 1,
-      handle: r.handle,
+      handle: optionsStore.state.showOpponentHandles ? r.handle : '',
       customNick: r.customNick,
       skinSpriteId: dbSkinToSpriteId(r.equippedSkin),
       rankBadge: rankByHandle.get(r.handle.toLowerCase()) || '2ND',
@@ -1959,6 +2292,10 @@ function computeLaneLayoutAndRanks(now: number) {
       fogAnchorY: r.fogAnchorY ?? 2.2,
       islands: r.islands || [],
       lastLifeLostAtMs: r.lastLifeLostAtMs || 0,
+      puzzleBaseRiseUnits: r.puzzleBaseRiseUnits ?? 0,
+      isPetrified: Boolean(r.isPetrified),
+      countedPieces: r.countedPieces ?? r.renderSettledBlocks.length,
+      laserOverloadRemainingMs: r.laserOverloadRemainingMs ?? null,
     }
   })
 
@@ -1989,8 +2326,17 @@ function computeLaneLayoutAndRanks(now: number) {
 function startLoop() {
   lastFrameTime = performance.now()
   const step = (now: number) => {
-    const dt = Math.min(32, now - lastFrameTime)
+    const rawDt = Math.max(1, now - lastFrameTime)
+    const dt = Math.min(32, rawDt)
     lastFrameTime = now
+
+    fpsFrameCount += 1
+    fpsAccumMs += rawDt
+    if (fpsAccumMs >= 500) {
+      liveFps.value = Math.min(240, Math.round((fpsFrameCount * 1000) / fpsAccumMs))
+      fpsFrameCount = 0
+      fpsAccumMs = 0
+    }
 
     pollMenuGamepad()
 
@@ -2021,7 +2367,7 @@ function startLoop() {
         ctx.clearRect(0, 0, canvasRef.value.width, canvasRef.value.height)
 
         if (screenFlow.value === 'IN_GAME' && towerInstance) {
-          if (!isDevModeOpen.value) {
+          if (!isDevModeOpen.value && !isOptionsModalOpen.value) {
             towerInstance.update(dt)
           }
 
@@ -2079,7 +2425,13 @@ function startLoop() {
                 fogAnchorY: snap.fogAnchorY,
                 islands: snap.islands,
                 isEliminated:
-                  snap.gameMode === 'SURVIVAL' && snap.lives <= 0,
+                  (snap.gameMode === 'SURVIVAL' ||
+                    snap.gameMode === 'ENDLESS') &&
+                  (snap.lives <= 0 || snap.state === 'GAME_OVER'),
+                puzzleBaseRiseUnits: snap.puzzleBaseRiseUnits,
+                isPetrified: snap.isPetrified,
+                countedPieces: snap.countedPieces,
+                laserOverloadRemainingMs: snap.laserOverloadRemainingMs,
               })
             }
           }
@@ -2110,15 +2462,191 @@ function startLoop() {
               towerAlpha: titleTowerAlpha.value,
               showSideMascots:
                 screenFlow.value !== 'MULTIPLAYER_LOBBY' &&
-                screenFlow.value !== 'LOCAL_LOBBY',
+                screenFlow.value !== 'LOCAL_LOBBY' &&
+                screenFlow.value !== 'OPTIONS_SCREEN',
             }
           )
         }
       }
     }
+    pollGamepadInput(now)
     rafId = requestAnimationFrame(step)
   }
   rafId = requestAnimationFrame(step)
+}
+
+// ============================================================================
+// GAMEPAD SUPPORT (PADRÃO XBOX / PLAYSTATION - CONTROLE TRICKY)
+// ============================================================================
+const connectedGamepadName = ref<string | null>(null)
+let gamepadWasSoftDropping = false
+let lastGamepadHorizMoveMs = 0
+const prevGamepadBtnState = {
+  left: false,
+  right: false,
+  rotateCW: false,
+  rotateCCW: false,
+  nudgeLeft: false,
+  nudgeRight: false,
+  lightMagic: false,
+  darkMagic: false,
+  options: false,
+}
+
+function pollGamepadInput(nowMs: number) {
+  if (typeof navigator === 'undefined' || !navigator.getGamepads) return
+  let gamepads: (Gamepad | null)[] = []
+  try {
+    gamepads = Array.from(navigator.getGamepads())
+  } catch {
+    return
+  }
+
+  const gp = gamepads.find((g) => g && g.connected) ?? null
+  connectedGamepadName.value = gp ? gp.id : null
+
+  if (!gp) {
+    if (gamepadWasSoftDropping && towerInstance) {
+      towerInstance.isSoftDropping = false
+      gamepadWasSoftDropping = false
+    }
+    prevGamepadBtnState.left = false
+    prevGamepadBtnState.right = false
+    prevGamepadBtnState.rotateCW = false
+    prevGamepadBtnState.rotateCCW = false
+    prevGamepadBtnState.nudgeLeft = false
+    prevGamepadBtnState.nudgeRight = false
+    prevGamepadBtnState.lightMagic = false
+    prevGamepadBtnState.darkMagic = false
+    prevGamepadBtnState.options = false
+    return
+  }
+
+  const isPressed = (idx: number): boolean => Boolean(gp.buttons[idx]?.pressed)
+  const axisX = gp.axes[0] ?? 0
+  const axisY = gp.axes[1] ?? 0
+
+  // Mover bloco para os lados: Direcional Digital (D-Pad) ou Analógico Esquerdo
+  const moveLeft = isPressed(14) || axisX < -0.5
+  const moveRight = isPressed(15) || axisX > 0.5
+  // Acelerar a queda (Drop): Direcional p/ Baixo ou Analógico Esquerdo p/ Baixo
+  const softDrop = isPressed(13) || axisY > 0.5
+  // Rotacionar p/ Direita: Botão X (Cruz / A = idx 0) ou Direcional p/ Cima (12) ou Analógico Esquerdo p/ Cima
+  const rotateCW = isPressed(0) || isPressed(12) || axisY < -0.6
+  // Rotacionar p/ Esquerda: Botão Triângulo / Y (idx 3)
+  const rotateCCW = isPressed(3)
+  // Empurrar bloco p/ os lados ("Socão"): Botões L1 (idx 4) e R1 (idx 5)
+  const nudgeLeft = isPressed(4)
+  const nudgeRight = isPressed(5)
+  // Usar Magia Branca (Luz/Defesa): Botão Quadrado (□ / X = idx 2)
+  const lightMagic = isPressed(2)
+  // Usar Magia Negra (Trevas/Ataque): Botão Círculo (○ / B = idx 1)
+  const darkMagic = isPressed(1)
+  // Pausar o jogo: Botão Options (Start = idx 9)
+  const optionsBtn = isPressed(9)
+
+  const justOptions = optionsBtn && !prevGamepadBtnState.options
+  const justRotateCW = rotateCW && !prevGamepadBtnState.rotateCW
+  const justRotateCCW = rotateCCW && !prevGamepadBtnState.rotateCCW
+  const justNudgeLeft = nudgeLeft && !prevGamepadBtnState.nudgeLeft
+  const justNudgeRight = nudgeRight && !prevGamepadBtnState.nudgeRight
+  const justLightMagic = lightMagic && !prevGamepadBtnState.lightMagic
+  const justDarkMagic = darkMagic && !prevGamepadBtnState.darkMagic
+  const justMoveLeft = moveLeft && !prevGamepadBtnState.left
+  const justMoveRight = moveRight && !prevGamepadBtnState.right
+
+  prevGamepadBtnState.left = moveLeft
+  prevGamepadBtnState.right = moveRight
+  prevGamepadBtnState.rotateCW = rotateCW
+  prevGamepadBtnState.rotateCCW = rotateCCW
+  prevGamepadBtnState.nudgeLeft = nudgeLeft
+  prevGamepadBtnState.nudgeRight = nudgeRight
+  prevGamepadBtnState.lightMagic = lightMagic
+  prevGamepadBtnState.darkMagic = darkMagic
+  prevGamepadBtnState.options = optionsBtn
+
+  if (screenFlow.value === 'TITLE_SCREEN' && (justOptions || justRotateCW)) {
+    transitionToMainMenu()
+    return
+  }
+
+  // Botão Options: pausa/abre Opções durante a partida
+  if (justOptions) {
+    if (screenFlow.value === 'IN_GAME') {
+      if (isOptionsModalOpen.value) {
+        closeOptionsScreen()
+      } else {
+        openOptionsScreen(true)
+      }
+      return
+    } else if (screenFlow.value === 'OPTIONS_SCREEN') {
+      closeOptionsScreen()
+      return
+    }
+  }
+
+  if (
+    screenFlow.value !== 'IN_GAME' ||
+    !towerInstance ||
+    isDevModeOpen.value ||
+    isOptionsModalOpen.value
+  ) {
+    if (gamepadWasSoftDropping && towerInstance) {
+      towerInstance.isSoftDropping = false
+      gamepadWasSoftDropping = false
+    }
+    return
+  }
+
+  // Acelerar a queda (Drop)
+  if (softDrop) {
+    towerInstance.isSoftDropping = true
+    gamepadWasSoftDropping = true
+  } else if (gamepadWasSoftDropping) {
+    towerInstance.isSoftDropping = false
+    gamepadWasSoftDropping = false
+  }
+
+  // Mover bloco para os lados (D-Pad ou Analógico Esquerdo com auto-repeat suave)
+  if (justMoveLeft || (moveLeft && nowMs - lastGamepadHorizMoveMs >= 135)) {
+    towerInstance.moveHorizontal(-1, false)
+    playToySfx('move')
+    lastGamepadHorizMoveMs = nowMs
+  } else if (
+    justMoveRight ||
+    (moveRight && nowMs - lastGamepadHorizMoveMs >= 135)
+  ) {
+    towerInstance.moveHorizontal(1, false)
+    playToySfx('move')
+    lastGamepadHorizMoveMs = nowMs
+  }
+
+  // Empurrar bloco para os lados ("Socão"): Botões L1 e R1
+  if (justNudgeLeft) {
+    towerInstance.moveHorizontal(-1, true)
+    playToySfx('move')
+  } else if (justNudgeRight) {
+    towerInstance.moveHorizontal(1, true)
+    playToySfx('move')
+  }
+
+  // Rotacionar para a Direita (Botão X / D-Pad Cima / Analógico Cima)
+  if (justRotateCW) {
+    towerInstance.rotateActivePiece(1)
+    playToySfx('rotate')
+  } else if (justRotateCCW) {
+    towerInstance.rotateActivePiece(-1)
+    playToySfx('rotate')
+  }
+
+  // Magia Branca (Botão Quadrado) e Magia Negra (Botão Círculo)
+  if (justLightMagic) {
+    towerInstance.activateSelfPower()
+    playToySfx('power')
+  } else if (justDarkMagic) {
+    towerInstance.activateAttackPower()
+    playToySfx('power')
+  }
 }
 
 function toggleDevMode(forceState?: boolean) {
@@ -2131,6 +2659,23 @@ function toggleDevMode(forceState?: boolean) {
 }
 
 function handleKeyDown(e: KeyboardEvent) {
+  // Interactive Keybind Remapping inside the Options screen
+  if (listeningKeybindAction.value !== null) {
+    e.preventDefault()
+    if (e.code === 'Escape') {
+      listeningKeybindAction.value = null
+      return
+    }
+    const actionId = listeningKeybindAction.value
+    optionsStore.setKeybind(actionId, e.code)
+    listeningKeybindAction.value = null
+    triggerBanner(
+      `🎮 Tecla [${formatKeyCodeLabel(e.code)}] atribuída com sucesso!`,
+      'success'
+    )
+    return
+  }
+
   if (document.activeElement && document.activeElement.tagName === 'INPUT') {
     return
   }
@@ -2147,26 +2692,49 @@ function handleKeyDown(e: KeyboardEvent) {
     return
   }
 
+  // Tela de Opções aberta (como página ou modal)
+  if (screenFlow.value === 'OPTIONS_SCREEN' || isOptionsModalOpen.value) {
+    if (e.code === 'Escape') {
+      e.preventDefault()
+      closeOptionsScreen()
+    }
+    return
+  }
+
   if (isGameModeModalOpen.value) {
     if (e.code === 'Escape' || e.code === 'Enter' || e.code === 'Space') {
       e.preventDefault()
       closeGameModeModal()
     } else if (e.code === 'ArrowLeft' || e.code === 'KeyA') {
       e.preventDefault()
-      selectedModeScreenColumn.value = 'MODE'
+      if (showCupSelectionColumn.value) {
+        selectedModeScreenColumn.value = 'MODE'
+      } else {
+        cycleGameModeOption(-1)
+      }
     } else if (e.code === 'ArrowRight' || e.code === 'KeyD') {
       e.preventDefault()
-      selectedModeScreenColumn.value = 'CUP'
+      if (showCupSelectionColumn.value) {
+        selectedModeScreenColumn.value = 'CUP'
+      } else {
+        cycleGameModeOption(1)
+      }
     } else if (e.code === 'ArrowUp' || e.code === 'KeyW') {
       e.preventDefault()
-      if (selectedModeScreenColumn.value === 'MODE') {
+      if (
+        !showCupSelectionColumn.value ||
+        selectedModeScreenColumn.value === 'MODE'
+      ) {
         cycleGameModeOption(-1)
       } else {
         cycleVictoryConditionOption(-1)
       }
     } else if (e.code === 'ArrowDown' || e.code === 'KeyS') {
       e.preventDefault()
-      if (selectedModeScreenColumn.value === 'MODE') {
+      if (
+        !showCupSelectionColumn.value ||
+        selectedModeScreenColumn.value === 'MODE'
+      ) {
         cycleGameModeOption(1)
       } else {
         cycleVictoryConditionOption(1)
@@ -2191,31 +2759,27 @@ function handleKeyDown(e: KeyboardEvent) {
     return
   }
 
-  // Tela SELECIONE O MODO (LOCAL_LOBBY)
+  // Tela SELECIONE O MODO (LOCAL_LOBBY — Singleplayer só tem Modo de Jogo, sem Copa)
   if (screenFlow.value === 'LOCAL_LOBBY') {
     if (e.code === 'Escape') {
       e.preventDefault()
       returnToMainMenu()
-    } else if (e.code === 'ArrowLeft' || e.code === 'KeyA') {
+    } else if (
+      e.code === 'ArrowUp' ||
+      e.code === 'KeyW' ||
+      e.code === 'ArrowLeft' ||
+      e.code === 'KeyA'
+    ) {
       e.preventDefault()
-      selectedModeScreenColumn.value = 'MODE'
-    } else if (e.code === 'ArrowRight' || e.code === 'KeyD') {
+      cycleGameModeOption(-1)
+    } else if (
+      e.code === 'ArrowDown' ||
+      e.code === 'KeyS' ||
+      e.code === 'ArrowRight' ||
+      e.code === 'KeyD'
+    ) {
       e.preventDefault()
-      selectedModeScreenColumn.value = 'CUP'
-    } else if (e.code === 'ArrowUp' || e.code === 'KeyW') {
-      e.preventDefault()
-      if (selectedModeScreenColumn.value === 'MODE') {
-        cycleGameModeOption(-1)
-      } else {
-        cycleVictoryConditionOption(-1)
-      }
-    } else if (e.code === 'ArrowDown' || e.code === 'KeyS') {
-      e.preventDefault()
-      if (selectedModeScreenColumn.value === 'MODE') {
-        cycleGameModeOption(1)
-      } else {
-        cycleVictoryConditionOption(1)
-      }
+      cycleGameModeOption(1)
     } else if (e.code === 'Enter' || e.code === 'Space') {
       e.preventDefault()
       startGame()
@@ -2236,18 +2800,34 @@ function handleKeyDown(e: KeyboardEvent) {
     return
   }
 
-  // Menu 2: MAIN_MENU — Setas alternam entre BATALHA LOCAL e MULTIPLAYER; Enter/Space confirma; Escape volta ao TITLE_SCREEN
+  // Menu 2: MAIN_MENU — Setas alternam entre BATALHA LOCAL, MULTIPLAYER e OPÇÕES; Enter/Space confirma; Escape volta ao TITLE_SCREEN
   if (screenFlow.value === 'MAIN_MENU') {
     if (e.code === 'ArrowLeft' || e.code === 'KeyA') {
       e.preventDefault()
       selectedMenuCard.value = 'LOCAL'
+      playToySfx('move')
     } else if (e.code === 'ArrowRight' || e.code === 'KeyD') {
       e.preventDefault()
-      selectedMenuCard.value = 'MULTIPLAYER'
+      selectedMenuCard.value =
+        selectedMenuCard.value === 'OPTIONS' ? 'OPTIONS' : 'MULTIPLAYER'
+      playToySfx('move')
+    } else if (e.code === 'ArrowDown' || e.code === 'KeyS') {
+      e.preventDefault()
+      selectedMenuCard.value = 'OPTIONS'
+      playToySfx('move')
+    } else if (e.code === 'ArrowUp' || e.code === 'KeyW') {
+      e.preventDefault()
+      selectedMenuCard.value =
+        selectedMenuCard.value === 'OPTIONS'
+          ? 'MULTIPLAYER'
+          : selectedMenuCard.value
+      playToySfx('move')
     } else if (e.code === 'Enter' || e.code === 'Space') {
       e.preventDefault()
       if (selectedMenuCard.value === 'MULTIPLAYER') {
         handleMultiplayerCardClick()
+      } else if (selectedMenuCard.value === 'OPTIONS') {
+        openOptionsScreen(false)
       } else {
         openLocalBattleLobby()
       }
@@ -2278,7 +2858,7 @@ function handleKeyDown(e: KeyboardEvent) {
     if (
       e.code === 'Enter' ||
       e.code === 'Space' ||
-      e.code === 'KeyR' ||
+      optionsStore.matchesAction('restartMatch', e.code) ||
       e.code === 'Escape'
     ) {
       e.preventDefault()
@@ -2287,7 +2867,7 @@ function handleKeyDown(e: KeyboardEvent) {
     return
   }
 
-  if (e.code === 'KeyR') {
+  if (optionsStore.matchesAction('restartMatch', e.code)) {
     e.preventDefault()
     if (
       !isOnlineMultiplayerMatch.value ||
@@ -2298,48 +2878,46 @@ function handleKeyDown(e: KeyboardEvent) {
     return
   }
 
-  // While Developer Mode is open, the game is paused: ignore piece movement keys
-  if (isDevModeOpen.value) {
+  // While Developer Mode or Options Modal is open, the game is paused: ignore piece movement keys
+  if (isDevModeOpen.value || isOptionsModalOpen.value) {
     return
   }
 
-  switch (e.code) {
-    case 'ArrowLeft':
-    case 'KeyA':
-      e.preventDefault()
-      towerInstance.moveHorizontal(-1, e.shiftKey)
-      break
-    case 'ArrowRight':
-    case 'KeyD':
-      e.preventDefault()
-      towerInstance.moveHorizontal(1, e.shiftKey)
-      break
-    case 'ArrowUp':
-    case 'KeyW':
-    case 'KeyE':
-    case 'KeyX':
-      e.preventDefault()
-      towerInstance.rotateActivePiece(1)
-      break
-    case 'KeyZ':
-    case 'KeyQ':
-      e.preventDefault()
-      towerInstance.rotateActivePiece(-1)
-      break
-    case 'ArrowDown':
-    case 'KeyS':
-      e.preventDefault()
-      towerInstance.isSoftDropping = true
-      break
-    case 'Space':
-      e.preventDefault()
-      towerInstance.activateSelfPower()
-      break
-    case 'KeyC':
-    case 'KeyB':
-      e.preventDefault()
-      towerInstance.activateAttackPower()
-      break
+  if (optionsStore.matchesAction('nudgeLeft', e.code)) {
+    e.preventDefault()
+    towerInstance.moveHorizontal(-1, true)
+    playToySfx('move')
+  } else if (optionsStore.matchesAction('nudgeRight', e.code)) {
+    e.preventDefault()
+    towerInstance.moveHorizontal(1, true)
+    playToySfx('move')
+  } else if (optionsStore.matchesAction('moveLeft', e.code)) {
+    e.preventDefault()
+    towerInstance.moveHorizontal(-1, e.shiftKey)
+    playToySfx('move')
+  } else if (optionsStore.matchesAction('moveRight', e.code)) {
+    e.preventDefault()
+    towerInstance.moveHorizontal(1, e.shiftKey)
+    playToySfx('move')
+  } else if (optionsStore.matchesAction('rotateCW', e.code)) {
+    e.preventDefault()
+    towerInstance.rotateActivePiece(1)
+    playToySfx('rotate')
+  } else if (optionsStore.matchesAction('rotateCCW', e.code)) {
+    e.preventDefault()
+    towerInstance.rotateActivePiece(-1)
+    playToySfx('rotate')
+  } else if (optionsStore.matchesAction('softDrop', e.code)) {
+    e.preventDefault()
+    towerInstance.isSoftDropping = true
+  } else if (optionsStore.matchesAction('selfPower', e.code)) {
+    e.preventDefault()
+    towerInstance.activateSelfPower()
+    playToySfx('power')
+  } else if (optionsStore.matchesAction('attackPower', e.code)) {
+    e.preventDefault()
+    towerInstance.activateAttackPower()
+    playToySfx('power')
   }
 }
 
@@ -2347,7 +2925,7 @@ function handleKeyUp(e: KeyboardEvent) {
   isShiftHeld.value = e.shiftKey
   if (!towerInstance) return
 
-  if (e.code === 'ArrowDown' || e.code === 'KeyS') {
+  if (optionsStore.matchesAction('softDrop', e.code)) {
     towerInstance.isSoftDropping = false
   }
 }
@@ -2373,7 +2951,11 @@ function restartMatch(
       `🎲 Modo Aleatório sorteou: ${
         nextMode === 'SURVIVAL'
           ? '❤️ MODO SOBREVIVÊNCIA (3 VIDAS)'
-          : '🏁 MODO CORRIDA (30m)'
+          : nextMode === 'PUZZLE'
+            ? '🧩 MODO QUEBRA-CABEÇA (ABAIXO DO LASER - 9m)'
+            : nextMode === 'ENDLESS'
+              ? '🌌 MODO INFINITO / ABISMO'
+              : '🏁 MODO CORRIDA (30m)'
       }!`,
       'info'
     )
@@ -2420,26 +3002,30 @@ function toggleColliders() {
 
 function toggleGhostPiece() {
   showGhostPiece.value = !showGhostPiece.value
+  optionsStore.state.showGhostPiece = showGhostPiece.value
   if (towerInstance) {
     towerInstance.showGhostPiece = showGhostPiece.value
   }
+  playToySfx('click')
   triggerBanner(
     showGhostPiece.value
       ? 'Sombra de Encaixe (Ghost Piece) ativada!'
       : 'Sombra de Encaixe (Ghost Piece) desativada!',
-    'info'
+  'info'
   )
 }
 
 function toggleWind() {
   windEnabled.value = !windEnabled.value
+  optionsStore.state.windEnabled = windEnabled.value
   if (towerInstance) {
     towerInstance.setWindEnabled(windEnabled.value)
   }
+  playToySfx('click')
   triggerBanner(
     windEnabled.value
       ? 'Vento ativado (a partir de 15m)!'
-      : 'Vento removido na aba Desenvolvedor!',
+      : 'Vento desativado!',
     windEnabled.value ? 'info' : 'warning'
   )
 }
@@ -2458,10 +3044,12 @@ function toggleSinglePlayerMode() {
 
 function useSelfPower() {
   towerInstance?.activateSelfPower()
+  playToySfx('power')
 }
 
 function useAttackPower() {
   towerInstance?.activateAttackPower()
+  playToySfx('power')
 }
 
 function triggerDevPower(powerId: PowerId) {
@@ -2499,7 +3087,9 @@ function togglePlaceholderMode() {
 
 function toggleDynamicTint() {
   dynamicTintEnabled.value = !dynamicTintEnabled.value
+  optionsStore.state.dynamicTintEnabled = dynamicTintEnabled.value
   spriteRegistry.setDynamicTintEnabled(dynamicTintEnabled.value)
+  playToySfx('click')
   triggerBanner(
     dynamicTintEnabled.value
       ? 'Colorização Dinâmica (3-Tons Plástico) ativada!'
@@ -2513,6 +3103,7 @@ function selectPlayerSkin(skinId: string) {
   activePlayerSkinId.value = spriteRegistry.getActivePlayerSkinId()
   isSkinPickerOpen.value = false
   void authStore.syncEquippedSkinBySpriteId(skinId)
+  playToySfx('click')
   const chosen = spriteRegistry.getActivePlayerSkin()
   triggerBanner(
     `Skin do Personagem alterada para ${chosen ? chosen.name : skinId}!`,
@@ -2563,11 +3154,17 @@ let unsubscribeSprites: (() => void) | null = null
 
 onMounted(() => {
   handleResize()
+  spriteRegistry.setDynamicTintEnabled(optionsStore.state.dynamicTintEnabled)
   // Anti-Hibernation Wake-up Ping for Render Socket.io Server on initial menu load
   multiplayerClient.wakeUpSocketServer()
   void authStore.restoreSession().then((restoredUser) => {
     if (restoredUser) {
       activePlayerSkinId.value = spriteRegistry.getActivePlayerSkinId()
+      optionsNickInput.value = restoredUser.customNick || restoredUser.displayName
+      personalBestScore.value = Math.max(
+        personalBestScore.value,
+        authStore.getPersonalBest()
+      )
       multiplayerClient.connect()
     }
   })
@@ -2580,10 +3177,21 @@ onMounted(() => {
         payload.gameMode,
         payload.selectedGameMode
       )
+      if (payload.isTiebreakerRound) {
+        triggerBanner(
+          '⚔️ RODADA DE DESEMPATE FINAL iniciada com todos os jogadores!',
+          'info'
+        )
+        return
+      }
       const modeTitle =
         activeMatchGameMode.value === 'SURVIVAL'
           ? '❤️ Modo Sobrevivência (3 Vidas)'
-          : '🏁 Modo Corrida (30m)'
+          : activeMatchGameMode.value === 'PUZZLE'
+            ? '🧩 Modo Quebra-Cabeça (Abaixo do Laser - 9m)'
+            : activeMatchGameMode.value === 'ENDLESS'
+              ? '🌌 Modo Infinito / Abismo Ascendente'
+              : '🏁 Modo Corrida (30m)'
       triggerBanner(
         `${modeTitle} Iniciado! Seed compartilhada: ${payload.pieceSeed}`,
         'success'
@@ -2593,6 +3201,7 @@ onMounted(() => {
       if (!towerInstance) return
       const cfg = getPowerConfig(powerType)
       towerInstance.triggerPowerEffect(powerType)
+      playToySfx('power')
       triggerBanner(
         `⚡ ${attackerNick} lançou ${cfg?.name || powerType} na sua torre!`,
         'danger'
@@ -2611,6 +3220,14 @@ onMounted(() => {
       }
     },
     onGameOver: (payload) => {
+      playToySfx('victory')
+      if (payload.isTiebreaker) {
+        triggerBanner(
+          '⚔️ EMPATE! Mais uma rodada com todos os jogadores para o Desempate Final!',
+          'info'
+        )
+        return
+      }
       triggerBanner(
         `🏆 Fim de Jogo! Vencedor: ${payload.winnerNick} (${payload.winnerHandle})!`,
         'success'
@@ -2644,6 +3261,13 @@ onMounted(() => {
     gameMode: activeMatchGameMode.value,
     onSnapshot: (snap) => {
       snapshot.value = snap
+      if (snap.gameMode === 'ENDLESS') {
+        const currentScore = snap.endlessScore ?? 0
+        if (currentScore > personalBestScore.value) {
+          personalBestScore.value = currentScore
+          void authStore.updatePersonalBest(currentScore)
+        }
+      }
       if (
         (!isOnlineMultiplayerMatch.value ||
           Object.keys(multiplayerClient.state.remoteLanes).length === 0) &&
@@ -2664,6 +3288,7 @@ onMounted(() => {
       }
     },
     onPieceSettled: (towerHeight, settledCount) => {
+      playToySfx('settle')
       if (!isOnlineMultiplayerMatch.value) return
       multiplayerClient.emitPieceSettled(towerHeight, settledCount)
     },
@@ -2675,15 +3300,23 @@ onMounted(() => {
       multiplayerClient.emitLifeLost(localPlayerLives.value)
     },
     onVictory: (elapsedTimeMs, towerHeight) => {
+      playToySfx('victory')
       if (!isOnlineMultiplayerMatch.value) return
-      multiplayerClient.emitClaimVictory(towerHeight, elapsedTimeMs)
+      const scoreOrHeight =
+        towerInstance?.gameMode === 'PUZZLE'
+          ? towerInstance.settledPieces.length
+          : towerHeight
+      multiplayerClient.emitClaimVictory(scoreOrHeight, elapsedTimeMs)
     },
   })
+  towerInstance.showGhostPiece = optionsStore.state.showGhostPiece
+  towerInstance.setWindEnabled(optionsStore.state.windEnabled)
   towerInstance.emitSnapshotNow()
 
   window.addEventListener('resize', handleResize)
   window.addEventListener('keydown', handleKeyDown)
   window.addEventListener('keyup', handleKeyUp)
+  document.addEventListener('fullscreenchange', handleFullscreenChange)
   startLoop()
 })
 
@@ -2693,6 +3326,7 @@ onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
   window.removeEventListener('keydown', handleKeyDown)
   window.removeEventListener('keyup', handleKeyUp)
+  document.removeEventListener('fullscreenchange', handleFullscreenChange)
 })
 </script>
 
@@ -2859,6 +3493,16 @@ onUnmounted(() => {
             >
               <span class="burger-menu-action-icon">📨</span>
               <span class="burger-menu-action-text">ENVIAR CONVITE</span>
+            </button>
+
+            <!-- Botão 3: OPÇÕES DO JOGO -->
+            <button
+              type="button"
+              class="burger-menu-action-btn burger-menu-action-btn--options"
+              @click="openOptionsScreen(screenFlow !== 'MAIN_MENU')"
+            >
+              <span class="burger-menu-action-icon">⚙️</span>
+              <span class="burger-menu-action-text">OPÇÕES DO JOGO</span>
             </button>
 
             <div class="burger-popup-divider"></div>
@@ -3028,21 +3672,6 @@ onUnmounted(() => {
               />
               <span class="menu-brick-card-title">BATALHA LOCAL</span>
             </div>
-
-            <!-- Botão de Engrenagem (Modo de Jogo) direto no cartão Batalha Local -->
-            <button
-              type="button"
-              class="menu-card-gear-pill"
-              title="Selecionar Modo de Jogo antes de iniciar"
-              @pointerdown.stop
-              @click.stop="openGameModeModal"
-              @keydown.enter.stop.prevent="openGameModeModal"
-            >
-              <span class="menu-card-gear-icon" aria-hidden="true">⚙️</span>
-              <span class="menu-card-gear-text">
-                {{ currentLobbyModeInfo.icon }} {{ currentLobbyModeInfo.shortTitle }} ▾
-              </span>
-            </button>
           </div>
 
           <!-- BLOCO 2: MULTIPLAYER (ATIVO — AUTENTICAÇÃO GOOGLE + MONGODB) -->
@@ -3180,36 +3809,6 @@ onUnmounted(() => {
               />
               <span class="menu-brick-card-title">MULTIPLAYER</span>
             </div>
-
-            <!-- Botões de Modo de Jogo + Condição de Vitória (ao lado) direto no cartão Multiplayer -->
-            <div class="menu-card-pills-row" @pointerdown.stop @click.stop>
-              <button
-                type="button"
-                class="menu-card-gear-pill"
-                title="Selecionar Modo de Jogo e Condição de Vitória antes de iniciar"
-                @pointerdown.stop
-                @click.stop="openGameModeModal"
-                @keydown.enter.stop.prevent="openGameModeModal"
-              >
-                <span class="menu-card-gear-icon" aria-hidden="true">⚙️</span>
-                <span class="menu-card-gear-text">
-                  {{ currentLobbyModeInfo.icon }} {{ currentLobbyModeInfo.shortTitle }} ▾
-                </span>
-              </button>
-
-              <button
-                type="button"
-                class="menu-card-gear-pill menu-card-gear-pill--cup"
-                title="Selecionar Condição de Vitória (Copa Multiplayer)"
-                @pointerdown.stop
-                @click.stop="openGameModeModal"
-                @keydown.enter.stop.prevent="openGameModeModal"
-              >
-                <span class="menu-card-gear-text">
-                  {{ currentLobbyVictoryInfo.icon }} {{ currentLobbyVictoryInfo.shortTitle }} ▾
-                </span>
-              </button>
-            </div>
           </div>
 
           <!-- BLOCO 3: SKINS (BLOQUEADO) -->
@@ -3233,11 +3832,132 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <!-- BLOCO 4: OPÇÕES (BLOQUEADO) -->
+          <!-- BLOCO 4: OPÇÕES (ATIVO) -->
           <div
-            class="menu-brick-card menu-brick-card--locked"
-            aria-disabled="true"
+            role="button"
+            tabindex="0"
+            class="menu-brick-card menu-brick-card--active"
+            :class="{
+              'menu-brick-card--selected': selectedMenuCard === 'OPTIONS',
+            }"
+            @mouseenter="selectedMenuCard = 'OPTIONS'"
+            @focus="selectedMenuCard = 'OPTIONS'"
+            @click="openOptionsScreen(false)"
+            @keydown.enter.prevent="openOptionsScreen(false)"
           >
+            <!-- 4 Cantoneiras Amarelas estilo Bloco de Montar -->
+            <svg
+              class="menu-corner-bracket menu-corner-bracket--tl"
+              viewBox="0 0 64 64"
+              aria-hidden="true"
+            >
+              <rect
+                x="8"
+                y="2"
+                width="16"
+                height="8"
+                rx="3"
+                fill="#F59E0B"
+                stroke="#1E1B4B"
+                stroke-width="3.5"
+              />
+              <rect
+                x="30"
+                y="2"
+                width="16"
+                height="8"
+                rx="3"
+                fill="#F59E0B"
+                stroke="#1E1B4B"
+                stroke-width="3.5"
+              />
+              <path
+                d="M 4,10 H 54 V 24 H 18 V 56 H 4 Z"
+                fill="#FBBF24"
+                stroke="#1E1B4B"
+                stroke-width="3.8"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M 7,13 H 50 V 17 H 14 V 52 H 7 Z"
+                fill="#FDE68A"
+              />
+            </svg>
+
+            <svg
+              class="menu-corner-bracket menu-corner-bracket--tr"
+              viewBox="0 0 64 64"
+              aria-hidden="true"
+            >
+              <rect
+                x="18"
+                y="2"
+                width="16"
+                height="8"
+                rx="3"
+                fill="#F59E0B"
+                stroke="#1E1B4B"
+                stroke-width="3.5"
+              />
+              <rect
+                x="40"
+                y="2"
+                width="16"
+                height="8"
+                rx="3"
+                fill="#F59E0B"
+                stroke="#1E1B4B"
+                stroke-width="3.5"
+              />
+              <path
+                d="M 10,10 H 60 V 56 H 46 V 24 H 10 Z"
+                fill="#FBBF24"
+                stroke="#1E1B4B"
+                stroke-width="3.8"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M 14,13 H 56 V 52 H 50 V 17 H 14 Z"
+                fill="#FDE68A"
+              />
+            </svg>
+
+            <svg
+              class="menu-corner-bracket menu-corner-bracket--bl"
+              viewBox="0 0 64 64"
+              aria-hidden="true"
+            >
+              <path
+                d="M 4,8 H 18 V 44 H 54 V 58 H 4 Z"
+                fill="#FBBF24"
+                stroke="#1E1B4B"
+                stroke-width="3.8"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M 7,12 H 14 V 48 H 50 V 53 H 7 Z"
+                fill="#FDE68A"
+              />
+            </svg>
+
+            <svg
+              class="menu-corner-bracket menu-corner-bracket--br"
+              viewBox="0 0 64 64"
+              aria-hidden="true"
+            >
+              <path
+                d="M 46,8 H 60 V 58 H 10 V 44 H 46 Z"
+                fill="#FBBF24"
+                stroke="#1E1B4B"
+                stroke-width="3.8"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M 50,12 H 56 V 53 H 14 V 48 H 50 Z"
+                fill="#FDE68A"
+              />
+            </svg>
+
             <div class="menu-brick-card-inner">
               <img
                 :src="menuSprites.screen_option"
@@ -3249,10 +3969,819 @@ onUnmounted(() => {
                 OPÇÕES
               </span>
             </div>
-            <div class="menu-coming-soon-ribbon">
-              <span>EM BREVE</span>
+          </div>
+        </div>
+      </div>
+    </transition>
+
+    <!-- =================================================================== -->
+    <!-- TELA E MODAL DE OPÇÕES COMPLETA ("OPÇÕES DO JOGO")                  -->
+    <!-- =================================================================== -->
+    <transition name="menu-fade-300">
+      <div
+        v-if="screenFlow === 'OPTIONS_SCREEN' || isOptionsModalOpen"
+        class="selecione-modo-screen options-screen-overlay"
+        :class="{
+          'selecione-modo-screen--in-game': isOptionsModalOpen,
+        }"
+      >
+        <!-- Botão superior esquerdo (X) para fechar ou voltar ao Menu Principal -->
+        <button
+          type="button"
+          class="mp-lobby-back-btn"
+          title="Voltar (Esc)"
+          @click="closeOptionsScreen"
+        >
+          <img
+            :src="menuSprites.button_x"
+            alt="Voltar"
+            draggable="false"
+          />
+        </button>
+
+        <!-- 1. Topo em Pedra: "OPÇÕES DO JOGO" -->
+        <header class="selecione-modo-top-banner" aria-hidden="true">
+          <div class="selecione-modo-stone-header">
+            <div class="selecione-modo-stone-wing selecione-modo-stone-wing--left"></div>
+            <div class="selecione-modo-stone-pillar"></div>
+            <div class="selecione-modo-stone-center">
+              <span class="selecione-modo-banner-title">OPÇÕES DO JOGO</span>
+            </div>
+            <div class="selecione-modo-stone-pillar"></div>
+            <div class="selecione-modo-stone-wing selecione-modo-stone-wing--right"></div>
+            <div class="selecione-modo-stone-ledge">
+              <span></span><span></span><span></span>
             </div>
           </div>
+        </header>
+
+        <!-- 2. Painel Central Estilo LEGO com 4 Abas -->
+        <div class="options-main-container">
+          <!-- Abas de Navegação estilo Peça LEGO -->
+          <div class="options-lego-tabs" role="tablist">
+            <button
+              type="button"
+              role="tab"
+              class="options-lego-tab-btn"
+              :class="{
+                'options-lego-tab-btn--active': optionsActiveTab === 'AUDIO',
+              }"
+              @click="
+                optionsActiveTab = 'AUDIO';
+                listeningKeybindAction = null;
+                playToySfx('click');
+              "
+            >
+              <span class="options-tab-studs" aria-hidden="true">
+                <span></span><span></span><span></span>
+              </span>
+              <span class="options-tab-body">🔊 ÁUDIO &amp; GERAL</span>
+            </button>
+
+            <button
+              type="button"
+              role="tab"
+              class="options-lego-tab-btn"
+              :class="{
+                'options-lego-tab-btn--active': optionsActiveTab === 'CONTROLS',
+              }"
+              @click="
+                optionsActiveTab = 'CONTROLS';
+                listeningKeybindAction = null;
+                playToySfx('click');
+              "
+            >
+              <span class="options-tab-studs" aria-hidden="true">
+                <span></span><span></span><span></span>
+              </span>
+              <span class="options-tab-body">🎮 CONTROLES</span>
+            </button>
+
+            <button
+              type="button"
+              role="tab"
+              class="options-lego-tab-btn"
+              :class="{
+                'options-lego-tab-btn--active': optionsActiveTab === 'GRAPHICS',
+              }"
+              @click="
+                optionsActiveTab = 'GRAPHICS';
+                listeningKeybindAction = null;
+                playToySfx('click');
+              "
+            >
+              <span class="options-tab-studs" aria-hidden="true">
+                <span></span><span></span><span></span>
+              </span>
+              <span class="options-tab-body">🖥️ GRÁFICOS &amp; HUD</span>
+            </button>
+
+            <button
+              type="button"
+              role="tab"
+              class="options-lego-tab-btn"
+              :class="{
+                'options-lego-tab-btn--active': optionsActiveTab === 'ACCOUNT',
+              }"
+              @click="
+                optionsActiveTab = 'ACCOUNT';
+                listeningKeybindAction = null;
+                playToySfx('click');
+              "
+            >
+              <span class="options-tab-studs" aria-hidden="true">
+                <span></span><span></span><span></span>
+              </span>
+              <span class="options-tab-body">👤 CONTA &amp; SOCIAL</span>
+            </button>
+          </div>
+
+          <!-- Quadro Principal de Opções -->
+          <div class="options-brick-board">
+            <!-- =========================================================== -->
+            <!-- ABA 1: ÁUDIO & GERAL                                        -->
+            <!-- =========================================================== -->
+            <div v-if="optionsActiveTab === 'AUDIO'" class="options-tab-panel">
+              <!-- Card de Volume Geral + Botão Mute + Testar Som -->
+              <div class="options-section-card">
+                <div class="options-section-header">
+                  <div>
+                    <h3 class="options-section-title">🔊 Controle de Volume</h3>
+                    <p class="options-section-desc">
+                      Ajuste o volume dos efeitos sintéticos de blocos, poderes e música
+                    </p>
+                  </div>
+                  <div class="options-header-actions">
+                    <button
+                      type="button"
+                      class="options-pill-btn"
+                      :class="
+                        optionsStore.state.isMuted
+                          ? 'options-pill-btn--danger'
+                          : 'options-pill-btn--secondary'
+                      "
+                      @click="toggleMuteAudio"
+                    >
+                      {{
+                        optionsStore.state.isMuted
+                          ? '🔇 MUDO ATIVO'
+                          : '🔊 SOM ATIVO'
+                      }}
+                    </button>
+                    <button
+                      type="button"
+                      class="options-pill-btn options-pill-btn--gold"
+                      @click="playToySfx('victory')"
+                    >
+                      🎵 Testar Som
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Volume Geral (Master) -->
+                <div class="options-slider-row">
+                  <div class="options-slider-label">
+                    <span>🎚️ Volume Geral (Master)</span>
+                    <strong class="mono">{{ optionsStore.state.masterVolume }}%</strong>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="5"
+                    :value="optionsStore.state.masterVolume"
+                    class="options-range-slider"
+                    @input="
+                      setMasterVolume(
+                        Number(($event.target as HTMLInputElement).value)
+                      )
+                    "
+                    @change="playToySfx('click')"
+                  />
+                </div>
+
+                <!-- Volume de Efeitos Sonoros (SFX) -->
+                <div class="options-slider-row">
+                  <div class="options-slider-label">
+                    <span>🧱 Efeitos Sonoros (SFX de Peças e Poderes)</span>
+                    <strong class="mono">{{ optionsStore.state.sfxVolume }}%</strong>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="5"
+                    :value="optionsStore.state.sfxVolume"
+                    class="options-range-slider"
+                    @input="
+                      setSfxVolume(
+                        Number(($event.target as HTMLInputElement).value)
+                      )
+                    "
+                    @change="playToySfx('rotate')"
+                  />
+                </div>
+
+                <!-- Volume da Música (BGM) -->
+                <div class="options-slider-row">
+                  <div class="options-slider-label">
+                    <span>🎶 Música Ambiente (BGM)</span>
+                    <strong class="mono">{{ optionsStore.state.bgmVolume }}%</strong>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="5"
+                    :value="optionsStore.state.bgmVolume"
+                    class="options-range-slider"
+                    @input="
+                      setBgmVolume(
+                        Number(($event.target as HTMLInputElement).value)
+                      )
+                    "
+                    @change="playToySfx('click')"
+                  />
+                </div>
+              </div>
+
+              <!-- Opções Gerais de Tela e Assistência -->
+              <div class="options-toggles-grid">
+                <div class="options-toggle-item">
+                  <div class="options-toggle-info">
+                    <strong>🖥️ Modo Tela Cheia (Fullscreen)</strong>
+                    <small>
+                      Expande o jogo para ocupar 100% do monitor sem barras do navegador
+                    </small>
+                  </div>
+                  <button
+                    type="button"
+                    class="options-switch-btn"
+                    :class="{ 'options-switch-btn--on': isFullscreen }"
+                    @click="toggleFullscreen"
+                  >
+                    {{ isFullscreen ? 'ATIVADO' : 'JANELA' }}
+                  </button>
+                </div>
+
+                <div class="options-toggle-item">
+                  <div class="options-toggle-info">
+                    <strong>👻 Sombra de Encaixe (Ghost Piece)</strong>
+                    <small>
+                      Exibe a silhueta projetada na base/torre indicando onde a peça cairá
+                    </small>
+                  </div>
+                  <button
+                    type="button"
+                    class="options-switch-btn"
+                    :class="{ 'options-switch-btn--on': showGhostPiece }"
+                    @click="toggleGhostPiece"
+                  >
+                    {{ showGhostPiece ? 'LIGADO' : 'DESLIGADO' }}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- =========================================================== -->
+            <!-- ABA 2: CONTROLES (LAYOUT VISUAL MINIMALISTA TRICKY)         -->
+            <!-- =========================================================== -->
+            <div
+              v-else-if="optionsActiveTab === 'CONTROLS'"
+              class="options-tab-panel tricky-controls-panel"
+            >
+              <!-- Seletor Minimalista de Esquema -->
+              <div class="tricky-controls-scheme-bar">
+                <button
+                  type="button"
+                  class="tricky-scheme-pill"
+                  :class="{
+                    'tricky-scheme-pill--active':
+                      controlsViewDevice === 'KEYBOARD' &&
+                      optionsStore.state.controlPreset === 'TRICKY',
+                  }"
+                  @click="selectKeyboardPreset('TRICKY')"
+                >
+                  Controle Tricky
+                </button>
+                <button
+                  type="button"
+                  class="tricky-scheme-pill"
+                  :class="{
+                    'tricky-scheme-pill--active':
+                      controlsViewDevice === 'KEYBOARD' &&
+                      optionsStore.state.controlPreset === 'WASD_QE',
+                  }"
+                  @click="selectKeyboardPreset('WASD_QE')"
+                >
+                  WASD
+                </button>
+                <button
+                  type="button"
+                  class="tricky-scheme-pill"
+                  :class="{
+                    'tricky-scheme-pill--active':
+                      controlsViewDevice === 'GAMEPAD',
+                  }"
+                  @click="selectGamepadControlsView()"
+                >
+                  Gamepad
+                </button>
+              </div>
+
+              <!-- Painel Visual Minimalista Integrado ao Popup -->
+              <div class="tricky-controls-scroll">
+                <div class="tricky-controls-scroll-body">
+                  <!-- 1. MOVER BLOCO -->
+                  <div class="tricky-ctrl-section">
+                    <h4 class="tricky-ctrl-heading">MOVER BLOCO</h4>
+                    <div class="tricky-ctrl-band tricky-ctrl-band--move">
+                      <div class="tricky-ctrl-row">
+                        <span class="tricky-arrow-tri" aria-hidden="true">◀</span>
+                        <button
+                          type="button"
+                          class="tricky-keycap-btn"
+                          :class="{
+                            'tricky-keycap-btn--listening':
+                              listeningKeybindAction === 'moveLeft',
+                          }"
+                          @click="startListeningKeybind('moveLeft')"
+                        >
+                          {{
+                            controlsViewDevice === 'GAMEPAD'
+                              ? 'D-Pad ⬅️'
+                              : getPrimaryKeycapLabel('moveLeft')
+                          }}
+                        </button>
+
+                        <button
+                          type="button"
+                          class="tricky-keycap-btn"
+                          :class="{
+                            'tricky-keycap-btn--listening':
+                              listeningKeybindAction === 'moveRight',
+                          }"
+                          @click="startListeningKeybind('moveRight')"
+                        >
+                          {{
+                            controlsViewDevice === 'GAMEPAD'
+                              ? 'D-Pad ➡️'
+                              : getPrimaryKeycapLabel('moveRight')
+                          }}
+                        </button>
+                        <span class="tricky-arrow-tri" aria-hidden="true">▶</span>
+                      </div>
+
+                      <div class="tricky-ctrl-down-stack">
+                        <button
+                          type="button"
+                          class="tricky-keycap-btn"
+                          :class="{
+                            'tricky-keycap-btn--listening':
+                              listeningKeybindAction === 'softDrop',
+                          }"
+                          @click="startListeningKeybind('softDrop')"
+                        >
+                          {{
+                            controlsViewDevice === 'GAMEPAD'
+                              ? 'D-Pad ⬇️'
+                              : getPrimaryKeycapLabel('softDrop')
+                          }}
+                        </button>
+                        <span class="tricky-arrow-tri tricky-arrow-tri--down" aria-hidden="true">▼</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- 2. GIRAR BLOCO -->
+                  <div class="tricky-ctrl-section">
+                    <h4 class="tricky-ctrl-heading">GIRAR BLOCO</h4>
+                    <div class="tricky-ctrl-band">
+                      <div class="tricky-ctrl-row">
+                        <button
+                          type="button"
+                          class="tricky-keycap-btn"
+                          :class="{
+                            'tricky-keycap-btn--listening':
+                              listeningKeybindAction === 'rotateCW',
+                          }"
+                          @click="startListeningKeybind('rotateCW')"
+                        >
+                          {{
+                            controlsViewDevice === 'GAMEPAD'
+                              ? '✕ / Cima'
+                              : getPrimaryKeycapLabel('rotateCW')
+                          }}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- 3. EMPURRAR BLOCO -->
+                  <div class="tricky-ctrl-section">
+                    <h4 class="tricky-ctrl-heading">EMPURRAR BLOCO</h4>
+                    <div class="tricky-ctrl-band">
+                      <div class="tricky-ctrl-row">
+                        <span class="tricky-arrow-tri tricky-arrow-tri--double" aria-hidden="true">◀◀</span>
+                        <button
+                          type="button"
+                          class="tricky-keycap-btn"
+                          :class="{
+                            'tricky-keycap-btn--listening':
+                              listeningKeybindAction === 'nudgeLeft',
+                          }"
+                          @click="startListeningKeybind('nudgeLeft')"
+                        >
+                          {{
+                            controlsViewDevice === 'GAMEPAD'
+                              ? 'L1'
+                              : getPrimaryKeycapLabel('nudgeLeft')
+                          }}
+                        </button>
+
+                        <button
+                          type="button"
+                          class="tricky-keycap-btn"
+                          :class="{
+                            'tricky-keycap-btn--listening':
+                              listeningKeybindAction === 'nudgeRight',
+                          }"
+                          @click="startListeningKeybind('nudgeRight')"
+                        >
+                          {{
+                            controlsViewDevice === 'GAMEPAD'
+                              ? 'R1'
+                              : getPrimaryKeycapLabel('nudgeRight')
+                          }}
+                        </button>
+                        <span class="tricky-arrow-tri tricky-arrow-tri--double" aria-hidden="true">▶▶</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- 4. MAGIA DE LUZ -->
+                  <div class="tricky-ctrl-section tricky-ctrl-section--magic">
+                    <div class="tricky-magic-header">
+                      <span class="tricky-magic-orb tricky-magic-orb--light" aria-hidden="true" />
+                      <h4 class="tricky-ctrl-heading tricky-ctrl-heading--magic">
+                        MAGIA DE LUZ
+                      </h4>
+                    </div>
+                    <div class="tricky-ctrl-band">
+                      <div class="tricky-ctrl-row">
+                        <button
+                          type="button"
+                          class="tricky-keycap-btn"
+                          :class="{
+                            'tricky-keycap-btn--listening':
+                              listeningKeybindAction === 'selfPower',
+                          }"
+                          @click="startListeningKeybind('selfPower')"
+                        >
+                          {{
+                            controlsViewDevice === 'GAMEPAD'
+                              ? '□ Quadrado'
+                              : getPrimaryKeycapLabel('selfPower')
+                          }}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- 5. MAGIA DAS TREVAS -->
+                  <div class="tricky-ctrl-section tricky-ctrl-section--magic">
+                    <div class="tricky-magic-header">
+                      <span class="tricky-magic-orb tricky-magic-orb--dark" aria-hidden="true" />
+                      <h4 class="tricky-ctrl-heading tricky-ctrl-heading--magic">
+                        MAGIA DAS TREVAS
+                      </h4>
+                    </div>
+                    <div class="tricky-ctrl-band">
+                      <div class="tricky-ctrl-row">
+                        <button
+                          type="button"
+                          class="tricky-keycap-btn"
+                          :class="{
+                            'tricky-keycap-btn--listening':
+                              listeningKeybindAction === 'attackPower',
+                          }"
+                          @click="startListeningKeybind('attackPower')"
+                        >
+                          {{
+                            controlsViewDevice === 'GAMEPAD'
+                              ? '○ Círculo'
+                              : getPrimaryKeycapLabel('attackPower')
+                          }}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- =========================================================== -->
+            <!-- ABA 3: GRÁFICOS, FÍSICA LOCAL & HUD                         -->
+            <!-- =========================================================== -->
+            <div
+              v-else-if="optionsActiveTab === 'GRAPHICS'"
+              class="options-tab-panel"
+            >
+              <div class="options-toggles-grid">
+                <div class="options-toggle-item">
+                  <div class="options-toggle-info">
+                    <strong>🎨 Colorização Plástica 3-Tons (ABS)</strong>
+                    <small>
+                      Pinta os blocos em 10 cores vibrantes de brinquedo (desative para cinza original)
+                    </small>
+                  </div>
+                  <button
+                    type="button"
+                    class="options-switch-btn"
+                    :class="{ 'options-switch-btn--on': dynamicTintEnabled }"
+                    @click="toggleDynamicTint"
+                  >
+                    {{ dynamicTintEnabled ? 'ATIVO (3-TONS)' : 'CINZA' }}
+                  </button>
+                </div>
+
+                <div class="options-toggle-item">
+                  <div class="options-toggle-info">
+                    <strong>💨 Efeito de Vento e Folhas (15m+)</strong>
+                    <small>
+                      Ativa rajadas de vento e partículas de folhas a partir de 15m de altura no modo local
+                    </small>
+                  </div>
+                  <button
+                    type="button"
+                    class="options-switch-btn"
+                    :class="{ 'options-switch-btn--on': windEnabled }"
+                    @click="toggleWind"
+                  >
+                    {{ windEnabled ? 'LIGADO' : 'DESLIGADO' }}
+                  </button>
+                </div>
+
+                <div class="options-toggle-item">
+                  <div class="options-toggle-info">
+                    <strong>💥 Impacto Visual (Screen Shake)</strong>
+                    <small>
+                      Vibração sutil ao encaixar blocos pesados e receber poderes de caos
+                    </small>
+                  </div>
+                  <button
+                    type="button"
+                    class="options-switch-btn"
+                    :class="{
+                      'options-switch-btn--on':
+                        optionsStore.state.screenShakeEnabled,
+                    }"
+                    @click="toggleScreenShakeOption"
+                  >
+                    {{
+                      optionsStore.state.screenShakeEnabled
+                        ? 'LIGADO'
+                        : 'DESLIGADO'
+                    }}
+                  </button>
+                </div>
+
+                <div class="options-toggle-item">
+                  <div class="options-toggle-info">
+                    <strong>📊 Contador de FPS &amp; Status de Rede</strong>
+                    <small>
+                      Exibe a taxa de quadros por segundo (FPS) no topo esquerdo durante a partida
+                    </small>
+                  </div>
+                  <button
+                    type="button"
+                    class="options-switch-btn"
+                    :class="{
+                      'options-switch-btn--on': optionsStore.state.showFpsPing,
+                    }"
+                    @click="toggleShowFpsPingOption"
+                  >
+                    {{
+                      optionsStore.state.showFpsPing ? 'VISÍVEL' : 'OCULTO'
+                    }}
+                  </button>
+                </div>
+
+                <div class="options-toggle-item">
+                  <div class="options-toggle-info">
+                    <strong>🏷️ Mostrar @handle nas Torres Adversárias</strong>
+                    <small>
+                      Exibe o identificador @nome_000 abaixo do apelido nas raias do Multiplayer
+                    </small>
+                  </div>
+                  <button
+                    type="button"
+                    class="options-switch-btn"
+                    :class="{
+                      'options-switch-btn--on':
+                        optionsStore.state.showOpponentHandles,
+                    }"
+                    @click="toggleShowOpponentHandlesOption"
+                  >
+                    {{
+                      optionsStore.state.showOpponentHandles
+                        ? 'VISÍVEL'
+                        : 'OCULTO'
+                    }}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- =========================================================== -->
+            <!-- ABA 4: CONTA, SKIN & PRIVACIDADE SOCIAL                     -->
+            <!-- =========================================================== -->
+            <div v-else class="options-tab-panel">
+              <!-- Perfil e Apelido -->
+              <div class="options-section-card">
+                <div class="options-section-header">
+                  <div>
+                    <h3 class="options-section-title">
+                      👤 Perfil de Jogador &amp; Conta Google
+                    </h3>
+                    <p class="options-section-desc">
+                      Personalize como você aparece na Sala Multiplayer e na Grande Copa
+                    </p>
+                  </div>
+                  <button
+                    v-if="authStore.state.user"
+                    type="button"
+                    class="options-pill-btn options-pill-btn--gold"
+                    @click="copyMyHandle"
+                  >
+                    📋 Copiar {{ authStore.state.user.handle }}
+                  </button>
+                </div>
+
+                <div class="options-account-row">
+                  <div class="options-nick-editor">
+                    <label class="options-field-label" for="options-nick-input">
+                      Apelido na Sala (2 a 16 caracteres):
+                    </label>
+                    <div class="options-nick-input-group">
+                      <input
+                        id="options-nick-input"
+                        v-model="optionsNickInput"
+                        type="text"
+                        maxlength="16"
+                        placeholder="Seu apelido..."
+                        class="options-text-input"
+                        @keydown.enter.prevent="saveOptionsCustomNick"
+                      />
+                      <button
+                        type="button"
+                        class="options-pill-btn options-pill-btn--green"
+                        :disabled="isSavingCustomNick"
+                        @click="saveOptionsCustomNick"
+                      >
+                        {{ isSavingCustomNick ? 'SALVANDO...' : 'SALVAR APELIDO' }}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="options-account-status-box">
+                    <template v-if="authStore.state.user">
+                      <img
+                        :src="authStore.state.user.avatarUrl"
+                        :alt="authStore.state.user.displayName"
+                        class="options-account-avatar"
+                        referrerpolicy="no-referrer"
+                      />
+                      <div class="options-account-meta">
+                        <strong>{{ authStore.state.user.displayName }}</strong>
+                        <small>{{ authStore.state.user.email }}</small>
+                      </div>
+                      <button
+                        type="button"
+                        class="options-pill-btn options-pill-btn--danger"
+                        @click="handleLogout"
+                      >
+                        🚪 Sair
+                      </button>
+                    </template>
+                    <template v-else>
+                      <div class="options-account-meta">
+                        <strong>Conta Offline (Convidado)</strong>
+                        <small>
+                          Conecte sua conta Google para adicionar amigos e jogar online
+                        </small>
+                      </div>
+                      <button
+                        type="button"
+                        class="options-pill-btn options-pill-btn--gold"
+                        @click="
+                          closeOptionsScreen();
+                          isAuthModalOpen = true;
+                        "
+                      >
+                        🔑 Conectar Google
+                      </button>
+                    </template>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Seletor Rápido de Skin do Mascote -->
+              <div class="options-section-card">
+                <h3 class="options-section-title" style="margin-bottom: 8px">
+                  🎭 Personagem Equipado
+                </h3>
+                <div class="options-skins-row">
+                  <button
+                    v-for="skin in playerSkins"
+                    :key="skin.id"
+                    type="button"
+                    class="options-skin-chip"
+                    :class="{
+                      'options-skin-chip--active':
+                        activePlayerSkinId === skin.id,
+                    }"
+                    @click="selectPlayerSkin(skin.id)"
+                  >
+                    <img
+                      :src="skin.url"
+                      :alt="skin.name"
+                      class="options-skin-chip-img"
+                      draggable="false"
+                    />
+                    <div class="options-skin-chip-text">
+                      <strong>{{ skin.shortName }}</strong>
+                      <small>{{ skin.name }}</small>
+                    </div>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Privacidade de Convites -->
+              <div class="options-toggles-grid">
+                <div class="options-toggle-item">
+                  <div class="options-toggle-info">
+                    <strong>📨 Alertas de Convite durante a Partida</strong>
+                    <small>
+                      Exibe notificações no topo caso um amigo te convide enquanto você está jogando
+                    </small>
+                  </div>
+                  <button
+                    type="button"
+                    class="options-switch-btn"
+                    :class="{
+                      'options-switch-btn--on':
+                        optionsStore.state.allowInvitesInGame,
+                    }"
+                    @click="toggleAllowInvitesInGameOption"
+                  >
+                    {{
+                      optionsStore.state.allowInvitesInGame
+                        ? 'PERMITIR'
+                        : 'SILENCIAR'
+                    }}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3. Botões LEGO no Canto Inferior Direito: RESTAURAR, PRONTO e VOLTAR -->
+        <div class="selecione-modo-bottom-right-actions">
+          <button
+            type="button"
+            class="selecione-action-brick-btn selecione-action-brick-btn--ready"
+            @click="closeOptionsScreen"
+          >
+            <span class="selecione-action-studs" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </span>
+            <span class="selecione-action-body">SALVAR</span>
+          </button>
+
+          <button
+            type="button"
+            class="selecione-action-brick-btn selecione-action-brick-btn--reset"
+            title="Restaurar todas as opções para os valores de fábrica"
+            @click="handleResetOptions"
+          >
+            <span class="selecione-action-studs" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </span>
+            <span class="selecione-action-body">PADRÃO</span>
+          </button>
+
+          <button
+            type="button"
+            class="selecione-action-brick-btn selecione-action-brick-btn--back"
+            @click="closeOptionsScreen"
+          >
+            <span class="selecione-action-studs" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </span>
+            <span class="selecione-action-body">VOLTAR</span>
+          </button>
         </div>
       </div>
     </transition>
@@ -3462,10 +4991,11 @@ onUnmounted(() => {
 
                 <div class="selecione-card-bottom-captions">
                   <span class="selecione-card-main-title">ALEATÓRIO</span>
+                  <span class="selecione-card-sub-title">Sorteia entre os 4 modos</span>
                 </div>
               </div>
 
-              <!-- CONTEÚDO INTERNO DO MODO: CORRIDA -->
+              <!-- CONTEÚDO INTERNO DO MODO: CORRIDA (30m) -->
               <div
                 v-else-if="currentLobbySelectableMode === 'RACE'"
                 class="selecione-modo-card-inner"
@@ -3521,7 +5051,192 @@ onUnmounted(() => {
                 </div>
                 <div class="selecione-card-bottom-captions">
                   <span class="selecione-card-main-title">CORRIDA</span>
-                  <span class="selecione-card-sub-title">Primeiro a 30 metros</span>
+                  <span class="selecione-card-sub-title">Meta de 30m</span>
+                </div>
+              </div>
+
+              <!-- CONTEÚDO INTERNO DO MODO: QUEBRA-CABEÇA (ABAIXO DO LASER - 9m) -->
+              <div
+                v-else-if="currentLobbySelectableMode === 'PUZZLE'"
+                class="selecione-modo-card-inner selecione-modo-card-inner--puzzle"
+              >
+                <div class="selecione-single-mode-art">
+                  <div class="selecione-char-cloud-wrap selecione-char-cloud-wrap--center">
+                    <!-- Feixe de Laser Vermelho Horizontal (9m) no Topo da Ilustração -->
+                    <svg
+                      class="selecione-puzzle-laser-svg"
+                      viewBox="0 0 190 42"
+                      aria-hidden="true"
+                    >
+                      <!-- Emissor Esquerdo -->
+                      <rect
+                        x="4"
+                        y="10"
+                        width="16"
+                        height="22"
+                        rx="3"
+                        fill="#334155"
+                        stroke="#181425"
+                        stroke-width="3"
+                      />
+                      <!-- Emissor Direito -->
+                      <rect
+                        x="170"
+                        y="10"
+                        width="16"
+                        height="22"
+                        rx="3"
+                        fill="#334155"
+                        stroke="#181425"
+                        stroke-width="3"
+                      />
+                      <!-- Brilho Externo do Laser -->
+                      <line
+                        x1="20"
+                        y1="21"
+                        x2="170"
+                        y2="21"
+                        stroke="#ef4444"
+                        stroke-width="9"
+                        stroke-linecap="round"
+                        opacity="0.55"
+                      />
+                      <!-- Feixe Central Intenso -->
+                      <line
+                        x1="20"
+                        y1="21"
+                        x2="170"
+                        y2="21"
+                        stroke="#fef08a"
+                        stroke-width="3.5"
+                        stroke-linecap="round"
+                      />
+                      <!-- Tag 9m -->
+                      <rect
+                        x="68"
+                        y="2"
+                        width="54"
+                        height="16"
+                        rx="8"
+                        fill="#991b1b"
+                        stroke="#fca5a5"
+                        stroke-width="1.8"
+                      />
+                      <text
+                        x="95"
+                        y="13"
+                        text-anchor="middle"
+                        fill="#fef08a"
+                        font-size="10"
+                        font-weight="900"
+                      >
+                        ⚡ 9m
+                      </text>
+                    </svg>
+
+                    <span class="selecione-floating-heart selecione-floating-heart--1">🧩</span>
+                    <span class="selecione-floating-heart selecione-floating-heart--2">🧴</span>
+                    <img
+                      :src="getSkinSpriteUrl('player_mage')"
+                      alt=""
+                      class="selecione-char-img selecione-char-img--large"
+                      draggable="false"
+                    />
+                    <!-- Pilar Estreito de Pedra sobre a Água -->
+                    <svg class="selecione-cloud-svg selecione-cloud-svg--large" viewBox="0 0 140 60" aria-hidden="true">
+                      <!-- Ondas de Água na Base -->
+                      <path
+                        d="M 10,52 Q 35,44 70,52 T 130,52 L 130,58 L 10,58 Z"
+                        fill="#0284c7"
+                        stroke="#181425"
+                        stroke-width="3"
+                      />
+                      <!-- Pilar Central Estreito (3 blocos) -->
+                      <rect
+                        x="46"
+                        y="18"
+                        width="48"
+                        height="36"
+                        rx="4"
+                        fill="#64748b"
+                        stroke="#181425"
+                        stroke-width="3.6"
+                      />
+                      <rect
+                        x="42"
+                        y="12"
+                        width="56"
+                        height="11"
+                        rx="3"
+                        fill="#22c55e"
+                        stroke="#181425"
+                        stroke-width="3.2"
+                      />
+                    </svg>
+                  </div>
+                </div>
+                <div class="selecione-card-bottom-captions">
+                  <span class="selecione-card-main-title selecione-card-main-title--fit">
+                    QUEBRA-CABEÇA
+                  </span>
+                  <span class="selecione-card-sub-title">Abaixo do Laser - 9m</span>
+                </div>
+              </div>
+
+              <!-- CONTEÚDO INTERNO DO MODO: INFINITO / ABISMO (ENDLESS) -->
+              <div
+                v-else-if="currentLobbySelectableMode === 'ENDLESS'"
+                class="selecione-modo-card-inner selecione-modo-card-inner--endless"
+              >
+                <div class="selecione-single-mode-art">
+                  <div class="selecione-char-cloud-wrap selecione-char-cloud-wrap--center">
+                    <!-- Linha Pontilhada de Losangos Cianos + Bandeiras de Checkpoint no Topo -->
+                    <svg
+                      class="selecione-puzzle-laser-svg"
+                      viewBox="0 0 190 42"
+                      aria-hidden="true"
+                    >
+                      <!-- Bandeira Esquerda -->
+                      <rect x="10" y="6" width="4" height="28" rx="2" fill="#475569" stroke="#181425" stroke-width="2" />
+                      <polygon points="14,7 36,13 14,19" fill="#0ea5e9" stroke="#181425" stroke-width="2" />
+                      <!-- Bandeira Direita -->
+                      <rect x="176" y="6" width="4" height="28" rx="2" fill="#475569" stroke="#181425" stroke-width="2" />
+                      <polygon points="176,7 154,13 176,19" fill="#0ea5e9" stroke="#181425" stroke-width="2" />
+                      <!-- Losangos Azuis/Cianos -->
+                      <polygon points="50,15 55,20 50,25 45,20" fill="#38bdf8" stroke="#181425" stroke-width="1.5" />
+                      <polygon points="72,15 77,20 72,25 67,20" fill="#38bdf8" stroke="#181425" stroke-width="1.5" />
+                      <polygon points="95,15 100,20 95,25 90,20" fill="#e0f2fe" stroke="#0284c7" stroke-width="1.5" />
+                      <polygon points="118,15 123,20 118,25 113,20" fill="#38bdf8" stroke="#181425" stroke-width="1.5" />
+                      <polygon points="140,15 145,20 140,25 135,20" fill="#38bdf8" stroke="#181425" stroke-width="1.5" />
+                    </svg>
+
+                    <span class="selecione-floating-heart selecione-floating-heart--1">🌌</span>
+                    <span class="selecione-floating-heart selecione-floating-heart--2">🪨</span>
+                    <img
+                      :src="getSkinSpriteUrl('player_shadow')"
+                      alt=""
+                      class="selecione-char-img selecione-char-img--large"
+                      draggable="false"
+                    />
+                    <!-- Linha de Petrificação Brilhante + Base de Pedra Cinza e Névoa do Abismo -->
+                    <svg class="selecione-cloud-svg selecione-cloud-svg--large" viewBox="0 0 140 60" aria-hidden="true">
+                      <!-- Cortina Escura do Abismo -->
+                      <rect x="8" y="26" width="124" height="32" rx="6" fill="#1e293b" opacity="0.92" />
+                      <!-- Blocos Petrificados Cinza -->
+                      <rect x="34" y="28" width="24" height="18" rx="2" fill="#64748b" stroke="#0f172a" stroke-width="2.5" />
+                      <rect x="58" y="26" width="26" height="20" rx="2" fill="#94a3b8" stroke="#0f172a" stroke-width="2.5" />
+                      <rect x="84" y="30" width="22" height="16" rx="2" fill="#64748b" stroke="#0f172a" stroke-width="2.5" />
+                      <!-- Linha Horizontal Brilhante (petrifyLineY) -->
+                      <line x1="6" y1="26" x2="134" y2="26" stroke="#38bdf8" stroke-width="6" stroke-linecap="round" opacity="0.55" />
+                      <line x1="6" y1="26" x2="134" y2="26" stroke="#f8fafc" stroke-width="2.5" stroke-linecap="round" />
+                    </svg>
+                  </div>
+                </div>
+                <div class="selecione-card-bottom-captions">
+                  <span class="selecione-card-main-title selecione-card-main-title--fit">
+                    INFINITO / ABISMO
+                  </span>
+                  <span class="selecione-card-sub-title">Score Recorde • Abismo</span>
                 </div>
               </div>
 
@@ -3598,8 +5313,9 @@ onUnmounted(() => {
             </button>
           </div>
 
-          <!-- COLUNA DIREITA: CONDIÇÃO DE VITÓRIA / COPA (COPA 1 / COPA 6 PONTOS / COPA 12 PONTOS) -->
+          <!-- COLUNA DIREITA: CONDIÇÃO DE VITÓRIA / COPA (APENAS NO MULTIPLAYER) -->
           <div
+            v-if="showCupSelectionColumn"
             class="selecione-modo-col"
             @mouseenter="selectedModeScreenColumn = 'CUP'"
             @click="selectedModeScreenColumn = 'CUP'"
@@ -3657,124 +5373,245 @@ onUnmounted(() => {
               </template>
 
               <div class="selecione-modo-card-inner selecione-modo-card-inner--cup">
-                <!-- Ilustração Grande: Troféu Dourado com Coroa de Louros Verde -->
+                <!-- Ilustração dos Troféus (1 troféu = Copa 1 | 2 troféus = Copa 6 | 3 troféus brilhando = Copa 12) -->
                 <div class="selecione-cup-art" aria-hidden="true">
-                  <svg viewBox="0 0 220 175" class="selecione-cup-svg">
-                    <!-- Coroa de Louros Verde (Esquerda e Direita) -->
-                    <g stroke="#181425" stroke-width="3" stroke-linejoin="round">
-                      <!-- Ramo Esquerdo -->
-                      <path
-                        d="M 88,136 C 52,128 32,96 36,56 C 48,62 56,74 56,86 C 44,74 44,52 52,38 C 62,48 66,62 64,76 C 58,60 64,44 74,34 C 80,46 80,62 74,76 C 72,98 78,116 94,128 Z"
-                        fill="#40c057"
+                  <svg
+                    viewBox="0 0 240 175"
+                    class="selecione-cup-svg"
+                    :class="{
+                      'selecione-cup-svg--shining':
+                        currentLobbyVictoryCondition === 'CUP_12',
+                    }"
+                  >
+                    <defs>
+                      <radialGradient
+                        id="selecioneCup12Glow"
+                        cx="50%"
+                        cy="50%"
+                        r="50%"
+                      >
+                        <stop offset="0%" stop-color="#fff3bf" stop-opacity="0.95" />
+                        <stop offset="55%" stop-color="#ffd43b" stop-opacity="0.45" />
+                        <stop offset="100%" stop-color="#fcc419" stop-opacity="0" />
+                      </radialGradient>
+
+                      <!-- Ramo Esquerdo de Louros -->
+                      <g
+                        id="selecioneLaurelLeft"
+                        stroke="#181425"
+                        stroke-width="3"
+                        stroke-linejoin="round"
+                      >
+                        <path
+                          d="M 98,136 C 62,128 42,96 46,56 C 58,62 66,74 66,86 C 54,74 54,52 62,38 C 72,48 76,62 74,76 C 68,60 74,44 84,34 C 90,46 90,62 84,76 C 82,98 88,116 104,128 Z"
+                          fill="#40c057"
+                        />
+                        <circle cx="52" cy="72" r="8" fill="#69db7c" />
+                        <circle cx="64" cy="96" r="9" fill="#51cf66" />
+                        <circle cx="80" cy="116" r="9" fill="#69db7c" />
+                      </g>
+
+                      <!-- Ramo Direito de Louros -->
+                      <g
+                        id="selecioneLaurelRight"
+                        stroke="#181425"
+                        stroke-width="3"
+                        stroke-linejoin="round"
+                      >
+                        <path
+                          d="M 142,136 C 178,128 198,96 194,56 C 182,62 174,74 174,86 C 186,74 186,52 178,38 C 168,48 164,62 166,76 C 172,60 166,44 156,34 C 150,46 150,62 156,76 C 158,98 152,116 136,128 Z"
+                          fill="#40c057"
+                        />
+                        <circle cx="188" cy="72" r="8" fill="#69db7c" />
+                        <circle cx="176" cy="96" r="9" fill="#51cf66" />
+                        <circle cx="160" cy="116" r="9" fill="#69db7c" />
+                      </g>
+
+                      <!-- Troféu Dourado Individual (centrado em x=120) -->
+                      <g id="selecioneTrophyUnit">
+                        <!-- Alças Laterais do Troféu -->
+                        <path
+                          d="M 84,72 C 58,68 58,104 88,112"
+                          fill="none"
+                          stroke="#181425"
+                          stroke-width="11"
+                          stroke-linecap="round"
+                        />
+                        <path
+                          d="M 84,72 C 58,68 58,104 88,112"
+                          fill="none"
+                          stroke="#f97316"
+                          stroke-width="5.5"
+                          stroke-linecap="round"
+                        />
+                        <path
+                          d="M 156,72 C 182,68 182,104 152,112"
+                          fill="none"
+                          stroke="#181425"
+                          stroke-width="11"
+                          stroke-linecap="round"
+                        />
+                        <path
+                          d="M 156,72 C 182,68 182,104 152,112"
+                          fill="none"
+                          stroke="#f97316"
+                          stroke-width="5.5"
+                          stroke-linecap="round"
+                        />
+
+                        <!-- Base e Pedestal do Troféu -->
+                        <path
+                          d="M 108,122 H 132 L 138,146 H 102 Z"
+                          fill="#f59f00"
+                          stroke="#181425"
+                          stroke-width="3.8"
+                          stroke-linejoin="round"
+                        />
+                        <ellipse
+                          cx="120"
+                          cy="150"
+                          rx="30"
+                          ry="9"
+                          fill="#fcc419"
+                          stroke="#181425"
+                          stroke-width="3.8"
+                        />
+
+                        <!-- Cálice Principal -->
+                        <path
+                          d="M 78,66 H 162 C 160,104 144,126 120,126 C 96,126 80,104 78,66 Z"
+                          fill="#fcc419"
+                          stroke="#181425"
+                          stroke-width="4"
+                          stroke-linejoin="round"
+                        />
+                        <!-- Emblema T no centro do cálice -->
+                        <path
+                          d="M 106,82 H 134 V 91 H 125 V 104 H 115 V 91 H 106 Z"
+                          fill="#f59f00"
+                          stroke="#d97706"
+                          stroke-width="2"
+                          stroke-linejoin="round"
+                        />
+
+                        <!-- Tampa Abobadada do Cálice -->
+                        <path
+                          d="M 74,66 C 74,34 96,20 120,20 C 144,20 166,34 166,66 Z"
+                          fill="#ffd43b"
+                          stroke="#181425"
+                          stroke-width="4"
+                          stroke-linejoin="round"
+                        />
+                        <!-- Topo da Tampa -->
+                        <circle
+                          cx="120"
+                          cy="17"
+                          r="8"
+                          fill="#fcc419"
+                          stroke="#181425"
+                          stroke-width="3.8"
+                        />
+                        <!-- Faixa Decorativa com Bolinhas Douradas -->
+                        <path
+                          d="M 74,62 Q 120,72 166,62"
+                          fill="none"
+                          stroke="#f59f00"
+                          stroke-width="8"
+                          stroke-linecap="round"
+                        />
+                        <circle cx="88" cy="56" r="4" fill="#fff3bf" />
+                        <circle cx="104" cy="58" r="4" fill="#fff3bf" />
+                        <circle cx="120" cy="59" r="4" fill="#fff3bf" />
+                        <circle cx="136" cy="58" r="4" fill="#fff3bf" />
+                        <circle cx="152" cy="56" r="4" fill="#fff3bf" />
+                      </g>
+
+                      <!-- Estrela de Brilho de 4 Pontas -->
+                      <g id="selecioneSparkleStar">
+                        <path
+                          d="M 0,-14 C 2,-4 4,-2 14,0 C 4,2 2,4 0,14 C -2,4 -4,2 -14,0 C -4,-2 -2,-4 0,-14 Z"
+                          fill="#fff9db"
+                          stroke="#181425"
+                          stroke-width="2.4"
+                          stroke-linejoin="round"
+                        />
+                        <circle cx="0" cy="0" r="3" fill="#ffd43b" />
+                      </g>
+                    </defs>
+
+                    <!-- ===================================================== -->
+                    <!-- OPÇÃO 1: COPA 1 (1 Troféu com decoração de plantas)   -->
+                    <!-- ===================================================== -->
+                    <template v-if="currentLobbyVictoryCondition === 'SINGLE_WIN'">
+                      <use href="#selecioneLaurelLeft" />
+                      <use href="#selecioneLaurelRight" />
+                      <use href="#selecioneTrophyUnit" />
+                    </template>
+
+                    <!-- ===================================================== -->
+                    <!-- OPÇÃO 2: COPA 6 PONTOS (2 Troféus)                    -->
+                    <!-- ===================================================== -->
+                    <template v-else-if="currentLobbyVictoryCondition === 'CUP_6'">
+                      <use href="#selecioneLaurelLeft" transform="translate(-20, 2)" />
+                      <use href="#selecioneLaurelRight" transform="translate(20, 2)" />
+                      <!-- Troféu da Esquerda -->
+                      <use
+                        href="#selecioneTrophyUnit"
+                        transform="translate(-34, 8) translate(120, 90) scale(0.82) rotate(-7) translate(-120, -90)"
                       />
-                      <circle cx="42" cy="72" r="8" fill="#69db7c" />
-                      <circle cx="54" cy="96" r="9" fill="#51cf66" />
-                      <circle cx="70" cy="116" r="9" fill="#69db7c" />
-                      <!-- Ramo Direito -->
-                      <path
-                        d="M 132,136 C 168,128 188,96 184,56 C 172,62 164,74 164,86 C 176,74 176,52 168,38 C 158,48 154,62 156,76 C 162,60 156,44 146,34 C 140,46 140,62 146,76 C 148,98 142,116 126,128 Z"
-                        fill="#40c057"
+                      <!-- Troféu da Direita -->
+                      <use
+                        href="#selecioneTrophyUnit"
+                        transform="translate(34, 6) translate(120, 90) scale(0.86) rotate(6) translate(-120, -90)"
                       />
-                      <circle cx="178" cy="72" r="8" fill="#69db7c" />
-                      <circle cx="166" cy="96" r="9" fill="#51cf66" />
-                      <circle cx="150" cy="116" r="9" fill="#69db7c" />
-                    </g>
+                    </template>
 
-                    <!-- Alças Laterais do Troféu -->
-                    <path
-                      d="M 74,72 C 48,68 48,104 78,112"
-                      fill="none"
-                      stroke="#181425"
-                      stroke-width="11"
-                      stroke-linecap="round"
-                    />
-                    <path
-                      d="M 74,72 C 48,68 48,104 78,112"
-                      fill="none"
-                      stroke="#f97316"
-                      stroke-width="5.5"
-                      stroke-linecap="round"
-                    />
-                    <path
-                      d="M 146,72 C 172,68 172,104 142,112"
-                      fill="none"
-                      stroke="#181425"
-                      stroke-width="11"
-                      stroke-linecap="round"
-                    />
-                    <path
-                      d="M 146,72 C 172,68 172,104 142,112"
-                      fill="none"
-                      stroke="#f97316"
-                      stroke-width="5.5"
-                      stroke-linecap="round"
-                    />
-
-                    <!-- Base e Pedestal do Troféu -->
-                    <path
-                      d="M 98,122 H 122 L 128,146 H 92 Z"
-                      fill="#f59f00"
-                      stroke="#181425"
-                      stroke-width="3.8"
-                      stroke-linejoin="round"
-                    />
-                    <ellipse
-                      cx="110"
-                      cy="150"
-                      rx="30"
-                      ry="9"
-                      fill="#fcc419"
-                      stroke="#181425"
-                      stroke-width="3.8"
-                    />
-
-                    <!-- Cálice Principal -->
-                    <path
-                      d="M 68,66 H 152 C 150,104 134,126 110,126 C 86,126 70,104 68,66 Z"
-                      fill="#fcc419"
-                      stroke="#181425"
-                      stroke-width="4"
-                      stroke-linejoin="round"
-                    />
-                    <!-- Emblema T no centro do cálice -->
-                    <path
-                      d="M 96,82 H 124 V 91 H 115 V 104 H 105 V 91 H 96 Z"
-                      fill="#f59f00"
-                      stroke="#d97706"
-                      stroke-width="2"
-                      stroke-linejoin="round"
-                    />
-
-                    <!-- Tampa Abobadada do Cálice -->
-                    <path
-                      d="M 64,66 C 64,34 86,20 110,20 C 134,20 156,34 156,66 Z"
-                      fill="#ffd43b"
-                      stroke="#181425"
-                      stroke-width="4"
-                      stroke-linejoin="round"
-                    />
-                    <!-- Topo da Tampa -->
-                    <circle
-                      cx="110"
-                      cy="17"
-                      r="8"
-                      fill="#fcc419"
-                      stroke="#181425"
-                      stroke-width="3.8"
-                    />
-                    <!-- Faixa Decorativa com Bolinhas Douradas -->
-                    <path
-                      d="M 64,62 Q 110,72 156,62"
-                      fill="none"
-                      stroke="#f59f00"
-                      stroke-width="8"
-                      stroke-linecap="round"
-                    />
-                    <circle cx="78" cy="56" r="4" fill="#fff3bf" />
-                    <circle cx="94" cy="58" r="4" fill="#fff3bf" />
-                    <circle cx="110" cy="59" r="4" fill="#fff3bf" />
-                    <circle cx="126" cy="58" r="4" fill="#fff3bf" />
-                    <circle cx="142" cy="56" r="4" fill="#fff3bf" />
+                    <!-- ===================================================== -->
+                    <!-- OPÇÃO 3: COPA 12 PONTOS (3 Troféus Brilhando)         -->
+                    <!-- ===================================================== -->
+                    <template v-else>
+                      <!-- Aura Dourada Radiante de Fundo -->
+                      <circle
+                        cx="120"
+                        cy="88"
+                        r="82"
+                        fill="url(#selecioneCup12Glow)"
+                        class="selecione-cup12-glow-circle"
+                      />
+                      <use href="#selecioneLaurelLeft" transform="translate(-28, 4)" />
+                      <use href="#selecioneLaurelRight" transform="translate(28, 4)" />
+                      <!-- Troféu Esquerdo -->
+                      <use
+                        href="#selecioneTrophyUnit"
+                        transform="translate(-48, 12) translate(120, 94) scale(0.74) rotate(-11) translate(-120, -94)"
+                      />
+                      <!-- Troféu Direito -->
+                      <use
+                        href="#selecioneTrophyUnit"
+                        transform="translate(48, 12) translate(120, 94) scale(0.74) rotate(11) translate(-120, -94)"
+                      />
+                      <!-- Troféu Central em Destaque -->
+                      <use
+                        href="#selecioneTrophyUnit"
+                        transform="translate(0, 2) translate(120, 90) scale(0.88) translate(-120, -90)"
+                      />
+                      <!-- Brilhos / Estrelas Cintilantes ao redor dos 3 Troféus -->
+                      <g class="selecione-cup-sparkle selecione-cup-sparkle--1" transform="translate(38, 28) scale(0.95)">
+                        <use href="#selecioneSparkleStar" />
+                      </g>
+                      <g class="selecione-cup-sparkle selecione-cup-sparkle--2" transform="translate(202, 26) scale(0.9)">
+                        <use href="#selecioneSparkleStar" />
+                      </g>
+                      <g class="selecione-cup-sparkle selecione-cup-sparkle--3" transform="translate(120, 12) scale(1.05)">
+                        <use href="#selecioneSparkleStar" />
+                      </g>
+                      <g class="selecione-cup-sparkle selecione-cup-sparkle--4" transform="translate(24, 122) scale(0.78)">
+                        <use href="#selecioneSparkleStar" />
+                      </g>
+                      <g class="selecione-cup-sparkle selecione-cup-sparkle--5" transform="translate(216, 120) scale(0.82)">
+                        <use href="#selecioneSparkleStar" />
+                      </g>
+                    </template>
                   </svg>
                 </div>
 
@@ -3786,15 +5623,6 @@ onUnmounted(() => {
                         : currentLobbyVictoryCondition === 'CUP_12'
                           ? 'COPA 12 PONTOS'
                           : 'COPA 6 PONTOS'
-                    }}
-                  </span>
-                  <span class="selecione-card-sub-title">
-                    {{
-                      currentLobbyVictoryCondition === 'SINGLE_WIN'
-                        ? 'Primeiro a 3 pontos (1 vitória)'
-                        : currentLobbyVictoryCondition === 'CUP_12'
-                          ? 'Primeiro a 12 pontos'
-                          : 'Primeiro a 6 pontos'
                     }}
                   </span>
                 </div>
@@ -4047,6 +5875,32 @@ onUnmounted(() => {
               <span class="lego-modo-copa-label">MODO E COPA</span>
             </span>
           </button>
+
+          <div class="mp-lobby-mode-cup-summary">
+            <span>
+              {{
+                currentLobbySelectableMode === 'SURVIVAL'
+                  ? 'SOBREVIVÊNCIA'
+                  : currentLobbySelectableMode === 'PUZZLE'
+                    ? 'QUEBRA-CABEÇA (9m)'
+                    : currentLobbySelectableMode === 'ENDLESS'
+                      ? 'INFINITO / ABISMO'
+                      : currentLobbySelectableMode === 'RANDOM'
+                        ? 'ALEATÓRIO'
+                        : 'CORRIDA (30m)'
+              }}
+            </span>
+            <span class="mp-lobby-mode-cup-dot" aria-hidden="true">•</span>
+            <span>
+              {{
+                currentLobbyVictoryCondition === 'SINGLE_WIN'
+                  ? 'COPA 1'
+                  : currentLobbyVictoryCondition === 'CUP_12'
+                    ? 'COPA 12 PONTOS'
+                    : 'COPA 6 PONTOS'
+              }}
+            </span>
+          </div>
         </header>
 
         <!-- 2. Grid Central de 4 Slots Horizontais (Máximo de 4 Players) -->
@@ -4111,34 +5965,6 @@ onUnmounted(() => {
                   class="mp-slot-ready-bg"
                   draggable="false"
                 />
-
-                <!-- Cartela de Pontos da Copa no topo do Slot do Jogador -->
-                <div
-                  class="mp-slot-cartela-badge"
-                  :title="`Cartela da Copa: ${slot.cupPoints} / ${currentLobbyVictoryInfo.targetPoints} pontos`"
-                >
-                  <div class="mp-slot-cartela-header">
-                    <span class="mp-slot-cartela-title">
-                      🏆 CARTELA
-                    </span>
-                    <span class="mp-slot-cartela-score mono">
-                      {{ slot.cupPoints }}/{{ currentLobbyVictoryInfo.targetPoints }}
-                    </span>
-                  </div>
-                  <div
-                    class="mp-slot-cartela-grid"
-                    :class="`mp-slot-cartela-grid--${currentLobbyVictoryInfo.targetPoints}`"
-                  >
-                    <span
-                      v-for="cellIdx in currentLobbyVictoryInfo.targetPoints"
-                      :key="cellIdx"
-                      class="mp-slot-cartela-cell"
-                      :class="{
-                        'mp-slot-cartela-cell--filled': cellIdx <= slot.cupPoints,
-                      }"
-                    ></span>
-                  </div>
-                </div>
 
                 <!-- Personagem equipado sobre a nuvem de blocos brancos -->
                 <img
@@ -4692,7 +6518,10 @@ onUnmounted(() => {
     <!-- =================================================================== -->
     <!-- ALERTAS EM TEMPO REAL (CONVITES DE SALA E PEDIDOS DE AMIZADE)       -->
     <!-- =================================================================== -->
-    <div class="mp-realtime-alerts-stack">
+    <div
+      v-if="screenFlow !== 'IN_GAME' || optionsStore.state.allowInvitesInGame"
+      class="mp-realtime-alerts-stack"
+    >
       <!-- Alerta de Convite para Sala Multiplayer -->
       <transition name="menu-fade-300">
         <div
@@ -4824,14 +6653,18 @@ onUnmounted(() => {
     <!-- IN-GAME HUD & MATCH OVERLAYS                                        -->
     <!-- =================================================================== -->
     <template v-if="screenFlow === 'IN_GAME'">
-      <!-- MINIMAL FLOATING TOP-LEFT HUD (MODE, LIVES, RACE/SURVIVAL INFO & WIND) -->
+      <!-- MINIMAL FLOATING TOP-LEFT HUD (MODE, LIVES, RACE/SURVIVAL/PUZZLE/ENDLESS INFO & WIND) -->
       <div class="floating-hud-left">
         <div
           class="hud-pill"
           :class="
             snapshot.gameMode === 'SURVIVAL'
               ? 'hud-pill--survival-mode'
-              : 'hud-pill--race-mode'
+              : snapshot.gameMode === 'PUZZLE'
+                ? 'hud-pill--puzzle-mode'
+                : snapshot.gameMode === 'ENDLESS'
+                  ? 'hud-pill--endless-mode'
+                  : 'hud-pill--race-mode'
           "
         >
           <span class="hud-pill-label">MODO</span>
@@ -4839,7 +6672,13 @@ onUnmounted(() => {
             {{
               snapshot.gameMode === 'SURVIVAL'
                 ? '❤️ SOBREVIVÊNCIA'
-                : '🏁 CORRIDA'
+                : snapshot.gameMode === 'PUZZLE'
+                  ? '🧩 QUEBRA-CABEÇA'
+                  : snapshot.gameMode === 'ENDLESS'
+                    ? snapshot.isSinglePlayer
+                      ? '🌌 INFINITO'
+                      : '🌋 ABISMO'
+                    : '🏁 CORRIDA'
             }}
           </span>
         </div>
@@ -4875,8 +6714,31 @@ onUnmounted(() => {
         </div>
 
         <div class="hud-pill">
-          <span class="hud-pill-label">TEMPO</span>
-          <span class="hud-pill-value mono">{{ formattedTime }}</span>
+          <span class="hud-pill-label">
+            {{
+              snapshot.gameMode === 'ENDLESS' && !snapshot.isSinglePlayer
+                ? '⏱️ ABISMO'
+                : 'TEMPO'
+            }}
+          </span>
+          <span class="hud-pill-value mono">
+            {{
+              snapshot.gameMode === 'ENDLESS' && !snapshot.isSinglePlayer
+                ? formattedAbyssRemainingTime
+                : formattedTime
+            }}
+          </span>
+        </div>
+
+        <div
+          v-if="
+            snapshot.gameMode === 'ENDLESS' &&
+            !snapshot.isSinglePlayer &&
+            snapshot.isAbyssOvertime
+          "
+          class="hud-pill hud-pill--abyss-overtime"
+        >
+          <span>⚡ ABISMO ACELERANDO!</span>
         </div>
 
         <div v-if="snapshot.gameMode === 'SURVIVAL'" class="hud-pill">
@@ -4889,14 +6751,65 @@ onUnmounted(() => {
           </span>
         </div>
 
+        <div
+          v-else-if="
+            snapshot.gameMode === 'PUZZLE' &&
+            (snapshot.state === 'PUZZLE_COUNTING' || snapshot.state === 'VICTORY')
+          "
+          class="hud-pill"
+        >
+          <span class="hud-pill-label">🧱 PEÇAS</span>
+          <span class="hud-pill-value mono">
+            {{ snapshot.countedPieces ?? snapshot.settledBlocks.length }}
+          </span>
+        </div>
+
+        <div
+          v-else-if="
+            snapshot.gameMode === 'ENDLESS' &&
+            snapshot.isSinglePlayer &&
+            (snapshot.consecutiveAbyssFalls || 0) > 0
+          "
+          class="hud-pill hud-pill--lives-danger"
+          title="Perder 5 peças seguidas no abismo encerra a partida por colapso da base!"
+        >
+          <span class="hud-pill-label">⚠️ RISCO ABISMO</span>
+          <span class="hud-pill-value mono">
+            {{ snapshot.consecutiveAbyssFalls }}/5 quedas
+          </span>
+        </div>
+
         <div class="hud-pill">
           <span class="hud-pill-label">ALTURA</span>
           <span v-if="snapshot.gameMode === 'SURVIVAL'" class="hud-pill-value mono">
             {{ snapshot.towerHeight.toFixed(1) }}m
             <small>MÁX {{ snapshot.maxTowerHeight.toFixed(1) }}m</small>
           </span>
+          <span v-else-if="snapshot.gameMode === 'PUZZLE'" class="hud-pill-value mono">
+            {{ snapshot.towerHeight.toFixed(1) }}<small>/9m ⚡</small>
+          </span>
+          <span v-else-if="snapshot.gameMode === 'ENDLESS'" class="hud-pill-value mono">
+            {{ snapshot.towerHeight.toFixed(1) }}m
+            <small v-if="snapshot.isSinglePlayer">
+              / 🏁 {{ (snapshot.nextCheckpointHeightUnits ?? 10).toFixed(0) }}m
+            </small>
+            <small v-else>
+              • 🪨 {{ (snapshot.petrifyLineHeightUnits ?? 0).toFixed(1) }}m
+            </small>
+          </span>
           <span v-else class="hud-pill-value mono">
             {{ snapshot.towerHeight.toFixed(1) }}<small>/30m</small>
+          </span>
+        </div>
+
+        <div
+          v-if="snapshot.gameMode === 'PUZZLE'"
+          class="hud-pill"
+          title="Cada peça que cai na água eleva sua ilha estreita em +0.5 bloco em direção ao feixe de laser!"
+        >
+          <span class="hud-pill-label">🌊 SUBIDA</span>
+          <span class="hud-pill-value mono">
+            +{{ (snapshot.puzzleBaseRiseUnits || 0).toFixed(1) }}<small>bl</small>
           </span>
         </div>
 
@@ -4923,6 +6836,18 @@ onUnmounted(() => {
           </span>
         </div>
         <div
+          v-if="optionsStore.state.showFpsPing"
+          class="hud-pill"
+        >
+          <span class="hud-pill-label">📊 FPS</span>
+          <span class="hud-pill-value mono">
+            {{ liveFps }}
+            <small v-if="isOnlineMultiplayerMatch" style="color: #4ade80">
+              • ONLINE
+            </small>
+          </span>
+        </div>
+        <div
           v-if="isShiftHeld"
           class="hud-pill hud-pill--subgrid"
         >
@@ -4936,82 +6861,118 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- TOP-CENTER NEXT PIECE BANNER (ALIGNED WITH THE TOWER AT TOP OF SCREEN) -->
+      <!-- TOP-CENTER HUD: ENDLESS SCORE + NEXT PIECE BANNER (MATCHING REFERENCE IMAGE) -->
       <div
-        v-if="snapshot.nextQueue.length > 0"
-        class="top-tower-next-piece"
-        title="Próxima Peça"
+        v-if="snapshot.nextQueue.length > 0 || snapshot.gameMode === 'ENDLESS'"
+        class="top-tower-center-cluster"
+        :class="{
+          'top-tower-center-cluster--endless': snapshot.gameMode === 'ENDLESS',
+        }"
       >
-        <svg
-          class="next-piece-banner-svg"
-          viewBox="0 0 96 76"
-          width="96"
-          height="76"
-          aria-hidden="true"
+        <div
+          v-if="snapshot.gameMode === 'ENDLESS'"
+          class="endless-hud-score-banner"
         >
-          <!-- Hanging Trapezoidal Lavender-White Box (with slightly angled bottom edge) -->
-          <path
-            d="M 13,12 L 84,13 L 79,71 L 16,66 Z"
-            fill="#E8E6FA"
-            stroke="#0F172A"
-            stroke-width="3"
-            stroke-linejoin="round"
-          />
-          <!-- Crisp White Inner Highlight Border -->
-          <path
-            d="M 15.5,14.5 L 81.5,15.5 L 76.8,68.2 L 18.5,63.5 Z"
-            fill="none"
-            stroke="#FFFFFF"
-            stroke-width="2"
-            stroke-linejoin="round"
-          />
-          <!-- Subtle Top Shadow Strip under the Header Rod -->
-          <path
-            d="M 14.5,13.5 L 82.5,14.5 L 82,21 L 15,20 Z"
-            fill="#CBC9EC"
-          />
-          <!-- Top Blue-Indigo Header Bar / Rod -->
-          <path
-            d="M 4,2.5 L 92,3.5 L 91,13.5 L 5,12.5 Z"
-            fill="#5C6BC0"
-            stroke="#0F172A"
-            stroke-width="3"
-            stroke-linejoin="round"
-          />
-          <!-- Top Rod Highlight Strip -->
-          <path
-            d="M 6.5,4.5 L 89.5,5.5 L 89.2,8.5 L 6.8,7.5 Z"
-            fill="#7E8CE0"
-          />
-        </svg>
-
-        <div class="next-piece-banner-content">
-          <div
-            v-if="snapshot.blindManualRemainingMs > 0"
-            class="next-blind-mystery"
-            title="Nuvem Fog ativa: próxima peça oculta!"
-          >
-            <span>?</span>
-          </div>
-          <PiecePreviewCanvas
-            v-else
-            :type="snapshot.nextQueue[0].type"
-            :variant="snapshot.nextQueue[0].variant"
-            :color-palette-index="snapshot.nextQueue[0].colorPaletteIndex"
-            :size="54"
-          />
+          SCORE: {{ snapshot.endlessScore ?? 0 }}
         </div>
 
         <div
-          v-if="snapshot.gameMode === 'SURVIVAL'"
-          class="survival-remaining-pieces-tag mono"
+          v-if="snapshot.nextQueue.length > 0"
+          class="top-tower-next-piece"
+          :class="{
+            'top-tower-next-piece--inline': snapshot.gameMode === 'ENDLESS',
+          }"
+          title="Próxima Peça"
         >
-          🧱 RESTAM {{ Math.max(0, snapshot.survivalGoalPieces - snapshot.piecesPlaced) }}
+          <svg
+            class="next-piece-banner-svg"
+            viewBox="0 0 96 76"
+            width="96"
+            height="76"
+            aria-hidden="true"
+          >
+            <!-- Hanging Trapezoidal Lavender-White Box (with slightly angled bottom edge) -->
+            <path
+              d="M 13,12 L 84,13 L 79,71 L 16,66 Z"
+              fill="#E8E6FA"
+              stroke="#0F172A"
+              stroke-width="3"
+              stroke-linejoin="round"
+            />
+            <!-- Crisp White Inner Highlight Border -->
+            <path
+              d="M 15.5,14.5 L 81.5,15.5 L 76.8,68.2 L 18.5,63.5 Z"
+              fill="none"
+              stroke="#FFFFFF"
+              stroke-width="2"
+              stroke-linejoin="round"
+            />
+            <!-- Subtle Top Shadow Strip under the Header Rod -->
+            <path
+              d="M 14.5,13.5 L 82.5,14.5 L 82,21 L 15,20 Z"
+              fill="#CBC9EC"
+            />
+            <!-- Top Blue-Indigo Header Bar / Rod -->
+            <path
+              d="M 4,2.5 L 92,3.5 L 91,13.5 L 5,12.5 Z"
+              fill="#5C6BC0"
+              stroke="#0F172A"
+              stroke-width="3"
+              stroke-linejoin="round"
+            />
+            <!-- Top Rod Highlight Strip -->
+            <path
+              d="M 6.5,4.5 L 89.5,5.5 L 89.2,8.5 L 6.8,7.5 Z"
+              fill="#7E8CE0"
+            />
+          </svg>
+
+          <div class="next-piece-banner-content">
+            <div
+              v-if="snapshot.blindManualRemainingMs > 0"
+              class="next-blind-mystery"
+              title="Nuvem Fog ativa: próxima peça oculta!"
+            >
+              <span>?</span>
+            </div>
+            <PiecePreviewCanvas
+              v-else
+              :type="snapshot.nextQueue[0].type"
+              :variant="snapshot.nextQueue[0].variant"
+              :color-palette-index="snapshot.nextQueue[0].colorPaletteIndex"
+              :size="54"
+            />
+          </div>
+
+          <div
+            v-if="snapshot.gameMode === 'SURVIVAL'"
+            class="survival-remaining-pieces-tag mono"
+          >
+            🧱 RESTAM {{ Math.max(0, snapshot.survivalGoalPieces - snapshot.piecesPlaced) }}
+          </div>
         </div>
       </div>
 
+      <!-- PERSONAL BEST TOP-RIGHT BANNER FOR ENDLESS MODE (UPDATES IN REAL TIME WITH SCORE) -->
+      <div
+        v-if="snapshot.gameMode === 'ENDLESS'"
+        class="endless-personal-best-banner"
+        :class="{
+          'endless-personal-best-banner--new-record':
+            (snapshot.endlessScore ?? 0) > 0 &&
+            (snapshot.endlessScore ?? 0) >= displayPersonalBest,
+        }"
+      >
+        PERSONAL BEST: {{ displayPersonalBest }}
+      </div>
+
       <!-- MINIMAL FLOATING TOP-RIGHT HUD (SINGLE-SLOT POWER + DEV MODE) -->
-      <div class="floating-hud-right">
+      <div
+        class="floating-hud-right"
+        :class="{
+          'floating-hud-right--endless': snapshot.gameMode === 'ENDLESS',
+        }"
+      >
         <!-- SINGLE-SLOT POWER INVENTORY CARD (8m / 16m / 24m CHECKPOINTS) -->
         <div
           class="power-slot-card"
@@ -5022,7 +6983,15 @@ onUnmounted(() => {
           <div class="power-slot-header">
             <span class="power-slot-title">⚡ PODER (SLOT ÚNICO)</span>
             <span class="power-slot-mode">
-              {{ snapshot.isSinglePlayer ? 'MVP Solo' : 'Multi' }}
+              {{
+                snapshot.gameMode === 'PUZZLE'
+                  ? '1x Cola'
+                  : snapshot.gameMode === 'ENDLESS'
+                    ? 'Checkpoint +8m'
+                    : snapshot.isSinglePlayer
+                      ? 'MVP Solo'
+                      : 'Multi'
+              }}
             </span>
           </div>
 
@@ -5055,6 +7024,12 @@ onUnmounted(() => {
               <kbd class="power-kbd">C / B</kbd>
             </button>
           </template>
+          <div v-else-if="snapshot.gameMode === 'PUZZLE'" class="power-slot-empty">
+            🧴 <strong>Super Cola única utilizada</strong> • Sem magias no Modo Quebra-Cabeça
+          </div>
+          <div v-else-if="snapshot.gameMode === 'ENDLESS'" class="power-slot-empty">
+            Estabilize <strong>1.5s</strong> na linha das bandeiras (<strong>{{ (snapshot.nextCheckpointHeightUnits ?? 10).toFixed(0) }}m</strong>) para subir +8m e ganhar Poder!
+          </div>
           <div v-else class="power-slot-empty">
             Estabilize 0.5s em
             <strong>
@@ -5137,6 +7112,14 @@ onUnmounted(() => {
         </button>
 
         <button
+          class="hud-action-btn"
+          title="Abrir Opções de Áudio, Controles e Gráficos"
+          @click="openOptionsScreen(true)"
+        >
+          🎛️ Opções
+        </button>
+
+        <button
           v-if="!isOnlineMultiplayerMatch"
           class="hud-action-btn"
           title="Nova Partida com Nova Seed (Tecla R)"
@@ -5215,7 +7198,11 @@ onUnmounted(() => {
             {{
               snapshot.gameMode === 'SURVIVAL'
                 ? `💔 PERDEU 1 VIDA! (${snapshot.lives}/${snapshot.maxLives})`
-                : '⚠️ CAIU NA ÁGUA!'
+                : snapshot.gameMode === 'PUZZLE'
+                  ? '🌊 CAIU NA ÁGUA! (+0.5 BLOCO NA BASE)'
+                  : snapshot.gameMode === 'ENDLESS'
+                    ? '🪨 CAIU NO ABISMO! (-1 SCORE)'
+                    : '⚠️ CAIU NA ÁGUA!'
             }}
           </div>
           <div
@@ -5230,6 +7217,23 @@ onUnmounted(() => {
               {{ ((snapshot.invulnerableRemainingMs || 0) / 1000).toFixed(1) }}s
             </strong>
             (ESTABILIZE SUA TORRE!)
+          </div>
+          <div
+            v-else-if="snapshot.gameMode === 'PUZZLE'"
+            class="penalty-shield-pill"
+          >
+            ⬆️ SUA ILHA SUBIU
+            <strong>+0.5 BLOCO</strong>
+            EM DIREÇÃO AO LASER (TOTAL: +{{ (snapshot.puzzleBaseRiseUnits || 0).toFixed(1) }} BL)
+          </div>
+          <div
+            v-else-if="
+              snapshot.gameMode === 'ENDLESS' && snapshot.isSinglePlayer
+            "
+            class="penalty-shield-pill"
+          >
+            ⚠️ QUEDAS SEGUIDAS NO ABISMO:
+            <strong>{{ snapshot.consecutiveAbyssFalls ?? 0 }}/5</strong>
           </div>
           <div class="penalty-sub">
             Respawn em
@@ -5254,7 +7258,7 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- SURVIVAL ELIMINATED SPECTATOR BANNER IN ONLINE MULTIPLAYER -->
+      <!-- SURVIVAL / ENDLESS ELIMINATED SPECTATOR BANNER IN ONLINE MULTIPLAYER -->
       <div
         v-if="
           snapshot.state === 'GAME_OVER' &&
@@ -5265,7 +7269,11 @@ onUnmounted(() => {
         class="goal-countdown-banner goal-countdown-banner--eliminated"
       >
         <div class="goal-countdown-label">
-          💀 VOCÊ PERDEU AS 3 VIDAS E FOI ELIMINADO!
+          {{
+            snapshot.gameMode === 'ENDLESS'
+              ? '🌋 SUA TORRE FOI ENGOLIDA PELO ABISMO E VOCÊ FOI ELIMINADO!'
+              : '💀 VOCÊ PERDEU AS 3 VIDAS E FOI ELIMINADO!'
+          }}
         </div>
         <div class="goal-countdown-sub">
           Assistindo os sobreviventes até o fim da partida...
@@ -5273,14 +7281,296 @@ onUnmounted(() => {
       </div>
 
       <!-- ================================================================= -->
-      <!-- POPUP DE FIM DE PARTIDA: GRANDE COPA (IDÊNTICO À REFERÊNCIA)      -->
+      <!-- FIM DE PARTIDA NO SINGLEPLAYER (SEM COPA / SEM CARTELA)           -->
       <!-- ================================================================= -->
       <div
         v-if="
-          multiplayerClient.state.gameOverResult !== null ||
-          snapshot.state === 'VICTORY' ||
-          (snapshot.state === 'GAME_OVER' &&
-            (!isOnlineMultiplayerMatch || !hasAliveRemoteOpponents))
+          !isOnlineMultiplayerMatch &&
+          multiplayerClient.state.gameOverResult === null &&
+          snapshot.state === 'GAME_OVER'
+        "
+        class="winner-screen-overlay winner-screen-overlay--gameover"
+      >
+        <div class="tricky-winner-text tricky-winner-text--gameover">
+          FIM DE JOGO!
+        </div>
+        <div class="winner-subcard winner-subcard--gameover">
+          <div class="survival-gameover-badge">
+            {{
+              snapshot.gameMode === 'ENDLESS'
+                ? '🪨 SUA BASE ATIVA COLAPSOU NO ABISMO!'
+                : '💔 SUAS 3 VIDAS ACABARAM!'
+            }}
+          </div>
+
+          <div
+            v-if="snapshot.gameMode === 'ENDLESS'"
+            class="survival-stats-grid"
+          >
+            <div class="survival-stat-box">
+              <span class="survival-stat-label">🏆 SCORE FINAL</span>
+              <strong class="survival-stat-value mono">
+                {{ snapshot.endlessScore ?? 0 }}
+              </strong>
+            </div>
+            <div class="survival-stat-box">
+              <span class="survival-stat-label">👑 PERSONAL BEST</span>
+              <strong class="survival-stat-value mono" style="color: #fde047">
+                {{ displayPersonalBest }}
+              </strong>
+            </div>
+            <div class="survival-stat-box">
+              <span class="survival-stat-label">📏 ALTURA MÁXIMA</span>
+              <strong class="survival-stat-value mono">
+                {{ snapshot.maxTowerHeight.toFixed(1) }}m
+              </strong>
+            </div>
+          </div>
+
+          <div v-else class="survival-stats-grid">
+            <div class="survival-stat-box">
+              <span class="survival-stat-label">🧱 PEÇAS EMPILHADAS</span>
+              <strong class="survival-stat-value mono">
+                {{ snapshot.piecesPlaced }} / {{ snapshot.survivalGoalPieces }}
+              </strong>
+            </div>
+            <div class="survival-stat-box">
+              <span class="survival-stat-label">📏 ALTURA MÁXIMA</span>
+              <strong class="survival-stat-value mono">
+                {{ snapshot.maxTowerHeight.toFixed(1) }}m
+              </strong>
+            </div>
+            <div class="survival-stat-box">
+              <span class="survival-stat-label">⏱️ TEMPO SOBREVIVIDO</span>
+              <strong class="survival-stat-value mono">
+                {{ formattedTime }}
+              </strong>
+            </div>
+          </div>
+
+          <div class="winner-actions">
+            <button
+              class="btn btn-primary"
+              @click="restartMatch(true)"
+            >
+              🔄 Tentar Novamente (R)
+            </button>
+            <button
+              class="btn btn-secondary"
+              @click="openGameModeModal"
+            >
+              ⚙️ Modo de Jogo
+            </button>
+            <button class="btn btn-secondary" @click="returnToMainMenu">
+              🏠 Menu Principal
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div
+        v-else-if="
+          !isOnlineMultiplayerMatch &&
+          multiplayerClient.state.gameOverResult === null &&
+          snapshot.state === 'VICTORY'
+        "
+        class="winner-screen-overlay"
+      >
+        <div class="winner-sunburst" />
+        <div class="tricky-winner-text">
+          {{
+            snapshot.gameMode === 'SURVIVAL'
+              ? 'SOBREVIVEU!'
+              : snapshot.gameMode === 'PUZZLE'
+                ? 'FINALIZADO!'
+                : 'WINNER!'
+          }}
+        </div>
+        <div class="winner-subcard">
+          <div
+            v-if="snapshot.gameMode === 'SURVIVAL'"
+            class="survival-stats-grid"
+          >
+            <div class="survival-stat-box">
+              <span class="survival-stat-label">❤️ VIDAS RESTANTES</span>
+              <strong class="survival-stat-value">
+                {{ '❤️'.repeat(Math.max(0, snapshot.lives)) }} ({{ snapshot.lives }}/3)
+              </strong>
+            </div>
+            <div class="survival-stat-box">
+              <span class="survival-stat-label">🧱 PEÇAS EMPILHADAS</span>
+              <strong class="survival-stat-value mono">
+                {{ snapshot.piecesPlaced }}
+              </strong>
+            </div>
+            <div class="survival-stat-box">
+              <span class="survival-stat-label">📏 ALTURA MÁXIMA</span>
+              <strong class="survival-stat-value mono">
+                {{ snapshot.maxTowerHeight.toFixed(1) }}m
+              </strong>
+            </div>
+          </div>
+
+          <div
+            v-else-if="snapshot.gameMode === 'PUZZLE'"
+            class="survival-stats-grid"
+          >
+            <div class="survival-stat-box">
+              <span class="survival-stat-label">🧩 PEÇAS CONTABILIZADAS</span>
+              <strong class="survival-stat-value mono">
+                {{ snapshot.countedPieces ?? snapshot.settledBlocks.length }}
+              </strong>
+            </div>
+            <div class="survival-stat-box">
+              <span class="survival-stat-label">🌊 SUBIDA DA ILHA</span>
+              <strong class="survival-stat-value mono">
+                +{{ (snapshot.puzzleBaseRiseUnits || 0).toFixed(1) }} bl
+              </strong>
+            </div>
+            <div class="survival-stat-box">
+              <span class="survival-stat-label">⚡ ALTURA / LASER</span>
+              <strong class="survival-stat-value mono">
+                {{ snapshot.towerHeight.toFixed(1) }}m / 9m
+              </strong>
+            </div>
+          </div>
+
+          <p class="winner-time">
+            Tempo da Partida: <strong>{{ formattedTime }}</strong>
+          </p>
+
+          <div class="winner-actions">
+            <button
+              class="btn btn-primary"
+              @click="restartMatch(true)"
+            >
+              🎲 Nova Partida (R)
+            </button>
+            <button
+              class="btn btn-secondary"
+              @click="openGameModeModal"
+            >
+              ⚙️ Modo de Jogo
+            </button>
+            <button class="btn btn-secondary" @click="returnToMainMenu">
+              🏠 Menu Principal
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ================================================================= -->
+      <!-- FIM DE PARTIDA MULTIPLAYER: MODO COPA 1 (SEM CARTELA, 1º GANHADOR)-->
+      <!-- ================================================================= -->
+      <div
+        v-else-if="
+          (isOnlineMultiplayerMatch ||
+            multiplayerClient.state.gameOverResult !== null) &&
+          grandeCopaScoreboard.victoryCondition === 'SINGLE_WIN' &&
+          (multiplayerClient.state.gameOverResult !== null ||
+            snapshot.state === 'VICTORY' ||
+            (snapshot.state === 'GAME_OVER' && !hasAliveRemoteOpponents))
+        "
+        class="winner-screen-overlay"
+      >
+        <div class="winner-sunburst" />
+        <div class="tricky-winner-text">
+          <template v-if="grandeCopaScoreboard.isTiebreaker">
+            ⚔️ EMPATE! RODADA DE DESEMPATE!
+          </template>
+          <template v-else>
+            🏆 {{ grandeCopaScoreboard.winnerNick }} VENCEU!
+          </template>
+        </div>
+        <div class="winner-subcard winner-subcard--cup">
+          <div class="mp-podium-list">
+            <div
+              v-for="row in grandeCopaScoreboard.rows"
+              :key="row.key"
+              class="mp-podium-row"
+              :class="[
+                `mp-podium-row--rank-${row.rank}`,
+                {
+                  'mp-podium-row--cup-champion':
+                    !grandeCopaScoreboard.isTiebreaker && row.rank === 1,
+                },
+              ]"
+            >
+              <span class="mp-podium-rank">{{ row.rank }}º</span>
+              <div class="grande-copa-portrait-square" style="width: 38px; height: 38px">
+                <img
+                  v-if="row.avatarUrl && !brokenAvatarByKey[row.key]"
+                  :src="row.avatarUrl"
+                  :alt="row.customNick"
+                  class="grande-copa-google-avatar-img"
+                  referrerpolicy="no-referrer"
+                  draggable="false"
+                  @error="markAvatarBroken(row.key)"
+                />
+                <div
+                  v-else
+                  class="grande-copa-google-avatar-fallback"
+                  style="font-size: 18px"
+                  aria-hidden="true"
+                >
+                  <span>
+                    {{ (row.customNick || 'J').charAt(0).toUpperCase() }}
+                  </span>
+                </div>
+              </div>
+              <img
+                :src="getSkinSpriteUrl(row.skinSpriteId)"
+                :alt="row.customNick"
+                class="mp-podium-skin"
+              />
+              <div class="mp-podium-identity">
+                <strong>
+                  {{ row.customNick }}
+                  <span
+                    v-if="!grandeCopaScoreboard.isTiebreaker && row.rank === 1"
+                    class="mp-podium-cup-crown"
+                    title="Vencedor da Copa 1!"
+                  >
+                    👑 VENCEDOR
+                  </span>
+                </strong>
+                <small>
+                  {{ row.handle }} • {{ row.towerHeight.toFixed(1) }}m
+                </small>
+              </div>
+            </div>
+          </div>
+
+          <div class="winner-actions">
+            <button
+              v-if="grandeCopaScoreboard.isTiebreaker"
+              class="btn btn-primary"
+              @click="handleGrandeCopaContinue"
+            >
+              ⚔️ INICIAR DESEMPATE FINAL
+            </button>
+            <button
+              v-else
+              class="btn btn-primary"
+              @click="handleReturnToLobbyFromMatch"
+            >
+              🎉 VOLTAR PARA A SALA
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ================================================================= -->
+      <!-- POPUP DE FIM DE PARTIDA: GRANDE COPA (COPA 6 E COPA 12 PONTOS)    -->
+      <!-- ================================================================= -->
+      <div
+        v-else-if="
+          (isOnlineMultiplayerMatch ||
+            multiplayerClient.state.gameOverResult !== null) &&
+          grandeCopaScoreboard.victoryCondition !== 'SINGLE_WIN' &&
+          (multiplayerClient.state.gameOverResult !== null ||
+            snapshot.state === 'VICTORY' ||
+            (snapshot.state === 'GAME_OVER' && !hasAliveRemoteOpponents))
         "
         class="grande-copa-overlay"
         @click="handleGrandeCopaContinue"
@@ -5995,7 +8285,13 @@ onUnmounted(() => {
           <!-- MODULAR 8-COLUMN BASE TERRAIN SELECTOR -->
           <div class="slide-regulator-box">
             <div class="slide-regulator-header">
-              <span>🏠 Base Modular (8 Colunas — <code>base.png</code>):</span>
+              <span>
+                🏠 Base Modular ({{
+                  snapshot.gameMode === 'PUZZLE'
+                    ? 'Ilhas Estreitas Quebra-Cabeça'
+                    : '8 Colunas — base.png'
+                }}):
+              </span>
               <strong>
                 {{ snapshot.basePresetName }}
                 <code>[{{ snapshot.baseElevations.join(', ') }}]</code>
@@ -6013,7 +8309,9 @@ onUnmounted(() => {
                 🎲 Sorteio pela Seed
               </button>
               <button
-                v-for="preset in BASE_TERRAIN_CATALOG"
+                v-for="preset in snapshot.gameMode === 'PUZZLE'
+                  ? PUZZLE_BASE_TERRAIN_CATALOG
+                  : BASE_TERRAIN_CATALOG"
                 :key="preset.id"
                 class="btn btn-xs"
                 :class="
