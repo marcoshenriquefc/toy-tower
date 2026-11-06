@@ -1344,6 +1344,12 @@ function transitionToMainMenu() {
   multiplayerClient.wakeUpSocketServer()
   screenFlow.value = 'TRANSITIONING'
   transitionElapsedMs = 0
+  setTimeout(() => {
+    if (screenFlow.value === 'TRANSITIONING') {
+      titleTowerAlpha.value = 0
+      screenFlow.value = 'MAIN_MENU'
+    }
+  }, 320)
 }
 
 const friendsList = computed<Array<FriendAccountEntry & { isOnline: boolean }>>(
@@ -3068,127 +3074,131 @@ function startLoop() {
     if (canvasRef.value) {
       const ctx = canvasRef.value.getContext('2d')
       if (ctx) {
-        ctx.clearRect(0, 0, canvasRef.value.width, canvasRef.value.height)
+        try {
+          ctx.clearRect(0, 0, canvasRef.value.width, canvasRef.value.height)
 
-        if (screenFlow.value === 'IN_GAME' && towerInstance) {
-          if (
-            !isDevModeOpen.value &&
-            !isOptionsModalOpen.value &&
-            !isGameModeModalOpen.value &&
-            !isGamePaused.value
-          ) {
-            towerInstance.update(dt)
-          }
-
-          if (isOnlineMultiplayerMatch.value) {
-            multiplayerClient.stepInterpolation(dt)
-            computeLaneLayoutAndRanks(now)
-
-            // 20Hz (50ms) state broadcast to room opponents
-            syncBroadcastAccumMs += dt
-            if (syncBroadcastAccumMs >= 50) {
-              syncBroadcastAccumMs = 0
-              const snap = towerInstance.getStateSnapshot()
-              const activeDebuffs: string[] = []
-              if (snap.blindManualRemainingMs > 0) {
-                activeDebuffs.push('BLIND_MANUAL')
-              }
-              if (
-                towerInstance.slickBrickRemaining > 0 ||
-                snap.activePiece?.powerEffect === 'SLICK_BRICK'
-              ) {
-                activeDebuffs.push('SLICK_BRICK')
-              }
-              if (
-                towerInstance.lockRotateRemaining > 0 ||
-                snap.activePiece?.powerEffect === 'LOCK_ROTATE'
-              ) {
-                activeDebuffs.push('LOCK_ROTATE')
-              }
-              if (
-                towerInstance.turboDropRemaining > 0 ||
-                snap.activePiece?.powerEffect === 'TURBO_DROP'
-              ) {
-                activeDebuffs.push('TURBO_DROP')
-              }
-              if (
-                towerInstance.giantPieceRemaining > 0 ||
-                snap.activePiece?.variant === 'GIANT'
-              ) {
-                activeDebuffs.push('GIANT_PIECE')
-              }
-              localPlayerLives.value = snap.lives
-              multiplayerClient.emitMatchSyncState({
-                activePiece: snap.activePiece,
-                settledBlocks: snap.settledBlocks,
-                towerHeight: snap.towerHeight,
-                lives: snap.lives,
-                mana:
-                  snap.inventoryPower.selfPower ||
-                  snap.inventoryPower.attackPower
-                    ? 100
-                    : 0,
-                activeDebuffs,
-                blindManualRemainingMs: snap.blindManualRemainingMs,
-                fogAnchorX: snap.fogAnchorX,
-                fogAnchorY: snap.fogAnchorY,
-                islands: snap.islands,
-                isEliminated:
-                  (snap.gameMode === 'SURVIVAL' ||
-                    snap.gameMode === 'ENDLESS') &&
-                  (snap.lives <= 0 || snap.state === 'GAME_OVER'),
-                puzzleBaseRiseUnits: snap.puzzleBaseRiseUnits,
-                isPetrified: snap.isPetrified,
-                countedPieces: snap.countedPieces,
-                laserOverloadRemainingMs: snap.laserOverloadRemainingMs,
-              })
+          if (screenFlow.value === 'IN_GAME' && towerInstance) {
+            if (
+              !isDevModeOpen.value &&
+              !isOptionsModalOpen.value &&
+              !isGameModeModalOpen.value &&
+              !isGamePaused.value
+            ) {
+              towerInstance.update(dt)
             }
-          }
 
-          towerInstance.screenShakeEnabled =
-            optionsStore.state.screenShakeEnabled
-          towerInstance.showPlayerNicks =
-            optionsStore.state.showOpponentHandles
-          if (!isOnlineMultiplayerMatch.value) {
-            towerInstance.playerNick =
-              authStore.state.user?.customNick ||
-              authStore.state.user?.displayName ||
-              fallbackLobbySlots.value[0]?.customNick ||
-              'Jogador'
-          }
+            if (isOnlineMultiplayerMatch.value) {
+              multiplayerClient.stepInterpolation(dt)
+              computeLaneLayoutAndRanks(now)
 
-          towerInstance.render(
-            ctx,
-            canvasRef.value.width,
-            canvasRef.value.height
-          )
-        } else {
-          menuAnimTimeMs += dt
-          if (screenFlow.value === 'TRANSITIONING') {
-            transitionElapsedMs += dt
-            titleTowerAlpha.value = Math.max(0, 1 - transitionElapsedMs / 300)
-            if (transitionElapsedMs >= 300) {
-              titleTowerAlpha.value = 0
-              screenFlow.value = 'MAIN_MENU'
+              // 20Hz (50ms) state broadcast to room opponents
+              syncBroadcastAccumMs += dt
+              if (syncBroadcastAccumMs >= 50) {
+                syncBroadcastAccumMs = 0
+                const snap = towerInstance.getStateSnapshot()
+                const activeDebuffs: string[] = []
+                if (snap.blindManualRemainingMs > 0) {
+                  activeDebuffs.push('BLIND_MANUAL')
+                }
+                if (
+                  towerInstance.slickBrickRemaining > 0 ||
+                  snap.activePiece?.powerEffect === 'SLICK_BRICK'
+                ) {
+                  activeDebuffs.push('SLICK_BRICK')
+                }
+                if (
+                  towerInstance.lockRotateRemaining > 0 ||
+                  snap.activePiece?.powerEffect === 'LOCK_ROTATE'
+                ) {
+                  activeDebuffs.push('LOCK_ROTATE')
+                }
+                if (
+                  towerInstance.turboDropRemaining > 0 ||
+                  snap.activePiece?.powerEffect === 'TURBO_DROP'
+                ) {
+                  activeDebuffs.push('TURBO_DROP')
+                }
+                if (
+                  towerInstance.giantPieceRemaining > 0 ||
+                  snap.activePiece?.variant === 'GIANT'
+                ) {
+                  activeDebuffs.push('GIANT_PIECE')
+                }
+                localPlayerLives.value = snap.lives
+                multiplayerClient.emitMatchSyncState({
+                  activePiece: snap.activePiece,
+                  settledBlocks: snap.settledBlocks,
+                  towerHeight: snap.towerHeight,
+                  lives: snap.lives,
+                  mana:
+                    snap.inventoryPower.selfPower ||
+                    snap.inventoryPower.attackPower
+                      ? 100
+                      : 0,
+                  activeDebuffs,
+                  blindManualRemainingMs: snap.blindManualRemainingMs,
+                  fogAnchorX: snap.fogAnchorX,
+                  fogAnchorY: snap.fogAnchorY,
+                  islands: snap.islands,
+                  isEliminated:
+                    (snap.gameMode === 'SURVIVAL' ||
+                      snap.gameMode === 'ENDLESS') &&
+                    (snap.lives <= 0 || snap.state === 'GAME_OVER'),
+                  puzzleBaseRiseUnits: snap.puzzleBaseRiseUnits,
+                  isPetrified: snap.isPetrified,
+                  countedPieces: snap.countedPieces,
+                  laserOverloadRemainingMs: snap.laserOverloadRemainingMs,
+                })
+              }
             }
+
+            towerInstance.screenShakeEnabled =
+              optionsStore.state.screenShakeEnabled
+            towerInstance.showPlayerNicks =
+              optionsStore.state.showOpponentHandles
+            if (!isOnlineMultiplayerMatch.value) {
+              towerInstance.playerNick =
+                authStore.state.user?.customNick ||
+                authStore.state.user?.displayName ||
+                fallbackLobbySlots.value[0]?.customNick ||
+                'Jogador'
+            }
+
+            towerInstance.render(
+              ctx,
+              canvasRef.value.width,
+              canvasRef.value.height
+            )
+          } else {
+            menuAnimTimeMs += dt
+            if (screenFlow.value === 'TRANSITIONING') {
+              transitionElapsedMs += dt
+              titleTowerAlpha.value = Math.max(0, 1 - transitionElapsedMs / 300)
+              if (transitionElapsedMs >= 300) {
+                titleTowerAlpha.value = 0
+                screenFlow.value = 'MAIN_MENU'
+              }
+            }
+            spriteRegistry.drawMenuScene(
+              ctx,
+              canvasRef.value.width,
+              canvasRef.value.height,
+              menuAnimTimeMs,
+              {
+                leftSkinId: menuLeftSkinId.value,
+                rightSkinId: menuRightSkinId.value,
+                towerAlpha: titleTowerAlpha.value,
+                showSideMascots:
+                  screenFlow.value !== 'MULTIPLAYER_LOBBY' &&
+                  screenFlow.value !== 'LOCAL_LOBBY' &&
+                  screenFlow.value !== 'SKINS_SCREEN' &&
+                  screenFlow.value !== 'OPTIONS_SCREEN' &&
+                  screenFlow.value !== 'SHOP_SCREEN',
+              }
+            )
           }
-          spriteRegistry.drawMenuScene(
-            ctx,
-            canvasRef.value.width,
-            canvasRef.value.height,
-            menuAnimTimeMs,
-            {
-              leftSkinId: menuLeftSkinId.value,
-              rightSkinId: menuRightSkinId.value,
-              towerAlpha: titleTowerAlpha.value,
-              showSideMascots:
-                screenFlow.value !== 'MULTIPLAYER_LOBBY' &&
-                screenFlow.value !== 'LOCAL_LOBBY' &&
-                screenFlow.value !== 'SKINS_SCREEN' &&
-                screenFlow.value !== 'OPTIONS_SCREEN' &&
-                screenFlow.value !== 'SHOP_SCREEN',
-            }
-          )
+        } catch (renderErr) {
+          console.error('[ToyTower] Render loop error:', renderErr)
         }
       }
     }

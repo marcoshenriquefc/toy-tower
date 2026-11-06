@@ -4069,7 +4069,10 @@ export class SpriteRegistry {
     ctx.moveTo(0, baseY + 60)
     const step = Math.max(120, canvasWidth / 8)
     for (let x = 0; x <= canvasWidth + step; x += step) {
-      const h = 45 + Math.sin(x * 0.015) * 28 + Math.cos(x * 0.008) * 20
+      const h = Math.max(
+        12,
+        45 + Math.sin(x * 0.015) * 28 + Math.cos(x * 0.008) * 20
+      )
       ctx.arc(x, baseY - h * 0.3, h, Math.PI, 0, false)
     }
     ctx.lineTo(canvasWidth, baseY + 60)
@@ -5633,7 +5636,7 @@ export class SpriteRegistry {
       ctx.lineWidth = 2.2
       ctx.lineCap = 'round'
       ctx.beginPath()
-      ctx.arc(0, 0, radius - 4.2, Math.PI * 1.08, Math.PI * 1.58)
+      ctx.arc(0, 0, Math.max(0.5, radius - 4.2), Math.PI * 1.08, Math.PI * 1.58)
       ctx.stroke()
     } else {
       // 2. Balão Vermelho Escuro para Caos (Deep Dark Red / Crimson outer ring + inner concentric orb)
@@ -5653,12 +5656,12 @@ export class SpriteRegistry {
       ctx.strokeStyle = '#1E1B4B'
       ctx.lineWidth = 3.2
       ctx.beginPath()
-      ctx.arc(0, 0, radius, 0, Math.PI * 2)
+      ctx.arc(0, 0, Math.max(0.5, radius), 0, Math.PI * 2)
       ctx.fill()
       ctx.stroke()
 
       // Concentric inner dark-red medallion circle (matching the reference image!)
-      const innerR = radius * 0.72
+      const innerR = Math.max(1, radius * 0.72)
       const innerGrad = ctx.createRadialGradient(
         -innerR * 0.25,
         -innerR * 0.25,
@@ -5684,7 +5687,7 @@ export class SpriteRegistry {
       ctx.lineWidth = 2.0
       ctx.lineCap = 'round'
       ctx.beginPath()
-      ctx.arc(0, 0, innerR - 3.2, Math.PI * 1.12, Math.PI * 1.52)
+      ctx.arc(0, 0, Math.max(0.5, innerR - 3.2), Math.PI * 1.12, Math.PI * 1.52)
       ctx.stroke()
     }
 
