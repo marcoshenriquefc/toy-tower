@@ -2435,6 +2435,56 @@ function selectCoinPackage(packId: string) {
   playToySfx('click')
 }
 
+let coinOrderPollTimer: number | null = null
+
+function startCoinOrderPolling(orderId: string) {
+  if (typeof window === 'undefined' || !orderId) return
+  if (coinOrderPollTimer !== null) {
+    window.clearInterval(coinOrderPollTimer)
+    coinOrderPollTimer = null
+  }
+  let attempts = 0
+  coinOrderPollTimer = window.setInterval(async () => {
+    attempts += 1
+    if (attempts > 75) {
+      if (coinOrderPollTimer !== null) {
+        window.clearInterval(coinOrderPollTimer)
+        coinOrderPollTimer = null
+      }
+      return
+    }
+    try {
+      const res = await authStore.checkCoinOrderStatus(orderId)
+      if (res.order.status === 'APPROVED') {
+        if (coinOrderPollTimer !== null) {
+          window.clearInterval(coinOrderPollTimer)
+          coinOrderPollTimer = null
+        }
+        if (typeof authStore.state.user?.coins === 'number') {
+          localShopCoins.value = authStore.state.user.coins
+          saveLocalShopState()
+        }
+        playToySfx('victory')
+        triggerShopPurchaseBurst()
+        triggerBanner(
+          `🎉 Pagamento aprovado! +${res.order.coinsAmount} moedas foram adicionadas à sua conta!`,
+          'success'
+        )
+      } else if (
+        res.order.status === 'REJECTED' ||
+        res.order.status === 'CANCELLED'
+      ) {
+        if (coinOrderPollTimer !== null) {
+          window.clearInterval(coinOrderPollTimer)
+          coinOrderPollTimer = null
+        }
+      }
+    } catch {
+      // Ignore transient network poll errors
+    }
+  }, 4000)
+}
+
 async function handleRechargeCoinPackage(pack?: ShopCoinPackageItem) {
   const targetPack = pack || selectedCoinPackage.value
   if (!targetPack) return
@@ -2466,6 +2516,7 @@ async function handleRechargeCoinPackage(pack?: ShopCoinPackageItem) {
   try {
     const order = await authStore.createCoinOrder(targetPack.id, 'CARD')
     const redirectUrl = order.checkoutUrl || order.ticketUrl
+    startCoinOrderPolling(order.orderId)
     if (redirectUrl && typeof window !== 'undefined') {
       window.open(redirectUrl, '_blank', 'noopener,noreferrer')
       triggerBanner(
@@ -4060,6 +4111,14 @@ onMounted(() => {
         authStore.getPersonalBest()
       )
       multiplayerClient.connect()
+      if (typeof window !== 'undefined') {
+        const params = new URLSearchParams(window.location.search)
+        const returnedOrderId = (params.get('shopOrder') || '').trim()
+        if (returnedOrderId) {
+          startCoinOrderPolling(returnedOrderId)
+          window.history.replaceState({}, document.title, window.location.pathname)
+        }
+      }
     }
   })
 
@@ -4220,6 +4279,10 @@ onMounted(() => {
 
 onUnmounted(() => {
   clearEndTowerShowcase()
+  if (coinOrderPollTimer !== null) {
+    window.clearInterval(coinOrderPollTimer)
+    coinOrderPollTimer = null
+  }
   if (unsubscribeSprites) unsubscribeSprites()
   if (rafId !== null) cancelAnimationFrame(rafId)
   window.removeEventListener('resize', handleResize)

@@ -573,7 +573,35 @@ export async function createMercadoPagoCoinOrder(
       return { order: saved, user }
     }
 
-    // Checkout Pro Preference for Credit/Debit Card
+    // Checkout Pro Preference (supports PIX, Credit/Debit Card, and Mercado Pago Wallet)
+    const isHttpsOrigin = baseOrigin.startsWith('https://')
+    const preferencePayload: Record<string, unknown> = {
+      items: [
+        {
+          id: pkg.id,
+          title: `Toy Tower - ${pkg.title} (${pkg.totalCoins} Moedas)`,
+          description: `${pkg.totalCoins} Moedas vinculadas à conta ${user.email}`,
+          quantity: 1,
+          currency_id: 'BRL',
+          unit_price: pkg.priceBrl,
+        },
+      ],
+      payer: {
+        email: user.email,
+        name: user.displayName || user.customNick,
+      },
+      external_reference: orderId,
+      back_urls: {
+        success: `${baseOrigin}/?shopOrder=${encodeURIComponent(orderId)}&status=approved`,
+        pending: `${baseOrigin}/?shopOrder=${encodeURIComponent(orderId)}&status=pending`,
+        failure: `${baseOrigin}/?shopOrder=${encodeURIComponent(orderId)}&status=failure`,
+      },
+    }
+    if (isHttpsOrigin) {
+      preferencePayload.auto_return = 'approved'
+      preferencePayload.notification_url = `${baseOrigin}/api/shop/webhook`
+    }
+
     const prefRes = await fetch(
       'https://api.mercadopago.com/checkout/preferences',
       {
@@ -582,40 +610,14 @@ export async function createMercadoPagoCoinOrder(
           Authorization: `Bearer ${mpConfig.accessToken}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          items: [
-            {
-              id: pkg.id,
-              title: `Toy Tower - ${pkg.title} (${pkg.totalCoins} Moedas)`,
-              description: `${pkg.totalCoins} Moedas vinculadas à conta ${user.email}`,
-              quantity: 1,
-              currency_id: 'BRL',
-              unit_price: pkg.priceBrl,
-            },
-          ],
-          payer: {
-            email: user.email,
-            name: user.displayName || user.customNick,
-          },
-          external_reference: orderId,
-          payment_methods: {
-            excluded_payment_types: [{ id: 'ticket' }],
-            installments: 3,
-          },
-          back_urls: {
-            success: `${baseOrigin}/?shopOrder=${encodeURIComponent(orderId)}&status=approved`,
-            pending: `${baseOrigin}/?shopOrder=${encodeURIComponent(orderId)}&status=pending`,
-            failure: `${baseOrigin}/?shopOrder=${encodeURIComponent(orderId)}&status=failure`,
-          },
-          auto_return: 'approved',
-        }),
+        body: JSON.stringify(preferencePayload),
       }
     )
 
     if (!prefRes.ok) {
       const errText = await prefRes.text().catch(() => '')
       throw new Error(
-        `Erro ao criar Checkout de Cartão no Mercado Pago (${prefRes.status}): ${errText}`
+        `Erro ao criar Checkout no Mercado Pago (${prefRes.status}): ${errText}`
       )
     }
 
@@ -1035,18 +1037,31 @@ function resolveCanonicalShopSubpath(req: IncomingMessage): string | null {
       pathname === '/api/shop/' ||
       pathname.includes('[...route]'))
   ) {
-    if (pathname.startsWith('/api/shop')) {
-      fullPath = `/api/shop/${normalizedQueryRoute}`.replace(/\/+$/, '')
+    const cleanShopRoute = normalizedQueryRoute.replace(/^shop\/+/i, '')
+    if (
+      pathname.startsWith('/api/shop') ||
+      normalizedQueryRoute.toLowerCase().startsWith('shop/') ||
+      normalizedQueryRoute.toLowerCase() === 'shop'
+    ) {
+      fullPath = `/api/shop/${cleanShopRoute}`.replace(/\/+$/, '')
     } else {
       fullPath = `/api/auth/${normalizedQueryRoute}`.replace(/\/+$/, '')
     }
   }
 
   if (fullPath.startsWith('/api/shop')) {
-    return fullPath.slice('/api/shop'.length) || '/'
+    return (
+      fullPath
+        .slice('/api/shop'.length)
+        .replace(/^\/+shop(?=\/|$)/i, '') || '/'
+    )
   }
   if (fullPath.startsWith('/api/auth/shop')) {
-    return fullPath.slice('/api/auth/shop'.length) || '/'
+    return (
+      fullPath
+        .slice('/api/auth/shop'.length)
+        .replace(/^\/+shop(?=\/|$)/i, '') || '/'
+    )
   }
   return null
 }
@@ -1054,11 +1069,11 @@ function resolveCanonicalShopSubpath(req: IncomingMessage): string | null {
 /**
  * Unified HTTP request handler for `/api/shop/*` and `/api/auth/shop/*` routes:
  * - `GET  /catalog` — Returns Coin Packages, Player Skins Catalog, Block Skins Catalog, and Mercado Pago config status
- * - `GET  /orders` — Lists authenticated user's orders or fetches a specific order (`?orderId=ORD-...`)
- * - `POST /orders` — Creates a new Mercado Pago order (`PIX` or `CARD`) linked to the user's Gmail account
+ * - `GET  /orders` or `/orders/status` — Lists authenticated user's orders or fetches a specific order (`?orderId=ORD-...`)
+ * - `POST /orders` or `/orders/create` — Creates a new Mercado Pago order (`PIX` or `CARD`) linked to the user's Gmail account
  * - `POST /orders/simulate-approve` — Approves a pending sandbox order in dev/test mode and credits coins
  * - `POST /mercadopago/webhook` or `/webhook` — Official Mercado Pago Webhook receiver
- * - `POST /buy-skin` — Spends account coins to permanently unlock (and optionally equip) a Player Skin or Block Skin
+ * - `POST /buy-skin` or `/skins/buy` — Spends account coins to permanently unlock (and optionally equip) a Player Skin or Block Skin
  */
 export async function handleShopApiRequest(
   req: IncomingMessage,
@@ -1115,9 +1130,10 @@ export async function handleShopApiRequest(
       return true
     }
 
-    // 3. GET /api/shop/orders or /api/shop/orders/:orderId
+    // 3. GET /api/shop/orders, /api/shop/orders/status?orderId=..., or /api/shop/orders/:orderId
     if (req.method === 'GET' && subpath.startsWith('/orders')) {
-      const pathOrderId = subpath.slice('/orders'.length).replace(/^\/+/, '')
+      const rawTail = subpath.slice('/orders'.length).replace(/^\/+/, '')
+      const pathOrderId = rawTail.toLowerCase() === 'status' ? '' : rawTail
       const orderId = (pathOrderId || queryParams.get('orderId') || '').trim()
 
       if (orderId) {
@@ -1134,6 +1150,7 @@ export async function handleShopApiRequest(
           order: result.order,
           user: result.user,
           newlyApproved: result.newlyApproved,
+          newlyCredited: result.newlyApproved,
         })
         return true
       }
@@ -1148,15 +1165,20 @@ export async function handleShopApiRequest(
       return true
     }
 
-    // 4. POST /api/shop/orders — Create Coin Package Order (PIX or CARD via Mercado Pago)
-    if (req.method === 'POST' && subpath === '/orders') {
+    // 4. POST /api/shop/orders or /api/shop/orders/create — Create Coin Package Order (PIX or CARD via Mercado Pago)
+    if (
+      req.method === 'POST' &&
+      (subpath === '/orders' ||
+        subpath === '/orders/create' ||
+        subpath === '/create-order')
+    ) {
       const body = await readJsonBody(req)
       const packageId =
         typeof body.packageId === 'string' ? body.packageId.trim() : ''
       const paymentMethod: PaymentMethodType =
-        String(body.paymentMethod || 'PIX').toUpperCase() === 'CARD'
-          ? 'CARD'
-          : 'PIX'
+        String(body.paymentMethod || 'CARD').toUpperCase() === 'PIX'
+          ? 'PIX'
+          : 'CARD'
       const originHeader =
         typeof req.headers.origin === 'string' ? req.headers.origin : undefined
 
@@ -1205,17 +1227,21 @@ export async function handleShopApiRequest(
         order: result.order,
         user: result.user,
         newlyApproved: result.newlyApproved,
+        newlyCredited: result.newlyApproved,
       })
       return true
     }
 
-    // 6. POST /api/shop/buy-skin — Spend account-linked coins to unlock & equip a Player Skin or Block Skin
-    if (req.method === 'POST' && subpath === '/buy-skin') {
+    // 6. POST /api/shop/buy-skin or /api/shop/skins/buy — Spend account-linked coins to unlock & equip a Player Skin or Block Skin
+    if (
+      req.method === 'POST' &&
+      (subpath === '/buy-skin' || subpath === '/skins/buy')
+    ) {
       const body = await readJsonBody(req)
-      const category: 'PLAYER' | 'BLOCK' =
-        String(body.category || 'PLAYER').toUpperCase() === 'BLOCK'
-          ? 'BLOCK'
-          : 'PLAYER'
+      const rawCat = String(body.category || 'PLAYER').toUpperCase()
+      const category: 'PLAYER' | 'BLOCK' = rawCat.includes('BLOCK')
+        ? 'BLOCK'
+        : 'PLAYER'
       const skinCode =
         typeof body.skinCode === 'string'
           ? body.skinCode.trim()
@@ -1246,7 +1272,9 @@ export async function handleShopApiRequest(
       sendJson(res, 200, {
         ok: true,
         user: result.user,
+        item: result.purchasedSkin,
         purchasedSkin: result.purchasedSkin,
+        alreadyUnlocked: false,
       })
       return true
     }
