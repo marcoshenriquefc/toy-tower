@@ -11,6 +11,7 @@ import {
   verifySessionJwt,
 } from '../authController'
 import type { IUser } from '../models/User'
+import { registerShopRealtimeNotifier } from '../shopController'
 
 export interface RoomSlotDTO {
   slotIndex: number // 0..3
@@ -20,6 +21,7 @@ export interface RoomSlotDTO {
   handle: string
   customNick: string
   equippedSkin: string
+  equippedBlockSkin: string
   avatarUrl: string
   silhouetteSkin: string
   cupPoints: number
@@ -71,6 +73,7 @@ export interface MatchLaneSyncPayload {
   handle: string
   customNick: string
   equippedSkin: string
+  equippedBlockSkin?: string
   slotIndex: number
   towerHeight: number
   lives: number
@@ -131,6 +134,7 @@ export interface PodiumEntryDTO {
   handle: string
   customNick: string
   equippedSkin: string
+  equippedBlockSkin?: string
   avatarUrl?: string
   towerHeight: number
   lives: number
@@ -150,6 +154,7 @@ interface InternalRoomSlot {
   googleId: string | null
   customNick: string
   equippedSkin: string
+  equippedBlockSkin: string
   avatarUrl: string
   isHost: boolean
   isReady: boolean
@@ -188,11 +193,12 @@ interface ConnectedSession {
   handle: string
   customNick: string
   equippedSkin: string
+  equippedBlockSkin: string
   avatarUrl: string
   roomId: string | null
 }
 
-const DEFAULT_SILHOUETTES = ['DARK_MAGE', 'DINO', 'PIRATE', 'WIZARD']
+const DEFAULT_SILHOUETTES = ['WIZARD', 'DINO', 'PIRATE', 'DARK_MAGE']
 
 let ioInstance: SocketIOServer | null = null
 const sessionsBySocketId = new Map<string, ConnectedSession>()
@@ -254,6 +260,7 @@ function serializeRoom(room: InternalRoom): RoomStateDTO {
       handle: s.handle || '',
       customNick: s.customNick,
       equippedSkin: s.equippedSkin,
+      equippedBlockSkin: s.equippedBlockSkin || 'PLASTIC',
       avatarUrl: s.avatarUrl,
       silhouetteSkin: s.silhouetteSkin,
       cupPoints: s.cupPoints,
@@ -367,6 +374,7 @@ function startRoomCountdownIfEligible(room: InternalRoom): void {
           handle: s.handle!,
           customNick: s.customNick,
           equippedSkin: s.equippedSkin,
+          equippedBlockSkin: s.equippedBlockSkin || 'PLASTIC',
           avatarUrl: s.avatarUrl,
           isHost: s.isHost,
           cupPoints: s.cupPoints,
@@ -492,6 +500,7 @@ async function concludeMultiplayerRound(
       handle: s.handle!,
       customNick: s.customNick,
       equippedSkin: s.equippedSkin,
+      equippedBlockSkin: s.equippedBlockSkin || 'PLASTIC',
       avatarUrl: s.avatarUrl || '',
       towerHeight: Number(s.lastTowerHeight.toFixed(1)),
       lives: s.lastLives,
@@ -665,6 +674,7 @@ function createEmptySlot(slotIndex: number): InternalRoomSlot {
     googleId: null,
     customNick: '',
     equippedSkin: DEFAULT_SILHOUETTES[slotIndex] || 'WIZARD',
+    equippedBlockSkin: 'PLASTIC',
     avatarUrl: '',
     isHost: false,
     isReady: false,
@@ -737,6 +747,7 @@ async function notifyFriendsPresence(user: IUser): Promise<void> {
         handle: myHandle,
         customNick: user.customNick,
         equippedSkin: user.equippedSkin,
+        equippedBlockSkin: user.equippedBlockSkin || 'PLASTIC',
         online: isHandleOnline(myHandle),
       })
     }
@@ -812,9 +823,46 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
       credentials: true,
     },
     path: '/socket.io',
+    maxHttpBufferSize: 300 * 1024 * 1024,
   })
 
   ioInstance = io
+
+  // Real-time bridge for Mercado Pago payment approvals & shop skin purchases
+  registerShopRealtimeNotifier(({ user, order, purchasedSkin }) => {
+    const handleLower = user.handle.toLowerCase()
+    for (const sess of sessionsBySocketId.values()) {
+      if (sess.googleId === user.googleId || sess.handle === handleLower) {
+        sess.equippedSkin = user.equippedSkin || 'WIZARD'
+        sess.equippedBlockSkin = user.equippedBlockSkin || 'PLASTIC'
+        if (sess.roomId) {
+          const room = roomsById.get(sess.roomId)
+          if (room) {
+            const slot = room.slots.find((s) => s.handle === sess.handle)
+            if (slot) {
+              slot.equippedSkin = sess.equippedSkin
+              slot.equippedBlockSkin = sess.equippedBlockSkin
+              broadcastRoomState(room)
+            }
+          }
+        }
+      }
+    }
+    emitToHandle(handleLower, 'auth:user_updated', user)
+    if (order) {
+      emitToHandle(handleLower, 'shop:order_updated', {
+        order,
+        user,
+      })
+    }
+    if (purchasedSkin) {
+      emitToHandle(handleLower, 'shop:skin_unlocked', {
+        skin: purchasedSkin,
+        user,
+      })
+    }
+    void notifyFriendsPresence(user)
+  })
 
   // Handshake Authentication Middleware: validates JWT signed by Vercel using shared JWT_SECRET
   io.use(async (socket, next) => {
@@ -850,7 +898,8 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
       email: user.email,
       handle: handleLower,
       customNick: user.customNick,
-      equippedSkin: user.equippedSkin,
+      equippedSkin: user.equippedSkin || 'WIZARD',
+      equippedBlockSkin: user.equippedBlockSkin || 'PLASTIC',
       avatarUrl: user.avatarUrl,
       roomId: null,
     }
@@ -1051,24 +1100,53 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
 
     socket.on(
       'profile:update_skin',
-      async (payload: { equippedSkin?: string }) => {
-        const skin = String(payload?.equippedSkin || '').trim()
-        if (!skin) return
-        const updated = await updateUserEquippedSkin(session.googleId, skin)
-        if (!updated) return
-        session.equippedSkin = updated.equippedSkin
-        emitToHandle(session.handle, 'auth:user_updated', updated)
-        await notifyFriendsPresence(updated)
+      async (
+        payload: { equippedSkin?: string; equippedBlockSkin?: string },
+        ack?: (res: { ok: boolean; error?: string; user?: IUser }) => void
+      ) => {
+        try {
+          const skin =
+            typeof payload?.equippedSkin === 'string' &&
+            payload.equippedSkin.trim()
+              ? payload.equippedSkin.trim()
+              : undefined
+          const blockSkin =
+            typeof payload?.equippedBlockSkin === 'string' &&
+            payload.equippedBlockSkin.trim()
+              ? payload.equippedBlockSkin.trim()
+              : undefined
+          if (!skin && !blockSkin) return
+          const updated = await updateUserEquippedSkin(
+            session.googleId,
+            skin,
+            blockSkin
+          )
+          if (!updated) return
+          session.equippedSkin = updated.equippedSkin || 'WIZARD'
+          session.equippedBlockSkin = updated.equippedBlockSkin || 'PLASTIC'
+          emitToHandle(session.handle, 'auth:user_updated', updated)
+          await notifyFriendsPresence(updated)
 
-        if (session.roomId) {
-          const room = roomsById.get(session.roomId)
-          if (room) {
-            const slot = room.slots.find((s) => s.handle === session.handle)
-            if (slot) {
-              slot.equippedSkin = updated.equippedSkin
-              broadcastRoomState(room)
+          if (session.roomId) {
+            const room = roomsById.get(session.roomId)
+            if (room) {
+              const slot = room.slots.find((s) => s.handle === session.handle)
+              if (slot) {
+                slot.equippedSkin = session.equippedSkin
+                slot.equippedBlockSkin = session.equippedBlockSkin
+                broadcastRoomState(room)
+              }
             }
           }
+          safeAck(payload, ack, { ok: true, user: updated })
+        } catch (err) {
+          safeAck(payload, ack, {
+            ok: false,
+            error:
+              err instanceof Error
+                ? err.message
+                : 'Esta skin está bloqueada na sua conta.',
+          })
         }
       }
     )
@@ -1087,7 +1165,8 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
         const { user: freshUser } = await findUserByGoogleId(session.googleId)
         if (freshUser) {
           session.customNick = freshUser.customNick
-          session.equippedSkin = freshUser.equippedSkin
+          session.equippedSkin = freshUser.equippedSkin || 'WIZARD'
+          session.equippedBlockSkin = freshUser.equippedBlockSkin || 'PLASTIC'
           await notifyFriendsPresence(freshUser)
         }
 
@@ -1128,6 +1207,8 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
             )
             if (mySlot) {
               mySlot.isReady = false
+              mySlot.equippedSkin = session.equippedSkin
+              mySlot.equippedBlockSkin = session.equippedBlockSkin
             }
 
             if (isHostOrSolo) {
@@ -1186,6 +1267,7 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
               googleId: session.googleId,
               customNick: session.customNick,
               equippedSkin: session.equippedSkin,
+              equippedBlockSkin: session.equippedBlockSkin,
               avatarUrl: session.avatarUrl,
               isHost: true,
               isReady: false,
@@ -1460,6 +1542,7 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
           emptySlot.googleId = session.googleId
           emptySlot.customNick = session.customNick
           emptySlot.equippedSkin = session.equippedSkin
+          emptySlot.equippedBlockSkin = session.equippedBlockSkin
           emptySlot.avatarUrl = session.avatarUrl
           emptySlot.isHost = false
           emptySlot.isReady = false
@@ -1668,6 +1751,8 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
         handle: session.handle,
         customNick: session.customNick,
         equippedSkin: session.equippedSkin,
+        equippedBlockSkin:
+          session.equippedBlockSkin || packet.equippedBlockSkin || 'PLASTIC',
         slotIndex: mySlot ? mySlot.slotIndex : packet.slotIndex,
       }
       socket.to(room.roomId).emit('match:player_state_updated', syncDto)
@@ -1852,6 +1937,7 @@ export function attachMultiplayerSocketServer(httpServer: HttpServer): SocketIOS
           handle: s.handle!,
           customNick: s.customNick,
           equippedSkin: s.equippedSkin,
+          equippedBlockSkin: s.equippedBlockSkin || 'PLASTIC',
           avatarUrl: s.avatarUrl,
           isHost: s.isHost,
           cupPoints: s.cupPoints,

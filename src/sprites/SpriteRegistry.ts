@@ -5,6 +5,7 @@ import {
   GAME_CONSTANTS,
 } from '../types/game'
 import type { PowerId } from '../game/PowersCatalog'
+import { optionsStore, formatKeyCodeLabel } from '../services/optionsStore'
 
 export type SpriteKey =
   | 'piece_I'
@@ -72,6 +73,20 @@ export interface PlayerSkinInfo {
   accentColor: string
   fileName: string
   url: string
+  castUrls?: string[]
+}
+
+export interface BlockSkinInfo {
+  id: string
+  name: string
+  shortName: string
+  emoji: string
+  description: string
+  accentColor: string
+  pieceUrls: Partial<Record<PieceType, string>>
+  previewUrl: string
+  squarePreviewUrl: string
+  palette: PlaceholderColorTheme[]
 }
 
 interface CloudPlaceholder {
@@ -91,8 +106,18 @@ const playerSkinAssets = import.meta.glob<string>(
   { eager: true, import: 'default' }
 )
 
+const playerCastAnimAssets = import.meta.glob<string>(
+  '../../assets/sprites/player/cast/*.png',
+  { eager: true, import: 'default' }
+)
+
 const blockSpriteAssets = import.meta.glob<string>(
   '../../assets/sprites/block/*.png',
+  { eager: true, import: 'default' }
+)
+
+const blockSkinSpriteAssets = import.meta.glob<string>(
+  '../../assets/sprites/block/skins/*/*.png',
   { eager: true, import: 'default' }
 )
 
@@ -113,6 +138,11 @@ const backgroundSpriteAssets = import.meta.glob<string>(
 
 const menuSpriteAssets = import.meta.glob<string>(
   '../../assets/sprites/menu/*.png',
+  { eager: true, import: 'default' }
+)
+
+const menuShopSpriteAssets = import.meta.glob<string>(
+  '../../assets/sprites/menu/shop/*.png',
   { eager: true, import: 'default' }
 )
 
@@ -214,14 +244,215 @@ export const PIECE_COLOR_PALETTE: PlaceholderColorTheme[] = [
   TOY_BRICK_COLORS.INDIGO,
 ]
 
+/**
+ * 10 Natural Real-Wood Color Themes for the `wood` block skin (`assets/sprites/block/skins/wood`),
+ * dynamically coloring each piece in a distinct authentic wood tone (Oak, Pine, Mahogany, Walnut,
+ * Cherry, Cedar, Teak, Dark Ipê/Imbuia, Maple, Rosewood) while preserving wood grain, knots, and pegs.
+ */
+export const WOOD_COLOR_PALETTE: PlaceholderColorTheme[] = [
+  {
+    fill: '#C88A4B',
+    border: '#5C3818',
+    highlight: '#ECC391',
+    label: 'Carvalho Dourado (Oak)',
+  },
+  {
+    fill: '#DEB881',
+    border: '#78522B',
+    highlight: '#F7E1BE',
+    label: 'Pinho Mel (Pine)',
+  },
+  {
+    fill: '#A34830',
+    border: '#4A190E',
+    highlight: '#D17A62',
+    label: 'Mogno Imperial (Mahogany)',
+  },
+  {
+    fill: '#7A4B31',
+    border: '#361D0F',
+    highlight: '#AC7B5E',
+    label: 'Nogueira Escura (Walnut)',
+  },
+  {
+    fill: '#BC6039',
+    border: '#572310',
+    highlight: '#E59470',
+    label: 'Cerejeira (Cherry)',
+  },
+  {
+    fill: '#AD5A44',
+    border: '#4D2117',
+    highlight: '#D68974',
+    label: 'Cedro Rosa (Cedar)',
+  },
+  {
+    fill: '#B87E35',
+    border: '#543510',
+    highlight: '#E0AE68',
+    label: 'Teca Âmbar (Teak)',
+  },
+  {
+    fill: '#633F2B',
+    border: '#2B180E',
+    highlight: '#916850',
+    label: 'Imbuia / Ipê Tabaco',
+  },
+  {
+    fill: '#D1A26B',
+    border: '#6B4B27',
+    highlight: '#EECD9F',
+    label: 'Bordo / Freixo (Maple)',
+  },
+  {
+    fill: '#873B2D',
+    border: '#3D150D',
+    highlight: '#B8695A',
+    label: 'Jacarandá (Rosewood)',
+  },
+]
+
+/**
+ * 10 Vibrant Bottle Cap & Circular Button Colors (`tampas e círculos dentro da arte`)
+ * applied dynamically to `assets/sprites/block/skins/diy` while keeping the cardboard and brown silvertape fixed.
+ */
+export const DIY_COLOR_PALETTE: PlaceholderColorTheme[] = [
+  {
+    fill: '#EF4444',
+    border: '#7F1D1D',
+    highlight: '#FCA5A5',
+    label: 'Papelão + Tampa Vermelha',
+  },
+  {
+    fill: '#0095FF',
+    border: '#004A8F',
+    highlight: '#80CAFF',
+    label: 'Papelão + Tampa Azul',
+  },
+  {
+    fill: '#FACC15',
+    border: '#854D0E',
+    highlight: '#FEF08A',
+    label: 'Papelão + Tampa Amarela',
+  },
+  {
+    fill: '#22C55E',
+    border: '#14532D',
+    highlight: '#86EFAC',
+    label: 'Papelão + Tampa Verde',
+  },
+  {
+    fill: '#FF6D00',
+    border: '#9A3412',
+    highlight: '#FDBA74',
+    label: 'Papelão + Tampa Laranja',
+  },
+  {
+    fill: '#9333EA',
+    border: '#4C1D95',
+    highlight: '#D8B4FE',
+    label: 'Papelão + Tampa Roxa',
+  },
+  {
+    fill: '#EC4899',
+    border: '#831843',
+    highlight: '#F9A8D4',
+    label: 'Papelão + Tampa Rosa',
+  },
+  {
+    fill: '#06B6D4',
+    border: '#155E75',
+    highlight: '#A5F3FC',
+    label: 'Papelão + Tampa Turquesa',
+  },
+  {
+    fill: '#84CC16',
+    border: '#365314',
+    highlight: '#D9F99D',
+    label: 'Papelão + Tampa Limão',
+  },
+  {
+    fill: '#3B82F6',
+    border: '#1E3A8A',
+    highlight: '#93C5FD',
+    label: 'Papelão + Tampa Azul Real',
+  },
+]
+
+/**
+ * 10 Warm 24k Gold Bullion Themes for the `gold` block skin (`assets/sprites/block/skins/gold`).
+ */
+export const GOLD_COLOR_PALETTE: PlaceholderColorTheme[] = [
+  {
+    fill: '#F59E0B',
+    border: '#78350F',
+    highlight: '#FEF08A',
+    label: 'Ouro 24k Real',
+  },
+  {
+    fill: '#EAB308',
+    border: '#713F12',
+    highlight: '#FEF9C3',
+    label: 'Ouro Imperial',
+  },
+  {
+    fill: '#FBBF24',
+    border: '#78350F',
+    highlight: '#FFFBEB',
+    label: 'Ouro Sol Nascente',
+  },
+  {
+    fill: '#D97706',
+    border: '#652B0D',
+    highlight: '#FDE68A',
+    label: 'Ouro Âmbar Antigo',
+  },
+  {
+    fill: '#FACC15',
+    border: '#854D0E',
+    highlight: '#FEF9C3',
+    label: 'Ouro Champanhe',
+  },
+  {
+    fill: '#F59E0B',
+    border: '#78350F',
+    highlight: '#FEF08A',
+    label: 'Lingote Dourado',
+  },
+  {
+    fill: '#EAB308',
+    border: '#713F12',
+    highlight: '#FFFBEB',
+    label: 'Ouro Reluzente',
+  },
+  {
+    fill: '#FBBF24',
+    border: '#78350F',
+    highlight: '#FEF08A',
+    label: 'Ouro da Coroa',
+  },
+  {
+    fill: '#D97706',
+    border: '#652B0D',
+    highlight: '#FDE68A',
+    label: 'Ouro Nobre',
+  },
+  {
+    fill: '#FACC15',
+    border: '#854D0E',
+    highlight: '#FFFBEB',
+    label: 'Ouro Alquímico',
+  },
+]
+
 const DEFAULT_PALETTE_BY_TYPE: Record<PieceType, number> = {
-  I: 0, // Azul Vivo
-  O: 1, // Amarelo Sol
-  T: 5, // Roxo Mágico
-  L: 4, // Laranja Vibrante
-  J: 9, // Azul Real
-  S: 3, // Verde Esmeralda
-  Z: 2, // Vermelho Vivo
+  I: 0, // Azul Vivo / Carvalho
+  O: 1, // Amarelo Sol / Pinho Mel
+  T: 5, // Roxo Mágico / Cedro Rosa
+  L: 4, // Laranja Vibrante / Cerejeira
+  J: 9, // Azul Real / Jacarandá
+  S: 3, // Verde Esmeralda / Nogueira
+  Z: 2, // Vermelho Vivo / Mogno
 }
 
 /**
@@ -237,7 +468,22 @@ export class SpriteRegistry {
   private currentCloudWindVel: number = 6.5
   private playerSkins: PlayerSkinInfo[] = []
   private playerSkinImages: Map<string, HTMLImageElement> = new Map()
+  private playerCastFrameImages: Map<string, Array<HTMLImageElement | null>> =
+    new Map()
+  private playerCastFrameUrls: Map<string, string[]> = new Map()
   private activePlayerSkinId: string = 'player_mage'
+  private blockSkins: BlockSkinInfo[] = []
+  private activeBlockSkinId: string = 'default'
+  private blockSkinImages: Map<
+    string,
+    Partial<Record<PieceType, HTMLImageElement>>
+  > = new Map()
+  private perBlockSkinCanvases: Map<
+    string,
+    Partial<Record<PieceType, HTMLCanvasElement[]>>
+  > = new Map()
+  private collisionUrlByType: Map<PieceType, string> = new Map()
+  private collisionImageByType: Map<PieceType, HTMLImageElement> = new Map()
   private listeners: Array<() => void> = []
   private survivorSprites: {
     background: HTMLImageElement | null
@@ -623,6 +869,36 @@ export class SpriteRegistry {
       },
     }
 
+    // 1a. Discover 5-Frame Power-Casting ("Levantando a Varinha") Sprites in assets/sprites/player/cast/*.png
+    for (const [path, url] of Object.entries(playerCastAnimAssets)) {
+      const fileName = path.split('/').pop() || path
+      const match = fileName.match(/^(.+)_cast_(\d+)\.png$/i)
+      if (!match) continue
+      const skinId = match[1].toLowerCase()
+      const frameNum = parseInt(match[2], 10)
+      if (frameNum < 1 || frameNum > 5) continue
+      const frameIdx = frameNum - 1
+
+      if (!this.playerCastFrameUrls.has(skinId)) {
+        this.playerCastFrameUrls.set(skinId, ['', '', '', '', ''])
+      }
+      if (!this.playerCastFrameImages.has(skinId)) {
+        this.playerCastFrameImages.set(skinId, [null, null, null, null, null])
+      }
+      this.playerCastFrameUrls.get(skinId)![frameIdx] = url
+
+      const castImg = new Image()
+      castImg.crossOrigin = 'anonymous'
+      castImg.onload = () => {
+        const arr = this.playerCastFrameImages.get(skinId)
+        if (arr) {
+          arr[frameIdx] = castImg
+        }
+        this.notifyListeners()
+      }
+      castImg.src = url
+    }
+
     const discoveredSkins: Array<PlayerSkinInfo & { order: number }> = []
 
     for (const [path, url] of Object.entries(playerSkinAssets)) {
@@ -634,6 +910,9 @@ export class SpriteRegistry {
         .replace(/^player_/i, '')
         .replace(/_/g, ' ')
         .replace(/\b\w/g, (c) => c.toUpperCase())
+      const castUrls = (this.playerCastFrameUrls.get(lowerId) || []).filter(
+        Boolean
+      )
 
       discoveredSkins.push({
         id,
@@ -646,6 +925,7 @@ export class SpriteRegistry {
         accentColor: meta ? meta.accentColor : '#38BDF8',
         fileName,
         url,
+        castUrls,
         order: meta ? meta.order : 99,
       })
 
@@ -684,34 +964,268 @@ export class SpriteRegistry {
       this.setActivePlayerSkin(initialSkin.id)
     }
 
-    // 2. Discover Block Sprites & Collision Masks in assets/sprites/block
-    const blockUrlByType = new Map<PieceType, string>()
+    // 2. Discover Block Sprites, Block Skins & Collision Masks in assets/sprites/block
+    const defaultBlockUrls: Partial<Record<PieceType, string>> = {}
     for (const [path, url] of Object.entries(blockSpriteAssets)) {
       const fileName = path.split('/').pop() || ''
       const baseName = fileName.replace(/\.png$/i, '').toUpperCase()
       if (['I', 'O', 'T', 'L', 'J', 'S', 'Z'].includes(baseName)) {
-        blockUrlByType.set(baseName as PieceType, url)
+        defaultBlockUrls[baseName as PieceType] = url
       }
     }
 
-    const collisionUrlByType = new Map<PieceType, string>()
     for (const [path, url] of Object.entries(blockCollisionAssets)) {
       const fileName = path.split('/').pop() || ''
       const match = fileName.match(/^([a-zA-Z])_col+ision\.png$/i)
       if (match) {
         const typeKey = match[1].toUpperCase() as PieceType
         if (['I', 'O', 'T', 'L', 'J', 'S', 'Z'].includes(typeKey)) {
-          collisionUrlByType.set(typeKey, url)
+          this.collisionUrlByType.set(typeKey, url)
+          const colImg = new Image()
+          colImg.crossOrigin = 'anonymous'
+          colImg.onload = () => {
+            this.collisionImageByType.set(typeKey, colImg)
+          }
+          colImg.src = url
         }
       }
     }
 
+    // Group extra block skins by subfolder name in assets/sprites/block/skins/<skinId>/*.png
+    const skinUrlsByFolder = new Map<string, Partial<Record<PieceType, string>>>()
+    for (const [path, url] of Object.entries(blockSkinSpriteAssets)) {
+      const parts = path.split('/')
+      const fileName = parts.pop() || ''
+      const folderName = (parts.pop() || '').toLowerCase()
+      if (!folderName) continue
+      const baseName = fileName.replace(/\.png$/i, '').toUpperCase()
+      if (!['I', 'O', 'T', 'L', 'J', 'S', 'Z'].includes(baseName)) continue
+      if (!skinUrlsByFolder.has(folderName)) {
+        skinUrlsByFolder.set(folderName, {})
+      }
+      skinUrlsByFolder.get(folderName)![baseName as PieceType] = url
+    }
+
+    const blockSkinMeta: Record<
+      string,
+      {
+        name: string
+        shortName: string
+        emoji: string
+        description: string
+        accentColor: string
+        palette: PlaceholderColorTheme[]
+        order: number
+      }
+    > = {
+      default: {
+        name: '🧱 Plástico Clássico',
+        shortName: 'Plástico',
+        emoji: '🧱',
+        description: 'Blocos de montar clássicos em 10 cores vibrantes de brinquedo',
+        accentColor: '#3B82F6',
+        palette: PIECE_COLOR_PALETTE,
+        order: 1,
+      },
+      wood: {
+        name: '🪵 Madeira Real',
+        shortName: 'Madeira',
+        emoji: '🪵',
+        description:
+          'Peças entalhadas com veios e nós em 10 tons dinâmicos inspirados em madeiras reais (Carvalho, Mogno, Nogueira, Pinho, Cerejeira e mais)',
+        accentColor: '#C88A4B',
+        palette: WOOD_COLOR_PALETTE,
+        order: 2,
+      },
+      diy: {
+        name: '📦 Papelão DIY',
+        shortName: 'Papelão DIY',
+        emoji: '📦',
+        description:
+          'Caixas sempre em cor de papelão com fitas silvertape marrom e tampas/círculos coloridos dinamicamente',
+        accentColor: '#D97706',
+        palette: DIY_COLOR_PALETTE,
+        order: 3,
+      },
+      gold: {
+        name: '👑 Ouro Real',
+        shortName: 'Ouro',
+        emoji: '👑',
+        description:
+          'Lingotes de ouro 24k reluzentes com charme dourado e partículas sutis de brilho',
+        accentColor: '#F59E0B',
+        palette: GOLD_COLOR_PALETTE,
+        order: 4,
+      },
+    }
+
+    const discoveredBlockSkins: Array<BlockSkinInfo & { order: number }> = [
+      {
+        id: 'default',
+        ...blockSkinMeta.default,
+        pieceUrls: defaultBlockUrls,
+        previewUrl:
+          defaultBlockUrls.T ||
+          defaultBlockUrls.O ||
+          defaultBlockUrls.J ||
+          '',
+        squarePreviewUrl:
+          defaultBlockUrls.O ||
+          defaultBlockUrls.T ||
+          '',
+      },
+    ]
+
+    for (const [folderId, pieceUrls] of skinUrlsByFolder.entries()) {
+      const meta = blockSkinMeta[folderId]
+      const fallbackLabel = folderId
+        .replace(/_/g, ' ')
+        .replace(/\b\w/g, (c) => c.toUpperCase())
+      discoveredBlockSkins.push({
+        id: folderId,
+        name: meta ? meta.name : `🧱 ${fallbackLabel}`,
+        shortName: meta ? meta.shortName : fallbackLabel,
+        emoji: meta ? meta.emoji : '🧱',
+        description: meta
+          ? meta.description
+          : `Skin de blocos customizada (${fallbackLabel})`,
+        accentColor: meta ? meta.accentColor : '#F59E0B',
+        pieceUrls,
+        previewUrl:
+          pieceUrls.T ||
+          pieceUrls.O ||
+          pieceUrls.J ||
+          pieceUrls.I ||
+          '',
+        squarePreviewUrl:
+          pieceUrls.O ||
+          pieceUrls.T ||
+          pieceUrls.J ||
+          '',
+        palette: meta ? meta.palette : PIECE_COLOR_PALETTE,
+        order: meta ? meta.order : 50,
+      })
+    }
+
+    discoveredBlockSkins.sort(
+      (a, b) => a.order - b.order || a.name.localeCompare(b.name)
+    )
+    this.blockSkins = discoveredBlockSkins.map(
+      ({ order: _order, ...skin }) => skin
+    )
+
+    // Preload images for all block skins (and auto-generate horizontal mirror for L from J if L is omitted)
+    const createMirroredImage = (
+      srcImg: HTMLImageElement,
+      onReady: (mirrored: HTMLImageElement) => void
+    ) => {
+      const w = srcImg.naturalWidth || srcImg.width
+      const h = srcImg.naturalHeight || srcImg.height
+      if (!w || !h) return
+      const c = document.createElement('canvas')
+      c.width = w
+      c.height = h
+      const cctx = c.getContext('2d')
+      if (!cctx) return
+      cctx.translate(w, 0)
+      cctx.scale(-1, 1)
+      cctx.drawImage(srcImg, 0, 0, w, h)
+      const mirrored = new Image()
+      mirrored.crossOrigin = 'anonymous'
+      mirrored.onload = () => onReady(mirrored)
+      mirrored.src = c.toDataURL('image/png')
+    }
+
     const allTypes: PieceType[] = ['I', 'O', 'T', 'L', 'J', 'S', 'Z']
+    for (const bSkin of this.blockSkins) {
+      const imgMap: Partial<Record<PieceType, HTMLImageElement>> = {}
+      this.blockSkinImages.set(bSkin.id, imgMap)
+
+      for (const t of allTypes) {
+        const url = bSkin.pieceUrls[t]
+        if (!url) continue
+        const img = new Image()
+        img.crossOrigin = 'anonymous'
+        img.onload = () => {
+          imgMap[t] = img
+          if (t === 'T') {
+            const previewCanvas =
+              bSkin.id === 'diy'
+                ? this.createDiyTintedBlockCanvas(img, 0)
+                : bSkin.id === 'gold'
+                  ? this.createGoldBlockCanvas(img, 0)
+                  : this.createTintedBlockCanvas(
+                      img,
+                      bSkin.palette[0] || PIECE_COLOR_PALETTE[0]
+                    )
+            if (previewCanvas) {
+              bSkin.previewUrl = previewCanvas.toDataURL('image/png')
+              this.notifyListeners()
+            }
+          } else if (t === 'O') {
+            const squareCanvas =
+              bSkin.id === 'diy'
+                ? this.createDiyTintedBlockCanvas(img, 0)
+                : bSkin.id === 'gold'
+                  ? this.createGoldBlockCanvas(img, 0)
+                  : this.createTintedBlockCanvas(
+                      img,
+                      bSkin.palette[0] || PIECE_COLOR_PALETTE[0]
+                    )
+            if (squareCanvas) {
+              bSkin.squarePreviewUrl = squareCanvas.toDataURL('image/png')
+              this.notifyListeners()
+            }
+          }
+          if (t === 'J' && !bSkin.pieceUrls.L) {
+            createMirroredImage(img, (mirroredL) => {
+              imgMap.L = mirroredL
+              if (this.activeBlockSkinId === bSkin.id) {
+                this.applyBlockSkinPieceImage('L', mirroredL, url)
+              }
+            })
+          } else if (t === 'L' && !bSkin.pieceUrls.J) {
+            createMirroredImage(img, (mirroredJ) => {
+              imgMap.J = mirroredJ
+              if (this.activeBlockSkinId === bSkin.id) {
+                this.applyBlockSkinPieceImage('J', mirroredJ, url)
+              }
+            })
+          }
+          if (this.activeBlockSkinId === bSkin.id) {
+            this.applyBlockSkinPieceImage(t, img, url)
+          }
+        }
+        img.src = url
+      }
+    }
+
+    // Restore persisted block skin or default to 'default'
+    let savedBlockSkinId: string | null = null
+    try {
+      savedBlockSkinId = window.localStorage.getItem('toy_tower_block_skin')
+    } catch {
+      savedBlockSkinId = null
+    }
+    const initialBlockSkin =
+      (savedBlockSkinId &&
+        this.blockSkins.find((s) => s.id === savedBlockSkinId)) ||
+      this.blockSkins[0]
+    this.activeBlockSkinId = initialBlockSkin ? initialBlockSkin.id : 'default'
+
     for (const t of allTypes) {
-      const spriteUrl = blockUrlByType.get(t)
-      const colUrl = collisionUrlByType.get(t) || null
+      const activeSkin = this.getActiveBlockSkin()
+      const spriteUrl =
+        activeSkin?.pieceUrls[t] ||
+        (t === 'L' ? activeSkin?.pieceUrls.J : undefined) ||
+        defaultBlockUrls[t]
+      const colUrl = this.collisionUrlByType.get(t) || null
       if (spriteUrl) {
-        this.registerBlockWithCollision(`piece_${t}` as SpriteKey, spriteUrl, colUrl)
+        this.registerBlockWithCollision(
+          `piece_${t}` as SpriteKey,
+          spriteUrl,
+          colUrl
+        )
       }
     }
 
@@ -798,10 +1312,22 @@ export class SpriteRegistry {
       this.menuSprites[key] = url
     }
 
+    // 5b. Discover Shop Sprites in assets/sprites/menu/shop (shelf.png, table.png, shop_dino.png, shop_shadow.png)
+    for (const [path, url] of Object.entries(menuShopSpriteAssets)) {
+      const fileName = path.split('/').pop() || path
+      const key = fileName.replace(/\.png$/i, '').toLowerCase()
+      this.menuSprites[key] = url
+      if (!key.startsWith('shop_')) {
+        this.menuSprites[`shop_${key}`] = url
+      }
+    }
+
     if (this.menuSprites.button_clean) {
       this.menuSprites.button_clean_green = this.menuSprites.button_clean
       this.menuSprites.button_clean_orange = this.menuSprites.button_clean
       this.menuSprites.button_clean_yellow = this.menuSprites.button_clean
+      this.menuSprites.button_clean_purple = this.menuSprites.button_clean
+      this.menuSprites.button_clean_blue = this.menuSprites.button_clean
 
       const btnImg = new Image()
       btnImg.crossOrigin = 'anonymous'
@@ -824,6 +1350,18 @@ export class SpriteRegistry {
           highlight: '#FDE047',
           label: 'Botão Amarelo',
         })
+        const purpleCanvas = this.createTintedBlockCanvas(btnImg, {
+          fill: '#9333EA',
+          border: '#1B2230',
+          highlight: '#D8B4FE',
+          label: 'Botão Roxo',
+        })
+        const blueCanvas = this.createTintedBlockCanvas(btnImg, {
+          fill: '#0095FF',
+          border: '#1B2230',
+          highlight: '#80CAFF',
+          label: 'Botão Azul',
+        })
         if (greenCanvas) {
           this.menuSprites.button_clean_green = greenCanvas.toDataURL('image/png')
         }
@@ -832,6 +1370,12 @@ export class SpriteRegistry {
         }
         if (yellowCanvas) {
           this.menuSprites.button_clean_yellow = yellowCanvas.toDataURL('image/png')
+        }
+        if (purpleCanvas) {
+          this.menuSprites.button_clean_purple = purpleCanvas.toDataURL('image/png')
+        }
+        if (blueCanvas) {
+          this.menuSprites.button_clean_blue = blueCanvas.toDataURL('image/png')
         }
         this.notifyListeners()
       }
@@ -863,7 +1407,7 @@ export class SpriteRegistry {
   }
 
   public getPlayerSkins(): PlayerSkinInfo[] {
-    return this.playerSkins
+    return this.playerSkins.map((s) => ({ ...s }))
   }
 
   public getActivePlayerSkinId(): string {
@@ -902,24 +1446,232 @@ export class SpriteRegistry {
     }
   }
 
-  public cycleNextPlayerSkin(): PlayerSkinInfo | null {
+  public cycleNextPlayerSkin(delta: number = 1): PlayerSkinInfo | null {
     if (this.playerSkins.length === 0) return null
-    const currentIndex = this.playerSkins.findIndex(
-      (s) => s.id === this.activePlayerSkinId
+    const currentIndex = Math.max(
+      0,
+      this.playerSkins.findIndex((s) => s.id === this.activePlayerSkinId)
     )
-    const nextIndex = (currentIndex + 1) % this.playerSkins.length
+    const nextIndex =
+      (currentIndex + delta + this.playerSkins.length) %
+      this.playerSkins.length
     const nextSkin = this.playerSkins[nextIndex]
     this.setActivePlayerSkin(nextSkin.id)
     return nextSkin
   }
 
+  public getBlockSkins(): BlockSkinInfo[] {
+    return this.blockSkins.map((s) => ({ ...s }))
+  }
+
+  public getActiveBlockSkinId(): string {
+    return this.activeBlockSkinId
+  }
+
+  public getActiveBlockSkin(): BlockSkinInfo | null {
+    return (
+      this.blockSkins.find((s) => s.id === this.activeBlockSkinId) ||
+      this.blockSkins[0] ||
+      null
+    )
+  }
+
+  public getActiveBlockPalette(): PlaceholderColorTheme[] {
+    return this.getActiveBlockSkin()?.palette || PIECE_COLOR_PALETTE
+  }
+
+  /**
+   * Returns (and caches) the 10-color pre-rendered canvases for any block skin ID (`default`, `wood`, `diy`, `gold`),
+   * enabling multiplayer opponents' towers to render their own equipped block skin in real time.
+   */
+  public getBlockSkinMultiColorCanvases(
+    skinId: string,
+    pieceType: PieceType
+  ): HTMLCanvasElement[] | undefined {
+    const normalizedId = (skinId || '').trim().toLowerCase() || 'default'
+    if (normalizedId === this.activeBlockSkinId) {
+      const slot = this.slots.get(`piece_${pieceType}` as SpriteKey)
+      if (slot?.multiColorCanvases && slot.multiColorCanvases.length > 0) {
+        return slot.multiColorCanvases
+      }
+    }
+
+    let skinMap = this.perBlockSkinCanvases.get(normalizedId)
+    if (skinMap?.[pieceType]) {
+      return skinMap[pieceType]
+    }
+
+    const img =
+      this.blockSkinImages.get(normalizedId)?.[pieceType] ||
+      this.blockSkinImages.get('default')?.[pieceType]
+    if (!img || !img.complete || (img.naturalWidth === 0 && img.width === 0)) {
+      return undefined
+    }
+
+    const skinInfo =
+      this.blockSkins.find((s) => s.id === normalizedId) ||
+      this.getActiveBlockSkin()
+    const palette = skinInfo?.palette || PIECE_COLOR_PALETTE
+
+    const canvases = palette.map((colorTheme, idx) =>
+      normalizedId === 'diy'
+        ? this.createDiyTintedBlockCanvas(img, idx)
+        : normalizedId === 'gold'
+          ? this.createGoldBlockCanvas(img, idx)
+          : this.createTintedBlockCanvas(img, colorTheme)
+    )
+
+    if (!skinMap) {
+      skinMap = {}
+      this.perBlockSkinCanvases.set(normalizedId, skinMap)
+    }
+    skinMap[pieceType] = canvases
+    return canvases
+  }
+
+  private applyBlockSkinPieceImage(
+    pieceType: PieceType,
+    spriteImg: HTMLImageElement,
+    spriteUrl: string
+  ): void {
+    const key = `piece_${pieceType}` as SpriteKey
+    const slot = this.slots.get(key)
+    if (!slot) return
+    const colImg =
+      this.collisionImageByType.get(pieceType) || slot.collisionImage || null
+    slot.spriteUrl = spriteUrl
+    slot.image = spriteImg
+    slot.collisionImage = colImg
+    slot.loaded = true
+    if (colImg) {
+      slot.collisionBox = this.analyzeCollisionMask(colImg, spriteImg)
+      slot.hasCollisionMask = true
+    } else {
+      slot.collisionBox = {
+        x: 0,
+        y: 0,
+        width: spriteImg.naturalWidth || spriteImg.width,
+        height: spriteImg.naturalHeight || spriteImg.height,
+      }
+      slot.hasCollisionMask = false
+    }
+
+    const activePalette = this.getActiveBlockPalette()
+    if (pieceType in DEFAULT_PALETTE_BY_TYPE) {
+      slot.multiColorCanvases = activePalette.map((colorTheme, idx) =>
+        this.activeBlockSkinId === 'diy'
+          ? this.createDiyTintedBlockCanvas(spriteImg, idx)
+          : this.activeBlockSkinId === 'gold'
+            ? this.createGoldBlockCanvas(spriteImg, idx)
+            : this.createTintedBlockCanvas(spriteImg, colorTheme)
+      )
+      slot.tintedCanvas =
+        slot.multiColorCanvases[DEFAULT_PALETTE_BY_TYPE[pieceType]] ||
+        (this.activeBlockSkinId === 'diy'
+          ? this.createDiyTintedBlockCanvas(spriteImg, 0)
+          : this.activeBlockSkinId === 'gold'
+            ? this.createGoldBlockCanvas(spriteImg, 0)
+            : this.createTintedBlockCanvas(spriteImg, slot.placeholder))
+    } else {
+      slot.tintedCanvas =
+        this.activeBlockSkinId === 'diy'
+          ? this.createDiyTintedBlockCanvas(spriteImg, 0)
+          : this.activeBlockSkinId === 'gold'
+            ? this.createGoldBlockCanvas(spriteImg, 0)
+            : this.createTintedBlockCanvas(spriteImg, slot.placeholder)
+    }
+    slot.staticBrickCanvas = this.createTintedBlockCanvas(
+      spriteImg,
+      {
+        fill: '#475569',
+        border: '#0F172A',
+        highlight: '#E2E8F0',
+        label: 'Bloco de Ferro (Estático)',
+      },
+      true
+    )
+    slot.iceBrickCanvas = this.createTintedBlockCanvas(
+      spriteImg,
+      {
+        fill: '#22D3EE',
+        border: '#0284C7',
+        highlight: '#E0F2FE',
+        label: 'Bloco de Gelo (Azul Ciano)',
+      },
+      true
+    )
+    if (key === 'piece_I' || key === 'piece_O') {
+      const heavyTheme = this.getSlot('piece_HEAVY_RUBBER').placeholder
+      slot.heavyRubberCanvas = this.createTintedBlockCanvas(
+        spriteImg,
+        heavyTheme,
+        true
+      )
+      const heavySlot = this.getSlot('piece_HEAVY_RUBBER')
+      heavySlot.loaded = true
+    }
+    this.notifyListeners()
+  }
+
+  public setActiveBlockSkin(skinId: string): void {
+    const skin = this.blockSkins.find((s) => s.id === skinId)
+    if (!skin) return
+    this.activeBlockSkinId = skin.id
+    try {
+      window.localStorage.setItem('toy_tower_block_skin', skin.id)
+    } catch {
+      // Ignore storage errors
+    }
+
+    const cachedMap = this.blockSkinImages.get(skin.id)
+    const defaultMap = this.blockSkinImages.get('default')
+    const allTypes: PieceType[] = ['I', 'O', 'T', 'L', 'J', 'S', 'Z']
+
+    for (const t of allTypes) {
+      const img = cachedMap?.[t] || defaultMap?.[t]
+      const url =
+        skin.pieceUrls[t] ||
+        (t === 'L' ? skin.pieceUrls.J : undefined) ||
+        this.blockSkins[0]?.pieceUrls[t] ||
+        ''
+      if (img && img.complete && (img.naturalWidth > 0 || img.width > 0)) {
+        this.applyBlockSkinPieceImage(t, img, url)
+      } else if (url) {
+        this.registerBlockWithCollision(
+          `piece_${t}` as SpriteKey,
+          url,
+          this.collisionUrlByType.get(t) || null
+        )
+      }
+    }
+
+    this.rebuildAllTintedCanvases()
+    this.notifyListeners()
+  }
+
+  public cycleNextBlockSkin(delta: number = 1): BlockSkinInfo | null {
+    if (this.blockSkins.length === 0) return null
+    const currentIndex = Math.max(
+      0,
+      this.blockSkins.findIndex((s) => s.id === this.activeBlockSkinId)
+    )
+    const nextIndex =
+      (currentIndex + delta + this.blockSkins.length) %
+      this.blockSkins.length
+    const nextSkin = this.blockSkins[nextIndex]
+    this.setActiveBlockSkin(nextSkin.id)
+    return nextSkin
+  }
+
   public setDynamicTintEnabled(enabled: boolean): void {
     this.dynamicTintEnabled = enabled
+    this.perBlockSkinCanvases.clear()
     this.rebuildAllTintedCanvases()
     this.notifyListeners()
   }
 
   public rebuildAllTintedCanvases(): void {
+    const activePalette = this.getActiveBlockPalette()
     const heavyTheme = this.getSlot('piece_HEAVY_RUBBER').placeholder
     const staticTheme: PlaceholderColorTheme = {
       fill: '#475569',
@@ -941,30 +1693,43 @@ export class SpriteRegistry {
       ) {
         const pieceType = slot.key.replace('piece_', '') as PieceType
         if (pieceType in DEFAULT_PALETTE_BY_TYPE) {
-          slot.multiColorCanvases = PIECE_COLOR_PALETTE.map((colorTheme) =>
-            this.createTintedBlockCanvas(slot.image!, colorTheme)
+          slot.multiColorCanvases = activePalette.map((colorTheme, idx) =>
+            this.activeBlockSkinId === 'diy'
+              ? this.createDiyTintedBlockCanvas(slot.image!, idx)
+              : this.activeBlockSkinId === 'gold'
+                ? this.createGoldBlockCanvas(slot.image!, idx)
+                : this.createTintedBlockCanvas(slot.image!, colorTheme)
           )
           slot.tintedCanvas =
             slot.multiColorCanvases[DEFAULT_PALETTE_BY_TYPE[pieceType]] ||
-            this.createTintedBlockCanvas(slot.image, slot.placeholder)
+            (this.activeBlockSkinId === 'diy'
+              ? this.createDiyTintedBlockCanvas(slot.image, 0)
+              : this.activeBlockSkinId === 'gold'
+                ? this.createGoldBlockCanvas(slot.image, 0)
+                : this.createTintedBlockCanvas(slot.image, slot.placeholder))
         } else {
-          slot.tintedCanvas = this.createTintedBlockCanvas(
-            slot.image,
-            slot.placeholder
-          )
+          slot.tintedCanvas =
+            this.activeBlockSkinId === 'diy'
+              ? this.createDiyTintedBlockCanvas(slot.image, 0)
+              : this.activeBlockSkinId === 'gold'
+                ? this.createGoldBlockCanvas(slot.image, 0)
+                : this.createTintedBlockCanvas(slot.image, slot.placeholder)
         }
         slot.staticBrickCanvas = this.createTintedBlockCanvas(
           slot.image,
-          staticTheme
+          staticTheme,
+          true
         )
         slot.iceBrickCanvas = this.createTintedBlockCanvas(
           slot.image,
-          iceTheme
+          iceTheme,
+          true
         )
         if (slot.key === 'piece_I' || slot.key === 'piece_O') {
           slot.heavyRubberCanvas = this.createTintedBlockCanvas(
             slot.image,
-            heavyTheme
+            heavyTheme,
+            true
           )
         }
       } else if (
@@ -974,6 +1739,642 @@ export class SpriteRegistry {
         slot.tintedCanvas = this.createBluishDepthCanvas(slot.image)
       }
     }
+  }
+
+  /**
+   * Builds a 256-entry RGB lookup table for 3-tone shading (`border -> fill -> highlight`).
+   */
+  private buildThreeToneLut(
+    theme: PlaceholderColorTheme,
+    minShadowLum: number,
+    baseBodyLum: number,
+    maxGlossLum: number
+  ): { r: Uint8Array; g: Uint8Array; b: Uint8Array } {
+    const borderRgb = hexToRgb(theme.border)
+    const fillRgb = hexToRgb(theme.fill)
+    const highlightRgb = hexToRgb(theme.highlight)
+
+    const lutR = new Uint8Array(256)
+    const lutG = new Uint8Array(256)
+    const lutB = new Uint8Array(256)
+
+    for (let lum = 0; lum < 256; lum++) {
+      if (lum < minShadowLum) {
+        const d = Math.max(0, Math.min(1, lum / minShadowLum))
+        const factor = 0.24 + 0.76 * (d * d * (3 - 2 * d))
+        lutR[lum] = Math.round(borderRgb.r * factor)
+        lutG[lum] = Math.round(borderRgb.g * factor)
+        lutB[lum] = Math.round(borderRgb.b * factor)
+      } else if (lum <= baseBodyLum) {
+        const t = Math.max(
+          0,
+          Math.min(1, (lum - minShadowLum) / (baseBodyLum - minShadowLum))
+        )
+        const smoothT = t * t * (3 - 2 * t)
+        lutR[lum] = Math.round(borderRgb.r + (fillRgb.r - borderRgb.r) * smoothT)
+        lutG[lum] = Math.round(borderRgb.g + (fillRgb.g - borderRgb.g) * smoothT)
+        lutB[lum] = Math.round(borderRgb.b + (fillRgb.b - borderRgb.b) * smoothT)
+      } else {
+        const t = Math.max(
+          0,
+          Math.min(1, (lum - baseBodyLum) / (maxGlossLum - baseBodyLum))
+        )
+        lutR[lum] = Math.round(fillRgb.r + (highlightRgb.r - fillRgb.r) * t)
+        lutG[lum] = Math.round(fillRgb.g + (highlightRgb.g - fillRgb.g) * t)
+        lutB[lum] = Math.round(fillRgb.b + (highlightRgb.b - fillRgb.b) * t)
+      }
+    }
+
+    return { r: lutR, g: lutG, b: lutB }
+  }
+
+  /**
+   * Dynamic Multi-Region Colorizer for the `diy` Cardboard Block Skin (`assets/sprites/block/skins/diy`):
+   * - Keeps the entire cardboard box body (`cor de papelão`) always in a fixed, realistic cardboard color.
+   * - Colors all torn adhesive tape strips (`fitinha com um marrom mais escuro`) in a darker brown shade.
+   * - Dynamically colors ONLY the small protruding bottle caps and circular caps/buttons on the box (`colorido apenas as tampinhas pequenas que ficam na caixa e os círculos dentro da arte`).
+   */
+  private createDiyTintedBlockCanvas(
+    img: HTMLImageElement,
+    paletteIndex: number
+  ): HTMLCanvasElement {
+    const w = img.naturalWidth || img.width
+    const h = img.naturalHeight || img.height
+    const canvas = document.createElement('canvas')
+    canvas.width = w
+    canvas.height = h
+    const ctx = canvas.getContext('2d')
+    if (!ctx || !w || !h) return canvas
+
+    ctx.drawImage(img, 0, 0, w, h)
+    if (!this.dynamicTintEnabled) {
+      return canvas
+    }
+
+    const imageData = ctx.getImageData(0, 0, w, h)
+    const data = imageData.data
+    const n = w * h
+
+    const lumArr = new Uint8Array(n)
+    const alphaArr = new Uint8Array(n)
+    for (let i = 0; i < n; i++) {
+      const p = i * 4
+      lumArr[i] = ((data[p] + data[p + 1] + data[p + 2]) / 3) | 0
+      alphaArr[i] = data[p + 3]
+    }
+
+    // 1. Segment large flat Cardboard faces (`isCardboard`) and Tape Strips (`tapeCompId`)
+    const vis = new Uint8Array(n)
+    const isCardboard = new Uint8Array(n)
+    const tapeCompId = new Uint8Array(n)
+    let numTapes = 0
+    const queue = new Int32Array(n)
+
+    for (let i = 0; i < n; i++) {
+      if (vis[i] || alphaArr[i] < 80 || lumArr[i] < 142) continue
+      let head = 0
+      let tail = 0
+      queue[tail++] = i
+      vis[i] = 1
+
+      let minX = w
+      let maxX = 0
+      let minY = h
+      let maxY = 0
+      let sumLum = 0
+
+      while (head < tail) {
+        const curr = queue[head++]
+        const cx = curr % w
+        const cy = (curr / w) | 0
+        if (cx < minX) minX = cx
+        if (cx > maxX) maxX = cx
+        if (cy < minY) minY = cy
+        if (cy > maxY) maxY = cy
+        sumLum += lumArr[curr]
+
+        if (cx > 0) {
+          const next = curr - 1
+          if (!vis[next] && alphaArr[next] >= 80 && lumArr[next] >= 142) {
+            vis[next] = 1
+            queue[tail++] = next
+          }
+        }
+        if (cx + 1 < w) {
+          const next = curr + 1
+          if (!vis[next] && alphaArr[next] >= 80 && lumArr[next] >= 142) {
+            vis[next] = 1
+            queue[tail++] = next
+          }
+        }
+        if (cy > 0) {
+          const next = curr - w
+          if (!vis[next] && alphaArr[next] >= 80 && lumArr[next] >= 142) {
+            vis[next] = 1
+            queue[tail++] = next
+          }
+        }
+        if (cy + 1 < h) {
+          const next = curr + w
+          if (!vis[next] && alphaArr[next] >= 80 && lumArr[next] >= 142) {
+            vis[next] = 1
+            queue[tail++] = next
+          }
+        }
+      }
+
+      const bw = maxX - minX + 1
+      const bh = maxY - minY + 1
+      const avgLum = sumLum / tail
+
+      if (tail >= 575) {
+        for (let k = 0; k < tail; k++) {
+          isCardboard[queue[k]] = 1
+        }
+      } else if (
+        tail >= 65 &&
+        tail <= 555 &&
+        bw >= 7 &&
+        bh >= 7 &&
+        avgLum >= 165.5
+      ) {
+        numTapes++
+        const id = numTapes
+        for (let k = 0; k < tail; k++) {
+          tapeCompId[queue[k]] = id
+        }
+      }
+    }
+
+    // Reclaim the bottom vertical tape strip on S and Z (192x137), where a 1px gap in the outline connects it to the cardboard panel
+    if (w === 192 && h === 137) {
+      const isS = alphaArr[20 * w + 10] < 50
+      const tx0 = isS ? 15 : 152
+      const tx1 = isS ? 39 : 176
+      numTapes++
+      const tid = numTapes
+      for (let py = 112; py <= 135; py++) {
+        for (let px = tx0; px <= tx1; px++) {
+          const idx = py * w + px
+          if (alphaArr[idx] >= 80 && lumArr[idx] >= 118) {
+            tapeCompId[idx] = tid
+            isCardboard[idx] = 0
+          }
+        }
+      }
+    }
+
+    // Dilate tape strips by 2 steps into anti-aliased edge pixels (`lum >= 115`)
+    for (let step = 0; step < 2; step++) {
+      const nextTape = new Uint8Array(tapeCompId)
+      for (let i = 0; i < n; i++) {
+        const tid = tapeCompId[i]
+        if (!tid) continue
+        const cx = i % w
+        const cy = (i / w) | 0
+        if (cx > 0) {
+          const nb = i - 1
+          if (!nextTape[nb] && !isCardboard[nb] && alphaArr[nb] >= 80 && lumArr[nb] >= 115) {
+            nextTape[nb] = tid
+          }
+        }
+        if (cx + 1 < w) {
+          const nb = i + 1
+          if (!nextTape[nb] && !isCardboard[nb] && alphaArr[nb] >= 80 && lumArr[nb] >= 115) {
+            nextTape[nb] = tid
+          }
+        }
+        if (cy > 0) {
+          const nb = i - w
+          if (!nextTape[nb] && !isCardboard[nb] && alphaArr[nb] >= 80 && lumArr[nb] >= 115) {
+            nextTape[nb] = tid
+          }
+        }
+        if (cy + 1 < h) {
+          const nb = i + w
+          if (!nextTape[nb] && !isCardboard[nb] && alphaArr[nb] >= 80 && lumArr[nb] >= 115) {
+            nextTape[nb] = tid
+          }
+        }
+      }
+      tapeCompId.set(nextTape)
+    }
+
+    // Dilate cardboard body by 1 step into immediate edge pixels (`lum >= 126`) without crossing black cap outlines
+    {
+      const nextCb = new Uint8Array(isCardboard)
+      for (let i = 0; i < n; i++) {
+        if (!isCardboard[i]) continue
+        const cx = i % w
+        const cy = (i / w) | 0
+        if (cx > 0) {
+          const nb = i - 1
+          if (!nextCb[nb] && !tapeCompId[nb] && alphaArr[nb] >= 80 && lumArr[nb] >= 126) {
+            nextCb[nb] = 1
+          }
+        }
+        if (cx + 1 < w) {
+          const nb = i + 1
+          if (!nextCb[nb] && !tapeCompId[nb] && alphaArr[nb] >= 80 && lumArr[nb] >= 126) {
+            nextCb[nb] = 1
+          }
+        }
+        if (cy > 0) {
+          const nb = i - w
+          if (!nextCb[nb] && !tapeCompId[nb] && alphaArr[nb] >= 80 && lumArr[nb] >= 126) {
+            nextCb[nb] = 1
+          }
+        }
+        if (cy + 1 < h) {
+          const nb = i + w
+          if (!nextCb[nb] && !tapeCompId[nb] && alphaArr[nb] >= 80 && lumArr[nb] >= 126) {
+            nextCb[nb] = 1
+          }
+        }
+      }
+      isCardboard.set(nextCb)
+    }
+
+    // 2. Segment ONLY small protruding Bottle Caps (`tampinhas pequenas que ficam na caixa`)
+    //    and Circular Caps/Buttons inside the box art (`círculos dentro da arte`)
+    vis.fill(0)
+    const capCompId = new Uint8Array(n)
+    let numCaps = 0
+
+    for (let i = 0; i < n; i++) {
+      if (
+        vis[i] ||
+        isCardboard[i] ||
+        tapeCompId[i] !== 0 ||
+        alphaArr[i] < 80 ||
+        lumArr[i] < 85
+      ) {
+        continue
+      }
+      let head = 0
+      let tail = 0
+      queue[tail++] = i
+      vis[i] = 1
+
+      let minX = w
+      let maxX = 0
+      let minY = h
+      let maxY = 0
+      let sumLum = 0
+
+      while (head < tail) {
+        const curr = queue[head++]
+        const cx = curr % w
+        const cy = (curr / w) | 0
+        if (cx < minX) minX = cx
+        if (cx > maxX) maxX = cx
+        if (cy < minY) minY = cy
+        if (cy > maxY) maxY = cy
+        sumLum += lumArr[curr]
+
+        if (cx > 0) {
+          const next = curr - 1
+          if (
+            !vis[next] &&
+            !isCardboard[next] &&
+            tapeCompId[next] === 0 &&
+            alphaArr[next] >= 80 &&
+            lumArr[next] >= 85
+          ) {
+            vis[next] = 1
+            queue[tail++] = next
+          }
+        }
+        if (cx + 1 < w) {
+          const next = curr + 1
+          if (
+            !vis[next] &&
+            !isCardboard[next] &&
+            tapeCompId[next] === 0 &&
+            alphaArr[next] >= 80 &&
+            lumArr[next] >= 85
+          ) {
+            vis[next] = 1
+            queue[tail++] = next
+          }
+        }
+        if (cy > 0) {
+          const next = curr - w
+          if (
+            !vis[next] &&
+            !isCardboard[next] &&
+            tapeCompId[next] === 0 &&
+            alphaArr[next] >= 80 &&
+            lumArr[next] >= 85
+          ) {
+            vis[next] = 1
+            queue[tail++] = next
+          }
+        }
+        if (cy + 1 < h) {
+          const next = curr + w
+          if (
+            !vis[next] &&
+            !isCardboard[next] &&
+            tapeCompId[next] === 0 &&
+            alphaArr[next] >= 80 &&
+            lumArr[next] >= 85
+          ) {
+            vis[next] = 1
+            queue[tail++] = next
+          }
+        }
+      }
+
+      const bw = maxX - minX + 1
+      const bh = maxY - minY + 1
+      const aspect = Math.max(bw / bh, bh / bw)
+      const avgLum = sumLum / tail
+
+      // (A) Circular caps & buttons on the front of the cardboard box
+      const isFrontCircleCap =
+        tail >= 120 &&
+        tail <= 410 &&
+        bw >= 12 &&
+        bw <= 29 &&
+        bh >= 12 &&
+        bh <= 29 &&
+        aspect <= 1.45 &&
+        avgLum <= 130.5
+
+      // (B) Small bottle caps/pegs protruding from the top edge (`minY <= 5`)
+      const isTopCap =
+        !(w === 200 && h === 128) &&
+        minY <= 5 &&
+        maxY <= 15 &&
+        tail >= 24 &&
+        tail <= 280 &&
+        bw >= 3 &&
+        bw <= 38 &&
+        bh >= 3 &&
+        bh <= 13 &&
+        (bw >= 11 || bh >= 8) &&
+        avgLum <= 148.5
+
+      // (C) Protruding side/bottom bottle caps (J/L side serrated cap & inner caps, S/Z bottom serrated cap & side caps, T stem side caps)
+      const isSideBottleCap =
+        ((maxX >= w - 2 || minX <= 1) &&
+          minY >= 8 &&
+          maxY <= 55 &&
+          bw >= 12 &&
+          bw <= 18 &&
+          bh >= 30 &&
+          bh <= 42) ||
+        (minY >= 62 &&
+          maxY <= 75 &&
+          bw >= 28 &&
+          bw <= 36 &&
+          bh >= 9 &&
+          bh <= 14 &&
+          avgLum <= 115) ||
+        (minY >= 70 &&
+          maxY <= 132 &&
+          bw >= 5 &&
+          bw <= 10 &&
+          bh >= 14 &&
+          bh <= 20 &&
+          tail >= 65 &&
+          tail <= 125)
+
+      if (isFrontCircleCap || isTopCap || isSideBottleCap) {
+        if (isFrontCircleCap) {
+          let effMinX = minX
+          let effMaxX = maxX
+          let effMinY = minY
+          let effMaxY = maxY
+          if (w === 192 && h === 136) {
+            if (bw >= 23) {
+              effMaxX = maxX - 1
+              effMinX = effMaxX - 20
+            }
+            if (bh >= 22) {
+              effMinY = bh >= 24 ? minY + 1 : minY
+              effMaxY = effMinY + 19
+            }
+          }
+          const effBw = effMaxX - effMinX + 1
+          const effBh = effMaxY - effMinY + 1
+          const centerX = (effMinX + effMaxX) * 0.5
+          const centerY = (effMinY + effMaxY) * 0.5
+          const existingCid =
+            capCompId[Math.round(centerY) * w + Math.round(centerX)]
+          const cid = existingCid > 0 ? existingCid : ++numCaps
+
+          const maxR = Math.min(effBw, effBh) * 0.51
+          const maxRSq = maxR * maxR
+          const innerRSq = Math.pow(Math.min(effBw, effBh) * 0.47, 2)
+          for (let k = 0; k < tail; k++) {
+            const idx = queue[k]
+            const px = idx % w
+            const py = (idx / w) | 0
+            const dx = px - centerX
+            const dy = py - centerY
+            if (dx * dx + dy * dy <= maxRSq) {
+              capCompId[idx] = cid
+            }
+          }
+          for (let py = effMinY; py <= effMaxY; py++) {
+            for (let px = effMinX; px <= effMaxX; px++) {
+              const dx = px - centerX
+              const dy = py - centerY
+              if (dx * dx + dy * dy <= innerRSq) {
+                const pIdx = py * w + px
+                if (
+                  !tapeCompId[pIdx] &&
+                  alphaArr[pIdx] >= 80 &&
+                  lumArr[pIdx] >= 65
+                ) {
+                  isCardboard[pIdx] = 0
+                  capCompId[pIdx] = cid
+                }
+              }
+            }
+          }
+        } else {
+          numCaps++
+          const cid = numCaps
+          for (let k = 0; k < tail; k++) {
+            capCompId[queue[k]] = cid
+          }
+          if (bh <= 15 && bw >= 24) {
+            for (let py = minY; py <= maxY; py++) {
+              for (
+                let px = Math.max(0, minX - 4);
+                px <= Math.min(w - 1, maxX + 4);
+                px++
+              ) {
+                const pIdx = py * w + px
+                if (
+                  !isCardboard[pIdx] &&
+                  !tapeCompId[pIdx] &&
+                  alphaArr[pIdx] >= 80 &&
+                  lumArr[pIdx] >= 65
+                ) {
+                  capCompId[pIdx] = cid
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Group the 2 top serrated bottle caps on J and L (200x128) cleanly as 2 caps above the box top line (`y = 0..2`)
+    if (w === 200 && h === 128) {
+      const isJ = alphaArr[100 * w + 180] < 50
+      const ranges: Array<[number, number]> = isJ
+        ? [
+            [14, 45],
+            [78, 109],
+          ]
+        : [
+            [154, 185],
+            [90, 121],
+          ]
+      for (const [x0, x1] of ranges) {
+        numCaps++
+        const cid = numCaps
+        for (let py = 0; py <= 2; py++) {
+          for (let px = x0; px <= x1; px++) {
+            const pIdx = py * w + px
+            if (alphaArr[pIdx] >= 80 && lumArr[pIdx] >= 65) {
+              capCompId[pIdx] = cid
+            }
+          }
+        }
+      }
+    }
+
+    // Dilate caps by 1px into anti-aliased inner rim (`lum >= 88`) without crossing dark ink outlines
+    {
+      const nextCap = new Uint8Array(capCompId)
+      for (let i = 0; i < n; i++) {
+        const cid = capCompId[i]
+        if (!cid) continue
+        const cx = i % w
+        const cy = (i / w) | 0
+        if (w === 200 && h === 128 && cy <= 2) continue
+        if (cx > 0) {
+          const nb = i - 1
+          if (
+            !nextCap[nb] &&
+            !isCardboard[nb] &&
+            !tapeCompId[nb] &&
+            alphaArr[nb] >= 80 &&
+            lumArr[nb] >= 88
+          ) {
+            nextCap[nb] = cid
+          }
+        }
+        if (cx + 1 < w) {
+          const nb = i + 1
+          if (
+            !nextCap[nb] &&
+            !isCardboard[nb] &&
+            !tapeCompId[nb] &&
+            alphaArr[nb] >= 80 &&
+            lumArr[nb] >= 88
+          ) {
+            nextCap[nb] = cid
+          }
+        }
+        if (cy > 0) {
+          const nb = i - w
+          if (
+            !nextCap[nb] &&
+            !isCardboard[nb] &&
+            !tapeCompId[nb] &&
+            alphaArr[nb] >= 80 &&
+            lumArr[nb] >= 88
+          ) {
+            nextCap[nb] = cid
+          }
+        }
+        if (cy + 1 < h) {
+          const nb = i + w
+          if (
+            !nextCap[nb] &&
+            !isCardboard[nb] &&
+            !tapeCompId[nb] &&
+            alphaArr[nb] >= 80 &&
+            lumArr[nb] >= 88
+          ) {
+            nextCap[nb] = cid
+          }
+        }
+      }
+      capCompId.set(nextCap)
+    }
+
+    // 3. Build LUTs:
+    //    - Fixed Kraft Cardboard LUT for the entire cardboard box body (`cor de papelão`)
+    //    - Darker Brown LUT for all adhesive tape strips (`fitinha com um marrom mais escuro`)
+    //    - Vibrant LUTs ONLY for the small bottle caps & circular details (`capLuts`)
+    const fixedCardboardTheme: PlaceholderColorTheme = {
+      border: '#66401E',
+      fill: '#C8965E',
+      highlight: '#EAC596',
+      label: 'Papelão Kraft Fixo',
+    }
+    const cardboardLut = this.buildThreeToneLut(
+      fixedCardboardTheme,
+      96,
+      156,
+      190
+    )
+
+    const darkBrownTapeTheme: PlaceholderColorTheme = {
+      border: '#2D180A',
+      fill: '#6E4223',
+      highlight: '#A47149',
+      label: 'Fita Marrom Mais Escuro',
+    }
+    const darkBrownTapeLut = this.buildThreeToneLut(
+      darkBrownTapeTheme,
+      96,
+      166,
+      192
+    )
+
+    const capLuts: Array<{ r: Uint8Array; g: Uint8Array; b: Uint8Array }> = []
+    for (let c = 0; c < numCaps; c++) {
+      const accentTheme =
+        DIY_COLOR_PALETTE[
+          ((paletteIndex + c * 2) % DIY_COLOR_PALETTE.length +
+            DIY_COLOR_PALETTE.length) %
+            DIY_COLOR_PALETTE.length
+        ]
+      capLuts.push(this.buildThreeToneLut(accentTheme, 75, 118, 160))
+    }
+
+    // 4. Apply per-region LUT to every pixel (defaulting entire box body & corrugated tears to cardboardLut)
+    for (let i = 0; i < n; i++) {
+      const a = alphaArr[i]
+      if (a === 0) continue
+      const lum = lumArr[i]
+      const p = i * 4
+
+      let lut = cardboardLut
+      const cid = capCompId[i]
+      const tid = tapeCompId[i]
+      if (cid > 0) {
+        lut = capLuts[cid - 1]
+      } else if (tid > 0) {
+        lut = darkBrownTapeLut
+      }
+
+      data[p] = lut.r[lum]
+      data[p + 1] = lut.g[lum]
+      data[p + 2] = lut.b[lum]
+    }
+
+    ctx.putImageData(imageData, 0, 0)
+    return canvas
   }
 
   /**
@@ -1016,14 +2417,72 @@ export class SpriteRegistry {
   }
 
   /**
-   * High-contrast 3-Point Luminance Colorizer (`border -> fill -> highlight`)
+   * Renders a lustrous 24k Gold Bullion block canvas for the `gold` block skin (`assets/sprites/block/skins/gold/*.png`).
+   * Preserves the rich original golden artwork while adding a subtle warm metallic golden charm ("leve charme de ouro"):
+   * - Soft diagonal golden-champagne sheen across the block face.
+   * - Subtle specular highlight boost on bright golden bevels without altering dark cartoon ink outlines.
+   */
+  private createGoldBlockCanvas(
+    img: HTMLImageElement,
+    paletteIndex: number = 0
+  ): HTMLCanvasElement {
+    const w = img.naturalWidth || img.width
+    const h = img.naturalHeight || img.height
+    const canvas = document.createElement('canvas')
+    canvas.width = w
+    canvas.height = h
+    const ctx = canvas.getContext('2d')
+    if (!ctx || !w || !h) return canvas
+
+    // 1. Base gold bullion sprite artwork
+    ctx.drawImage(img, 0, 0, w, h)
+
+    // 2. Subtle per-pixel specular charm on golden body & bevels (preserving dark outlines `lum < 65`)
+    const imageData = ctx.getImageData(0, 0, w, h)
+    const data = imageData.data
+    const warmthShift = ((paletteIndex % 5) - 2) * 2.5
+
+    for (let y = 0; y < h; y++) {
+      const ny = y / h
+      for (let x = 0; x < w; x++) {
+        const idx = (y * w + x) * 4
+        const a = data[idx + 3]
+        if (a < 32) continue
+
+        const r = data[idx]
+        const g = data[idx + 1]
+        const b = data[idx + 2]
+        const lum = (r + g + b) / 3
+
+        // Keep dark cartoon ink outlines untouched
+        if (lum < 65) continue
+
+        // Diagonal metallic luster wave (top-left bright champagne -> bottom-right warm amber gold)
+        const nx = x / w
+        const diag = (1 - (nx * 0.58 + ny * 0.42)) // 1 at top-left, 0 at bottom-right
+        const sheen = Math.max(0, diag - 0.35) * 22
+        const specBoost = lum > 185 ? (lum - 185) * 0.28 : 0
+
+        data[idx] = Math.min(255, Math.max(0, Math.round(r + sheen * 1.05 + specBoost + warmthShift)))
+        data[idx + 1] = Math.min(255, Math.max(0, Math.round(g + sheen * 0.88 + specBoost * 0.92 + warmthShift * 0.4)))
+        data[idx + 2] = Math.min(255, Math.max(0, Math.round(b + sheen * 0.32 + specBoost * 0.65)))
+      }
+    }
+    ctx.putImageData(imageData, 0, 0)
+
+    return canvas
+  }
+
+  /**
+   * High-contrast Luminance Colorizer (`deep contour -> border -> fill -> highlight`)
    * anchored at the exported grey block's base luminance (`160`).
-   * Preserves dark contours (`lum ~ 96`), inner bevel shadows (`lum ~ 130`),
-   * vibrant pure fill (`lum = 160`), and glossy plastic highlights (`lum ~ 195`).
+   * Preserves dark ink outlines (`lum < 50`), wood grain / inner bevel shadows (`lum ~ 50..120`),
+   * vibrant pure fill or warm wood body (`lum = 160`), and glossy plastic / wood grain highlights (`lum ~ 196`).
    */
   private createTintedBlockCanvas(
     img: HTMLImageElement,
-    theme: PlaceholderColorTheme
+    theme: PlaceholderColorTheme,
+    forceRecolor: boolean = false
   ): HTMLCanvasElement {
     const w = img.naturalWidth || img.width
     const h = img.naturalHeight || img.height
@@ -1034,73 +2493,42 @@ export class SpriteRegistry {
     if (!ctx) return canvas
 
     ctx.drawImage(img, 0, 0, w, h)
-    if (!this.dynamicTintEnabled) {
+    if (!this.dynamicTintEnabled && !forceRecolor) {
       return canvas
     }
 
     const imageData = ctx.getImageData(0, 0, w, h)
     const data = imageData.data
 
-    // Check if the sprite is grayscale (if the user uploads a pre-colored image, keep its colors)
-    let satSum = 0
-    let opaqueCount = 0
-    for (let i = 0; i < data.length; i += 16) {
-      const a = data[i + 3]
-      if (a > 128) {
-        const r = data[i]
-        const g = data[i + 1]
-        const b = data[i + 2]
-        satSum += Math.max(r, g, b) - Math.min(r, g, b)
-        opaqueCount++
+    if (!forceRecolor) {
+      // Check if the sprite is grayscale (if the user uploads a pre-colored image, keep its colors)
+      let satSum = 0
+      let opaqueCount = 0
+      for (let i = 0; i < data.length; i += 16) {
+        const a = data[i + 3]
+        if (a > 128) {
+          const r = data[i]
+          const g = data[i + 1]
+          const b = data[i + 2]
+          satSum += Math.max(r, g, b) - Math.min(r, g, b)
+          opaqueCount++
+        }
+      }
+      const avgSat = opaqueCount > 0 ? satSum / opaqueCount : 0
+      if (avgSat > 22) {
+        return canvas
       }
     }
-    const avgSat = opaqueCount > 0 ? satSum / opaqueCount : 0
-    if (avgSat > 22) {
-      return canvas
-    }
 
-    const borderRgb = hexToRgb(theme.border)
-    const fillRgb = hexToRgb(theme.fill)
-    const highlightRgb = hexToRgb(theme.highlight)
-
-    // Precompute 256-entry LUT for ultra-fast pixel remapping
-    const lutR = new Uint8Array(256)
-    const lutG = new Uint8Array(256)
-    const lutB = new Uint8Array(256)
-
-    const minShadowLum = 96
-    const baseBodyLum = 160
-    const maxGlossLum = 196
-
-    for (let lum = 0; lum < 256; lum++) {
-      if (lum <= baseBodyLum) {
-        const t = Math.max(
-          0,
-          Math.min(1, (lum - minShadowLum) / (baseBodyLum - minShadowLum))
-        )
-        // Smoothstep blend from border shade to vibrant fill color
-        const smoothT = t * t * (3 - 2 * t)
-        lutR[lum] = Math.round(borderRgb.r + (fillRgb.r - borderRgb.r) * smoothT)
-        lutG[lum] = Math.round(borderRgb.g + (fillRgb.g - borderRgb.g) * smoothT)
-        lutB[lum] = Math.round(borderRgb.b + (fillRgb.b - borderRgb.b) * smoothT)
-      } else {
-        const t = Math.max(
-          0,
-          Math.min(1, (lum - baseBodyLum) / (maxGlossLum - baseBodyLum))
-        )
-        lutR[lum] = Math.round(fillRgb.r + (highlightRgb.r - fillRgb.r) * t)
-        lutG[lum] = Math.round(fillRgb.g + (highlightRgb.g - fillRgb.g) * t)
-        lutB[lum] = Math.round(fillRgb.b + (highlightRgb.b - fillRgb.b) * t)
-      }
-    }
+    const lut = this.buildThreeToneLut(theme, 96, 160, 196)
 
     for (let i = 0; i < data.length; i += 4) {
       const a = data[i + 3]
       if (a === 0) continue
       const lum = (data[i] + data[i + 1] + data[i + 2]) / 3 | 0
-      data[i] = lutR[lum]
-      data[i + 1] = lutG[lum]
-      data[i + 2] = lutB[lum]
+      data[i] = lut.r[lum]
+      data[i + 1] = lut.g[lum]
+      data[i + 2] = lut.b[lum]
     }
 
     ctx.putImageData(imageData, 0, 0)
@@ -1206,6 +2634,37 @@ export class SpriteRegistry {
       loadImg(spriteUrl),
       collisionUrl ? loadImg(collisionUrl).catch(() => null) : Promise.resolve(null),
     ]).then(([spriteImg, colImg]) => {
+      const pieceType = key.replace('piece_', '') as PieceType
+      // If this is piece_L and the active skin only provides J (e.g. wood, diy, gold), mirror J horizontally
+      const activeSkin = this.getActiveBlockSkin()
+      if (
+        pieceType === 'L' &&
+        activeSkin &&
+        !activeSkin.pieceUrls.L &&
+        activeSkin.pieceUrls.J
+      ) {
+        const w = spriteImg.naturalWidth || spriteImg.width
+        const h = spriteImg.naturalHeight || spriteImg.height
+        const c = document.createElement('canvas')
+        c.width = w
+        c.height = h
+        const cctx = c.getContext('2d')
+        if (cctx) {
+          cctx.translate(w, 0)
+          cctx.scale(-1, 1)
+          cctx.drawImage(spriteImg, 0, 0, w, h)
+          const mirrored = new Image()
+          mirrored.onload = () => {
+            this.applyBlockSkinPieceImage('L', mirrored, spriteUrl)
+          }
+          mirrored.src = c.toDataURL('image/png')
+          if (colImg) {
+            this.collisionImageByType.set('L', colImg)
+          }
+          return
+        }
+      }
+
       slot.image = spriteImg
       slot.collisionImage = colImg
       slot.loaded = true
@@ -1224,37 +2683,56 @@ export class SpriteRegistry {
         slot.hasCollisionMask = false
       }
 
-      const pieceType = key.replace('piece_', '') as PieceType
+      const activePalette = this.getActiveBlockPalette()
       if (pieceType in DEFAULT_PALETTE_BY_TYPE) {
-        slot.multiColorCanvases = PIECE_COLOR_PALETTE.map((colorTheme) =>
-          this.createTintedBlockCanvas(spriteImg, colorTheme)
+        slot.multiColorCanvases = activePalette.map((colorTheme, idx) =>
+          this.activeBlockSkinId === 'diy'
+            ? this.createDiyTintedBlockCanvas(spriteImg, idx)
+            : this.activeBlockSkinId === 'gold'
+              ? this.createGoldBlockCanvas(spriteImg, idx)
+              : this.createTintedBlockCanvas(spriteImg, colorTheme)
         )
         slot.tintedCanvas =
           slot.multiColorCanvases[DEFAULT_PALETTE_BY_TYPE[pieceType]] ||
-          this.createTintedBlockCanvas(spriteImg, slot.placeholder)
+          (this.activeBlockSkinId === 'diy'
+            ? this.createDiyTintedBlockCanvas(spriteImg, 0)
+            : this.activeBlockSkinId === 'gold'
+              ? this.createGoldBlockCanvas(spriteImg, 0)
+              : this.createTintedBlockCanvas(spriteImg, slot.placeholder))
       } else {
-        slot.tintedCanvas = this.createTintedBlockCanvas(
-          spriteImg,
-          slot.placeholder
-        )
+        slot.tintedCanvas =
+          this.activeBlockSkinId === 'diy'
+            ? this.createDiyTintedBlockCanvas(spriteImg, 0)
+            : this.activeBlockSkinId === 'gold'
+              ? this.createGoldBlockCanvas(spriteImg, 0)
+              : this.createTintedBlockCanvas(spriteImg, slot.placeholder)
       }
-      slot.staticBrickCanvas = this.createTintedBlockCanvas(spriteImg, {
-        fill: '#475569',
-        border: '#0F172A',
-        highlight: '#E2E8F0',
-        label: 'Bloco de Ferro (Estático)',
-      })
-      slot.iceBrickCanvas = this.createTintedBlockCanvas(spriteImg, {
-        fill: '#22D3EE',
-        border: '#0284C7',
-        highlight: '#E0F2FE',
-        label: 'Bloco de Gelo (Azul Ciano)',
-      })
+      slot.staticBrickCanvas = this.createTintedBlockCanvas(
+        spriteImg,
+        {
+          fill: '#475569',
+          border: '#0F172A',
+          highlight: '#E2E8F0',
+          label: 'Bloco de Ferro (Estático)',
+        },
+        true
+      )
+      slot.iceBrickCanvas = this.createTintedBlockCanvas(
+        spriteImg,
+        {
+          fill: '#22D3EE',
+          border: '#0284C7',
+          highlight: '#E0F2FE',
+          label: 'Bloco de Gelo (Azul Ciano)',
+        },
+        true
+      )
       if (key === 'piece_I' || key === 'piece_O') {
         const heavyTheme = this.getSlot('piece_HEAVY_RUBBER').placeholder
         slot.heavyRubberCanvas = this.createTintedBlockCanvas(
           spriteImg,
-          heavyTheme
+          heavyTheme,
+          true
         )
         // Mark piece_HEAVY_RUBBER slot as loaded since it uses I/O tinted in gunmetal
         const heavySlot = this.getSlot('piece_HEAVY_RUBBER')
@@ -3267,8 +4745,49 @@ export class SpriteRegistry {
   }
 
   /**
+   * Returns the 5 pre-discovered cast animation frame URLs (`_cast_1.png` .. `_cast_5.png`) for a given `skinId`.
+   */
+  public getPlayerCastFrameUrls(skinId: string): string[] {
+    return (this.playerCastFrameUrls.get(skinId.toLowerCase()) || []).filter(
+      Boolean
+    )
+  }
+
+  /**
+   * Computes the 0-based cast animation frame index (`0..4`) from `castAnimRemainingMs`.
+   * Returns `0` (resting pose holding wand/sword/staff) when idle (`castAnimRemainingMs <= 0`).
+   *
+   * Timeline over `castAnimDurationMs` (default `950ms`, `progress = 0 -> 1`):
+   * - `0.00..0.08`: Frame 0 (`_cast_1` — anticipation / starting pose)
+   * - `0.08..0.18`: Frame 1 (`_cast_2` — lifting wand low-mid)
+   * - `0.18..0.28`: Frame 2 (`_cast_3` — lifting wand mid-high)
+   * - `0.28..0.40`: Frame 3 (`_cast_4` — wand high, magic charging)
+   * - `0.40..0.74`: Frame 4 (`_cast_5` — PEAK! Wand raised + magic sparkles/roar)
+   * - `0.74..0.83`: Frame 3 (`_cast_4` — lowering wand high-mid)
+   * - `0.83..0.92`: Frame 2 (`_cast_3` — lowering wand mid-low)
+   * - `0.92..1.00`: Frame 1 (`_cast_2` — returning smoothly to Frame 0 idle)
+   */
+  public getCastFrameIndex(
+    castAnimRemainingMs: number,
+    castAnimDurationMs: number = 950
+  ): number {
+    if (!castAnimRemainingMs || castAnimRemainingMs <= 0) return 0
+    const dur = Math.max(100, castAnimDurationMs)
+    const progress = Math.max(0, Math.min(1, 1 - castAnimRemainingMs / dur))
+    if (progress < 0.08) return 0
+    if (progress < 0.18) return 1
+    if (progress < 0.28) return 2
+    if (progress < 0.40) return 3
+    if (progress < 0.74) return 4
+    if (progress < 0.83) return 3
+    if (progress < 0.92) return 2
+    return 1
+  }
+
+  /**
    * Renders the floating character/mascot alongside the tower's top height.
-   * Uses the active Player Skin from `assets/sprites/player` (e.g. `player_mage.png`)
+   * Uses the active Player Skin from `assets/sprites/player` (and its 5-frame wand-raising animation
+   * in `assets/sprites/player/cast/` when activating a power)
    * with procedural floating bobbing, tower-facing horizontal orientation, victory dance flips,
    * white flash & 3-second invulnerability blinking when dropping a piece, expressive Wizard Shock Reaction,
    * and Tricky Towers-style floating Power Bubbles above its head:
@@ -3290,6 +4809,8 @@ export class SpriteRegistry {
       fallReactionIntensity?: number
       isSurvivalLifeLoss?: boolean
       invulnerableRemainingMs?: number
+      castAnimRemainingMs?: number
+      castAnimDurationMs?: number
     }
   ): void {
     const slot = this.getSlot('mascot_floating')
@@ -3299,10 +4820,18 @@ export class SpriteRegistry {
     const whiteFlash = Math.max(0, Math.min(1, options?.whiteFlashAlpha ?? 0))
     const blinkAlpha = Math.max(0.15, Math.min(1, options?.blinkAlpha ?? 1))
     const invulnMs = Math.max(0, options?.invulnerableRemainingMs ?? 0)
+    const castRemMs = Math.max(0, options?.castAnimRemainingMs ?? 0)
+    const castDurMs = Math.max(100, options?.castAnimDurationMs ?? 950)
+    const isCasting = castRemMs > 0
+    const castProgress = isCasting
+      ? Math.max(0, Math.min(1, 1 - castRemMs / castDurMs))
+      : 0
+    const castSin = isCasting ? Math.sin(castProgress * Math.PI) : 0
 
     // Wizard startled jump + rapid horizontal panic tremor when a piece falls!
     const jumpPhase = reaction > 0.65 ? (reaction - 0.65) / 0.35 : 0
     const reactionJumpY = -Math.sin(jumpPhase * Math.PI) * 26
+    const castHopY = -castSin * 9
     const reactionShakeX =
       reaction > 0
         ? Math.sin(animTimeMs * 0.058) * 7.5 * Math.pow(reaction, 0.75)
@@ -3314,13 +4843,13 @@ export class SpriteRegistry {
         : 0
 
     const effX = centerX + reactionShakeX
-    const effY = centerY + reactionJumpY
+    const effY = centerY + reactionJumpY + castHopY
 
     const baseTiltRad = Math.sin(animTimeMs * 0.0025) * 0.04
     const tiltRad = baseTiltRad + extraTilt + reactionTilt
 
-    const squashStretchY = 1 + jumpPhase * 0.15
-    const squashStretchX = 1 - jumpPhase * 0.1
+    const squashStretchY = (1 + jumpPhase * 0.15) * (1 + castSin * 0.035)
+    const squashStretchX = (1 - jumpPhase * 0.1) * (1 + castSin * 0.02)
     const breathScaleY =
       (1 + Math.sin(animTimeMs * 0.005) * 0.02) * squashStretchY
     const breathScaleX =
@@ -3333,11 +4862,6 @@ export class SpriteRegistry {
           : -0.08
         : rawFlipX
 
-    // 0. Protective Invulnerability Shield Ring around the Wizard during the 3s stabilization window
-    if (invulnMs > 0) {
-      this.drawMascotInvulnerabilityShield(ctx, effX, effY, animTimeMs, invulnMs)
-    }
-
     ctx.save()
     ctx.translate(effX, effY)
     ctx.rotate(tiltRad)
@@ -3349,7 +4873,37 @@ export class SpriteRegistry {
       ctx.shadowBlur = 22 * whiteFlash
     }
 
-    if (!this.forcePlaceholders && slot.loaded && slot.image) {
+    const castFrames = this.playerCastFrameImages.get(
+      this.activePlayerSkinId.toLowerCase()
+    )
+    const castFrameIdx = this.getCastFrameIndex(castRemMs, castDurMs)
+    const activeCastImg = castFrames?.[castFrameIdx] || castFrames?.[0] || null
+
+    if (
+      !this.forcePlaceholders &&
+      activeCastImg &&
+      activeCastImg.complete &&
+      activeCastImg.naturalHeight > 0
+    ) {
+      // 256x352 aligned cast frame where the 192x192 character box sits at (32, 158)..(224, 350)
+      const targetHeight = 96
+      const scale = targetHeight / 192
+      const drawW = activeCastImg.naturalWidth * scale
+      const drawH = activeCastImg.naturalHeight * scale
+      const drawX = -drawW / 2
+      const drawY = -targetHeight * 0.62 - 158 * scale
+      ctx.drawImage(activeCastImg, drawX, drawY, drawW, drawH)
+
+      if (whiteFlash > 0.01) {
+        const whiteSil = this.getWhiteSilhouetteCanvas(activeCastImg)
+        if (whiteSil) {
+          ctx.save()
+          ctx.globalAlpha = whiteFlash
+          ctx.drawImage(whiteSil, drawX, drawY, drawW, drawH)
+          ctx.restore()
+        }
+      }
+    } else if (!this.forcePlaceholders && slot.loaded && slot.image) {
       // 192x192 HD sprite at 0.5x world scale = 96x96px (3x3 units, matching the 64px->32px block scale!)
       const targetHeight = 96
       const aspect =
@@ -3437,6 +4991,8 @@ export class SpriteRegistry {
       fallReactionIntensity?: number
       isSurvivalLifeLoss?: boolean
       invulnerableRemainingMs?: number
+      castAnimRemainingMs?: number
+      castAnimDurationMs?: number
     }
   ): void {
     const img =
@@ -3448,10 +5004,17 @@ export class SpriteRegistry {
     const reaction = Math.max(0, Math.min(1, options?.fallReactionIntensity ?? 0))
     const whiteFlash = Math.max(0, Math.min(1, options?.whiteFlashAlpha ?? 0))
     const blinkAlpha = Math.max(0.15, Math.min(1, options?.blinkAlpha ?? 1))
-    const invulnMs = Math.max(0, options?.invulnerableRemainingMs ?? 0)
+    const castRemMs = Math.max(0, options?.castAnimRemainingMs ?? 0)
+    const castDurMs = Math.max(100, options?.castAnimDurationMs ?? 950)
+    const isCasting = castRemMs > 0
+    const castProgress = isCasting
+      ? Math.max(0, Math.min(1, 1 - castRemMs / castDurMs))
+      : 0
+    const castSin = isCasting ? Math.sin(castProgress * Math.PI) : 0
 
     const jumpPhase = reaction > 0.65 ? (reaction - 0.65) / 0.35 : 0
     const reactionJumpY = -Math.sin(jumpPhase * Math.PI) * 24
+    const castHopY = -castSin * 9
     const reactionShakeX =
       reaction > 0
         ? Math.sin(animTimeMs * 0.058) * 7.0 * Math.pow(reaction, 0.75)
@@ -3462,17 +5025,17 @@ export class SpriteRegistry {
         : 0
 
     const effX = centerX + reactionShakeX
-    const effY = centerY + reactionJumpY
-
-    if (invulnMs > 0) {
-      this.drawMascotInvulnerabilityShield(ctx, effX, effY, animTimeMs, invulnMs)
-    }
+    const effY = centerY + reactionJumpY + castHopY
 
     const tiltRad = Math.sin(animTimeMs * 0.0022) * 0.035 + reactionTilt
     const breathScaleY =
-      (1 + Math.sin(animTimeMs * 0.0045) * 0.018) * (1 + jumpPhase * 0.14)
+      (1 + Math.sin(animTimeMs * 0.0045) * 0.018) *
+      (1 + jumpPhase * 0.14) *
+      (1 + castSin * 0.035)
     const breathScaleX =
-      (1 - Math.sin(animTimeMs * 0.0045) * 0.012) * (1 - jumpPhase * 0.09)
+      (1 - Math.sin(animTimeMs * 0.0045) * 0.012) *
+      (1 - jumpPhase * 0.09) *
+      (1 + castSin * 0.02)
 
     ctx.save()
     ctx.translate(effX, effY)
@@ -3485,7 +5048,33 @@ export class SpriteRegistry {
       ctx.shadowBlur = 20 * whiteFlash
     }
 
-    if (!this.forcePlaceholders && img && img.naturalHeight > 0) {
+    const castFrames = this.playerCastFrameImages.get(skinId.toLowerCase())
+    const castFrameIdx = this.getCastFrameIndex(castRemMs, castDurMs)
+    const activeCastImg = castFrames?.[castFrameIdx] || castFrames?.[0] || null
+
+    if (
+      !this.forcePlaceholders &&
+      activeCastImg &&
+      activeCastImg.complete &&
+      activeCastImg.naturalHeight > 0
+    ) {
+      const scale = targetHeight / 192
+      const drawW = activeCastImg.naturalWidth * scale
+      const drawH = activeCastImg.naturalHeight * scale
+      const drawX = -drawW / 2
+      const drawY = -targetHeight * 0.55 - 158 * scale
+      ctx.drawImage(activeCastImg, drawX, drawY, drawW, drawH)
+
+      if (whiteFlash > 0.01) {
+        const whiteSil = this.getWhiteSilhouetteCanvas(activeCastImg)
+        if (whiteSil) {
+          ctx.save()
+          ctx.globalAlpha = whiteFlash
+          ctx.drawImage(whiteSil, drawX, drawY, drawW, drawH)
+          ctx.restore()
+        }
+      }
+    } else if (!this.forcePlaceholders && img && img.naturalHeight > 0) {
       const aspect = img.naturalWidth / img.naturalHeight
       const drawH = targetHeight
       const drawW = Math.min(180, Math.max(64, targetHeight * aspect))
@@ -3532,73 +5121,10 @@ export class SpriteRegistry {
   }
 
   /**
-   * Renders the protective blinking Invulnerability Shield Aura around the Wizard
-   * during the 3-second (`3000ms`) stabilization window in Survival Mode.
-   */
-  private drawMascotInvulnerabilityShield(
-    ctx: CanvasRenderingContext2D,
-    cx: number,
-    cy: number,
-    animTimeMs: number,
-    invulnRemainingMs: number
-  ): void {
-    const pulse = 0.5 + 0.5 * Math.sin(animTimeMs * 0.028)
-    const radius = 52 + pulse * 5
-
-    ctx.save()
-    ctx.translate(cx, cy - 8)
-
-    // Soft white-cyan radial aura
-    const grad = ctx.createRadialGradient(0, 0, radius * 0.25, 0, 0, radius)
-    grad.addColorStop(0, `rgba(255, 255, 255, ${(0.28 + pulse * 0.22).toFixed(3)})`)
-    grad.addColorStop(0.65, `rgba(56, 189, 248, ${(0.24 + pulse * 0.18).toFixed(3)})`)
-    grad.addColorStop(1, 'rgba(56, 189, 248, 0)')
-    ctx.fillStyle = grad
-    ctx.beginPath()
-    ctx.arc(0, 0, radius, 0, Math.PI * 2)
-    ctx.fill()
-
-    // Rotating dashed protective barrier ring
-    ctx.save()
-    ctx.rotate(animTimeMs * 0.004)
-    ctx.strokeStyle = pulse > 0.5 ? '#FFFFFF' : '#38BDF8'
-    ctx.shadowColor = '#38BDF8'
-    ctx.shadowBlur = 12
-    ctx.lineWidth = 3
-    ctx.setLineDash([12, 8])
-    ctx.beginPath()
-    ctx.arc(0, 0, radius - 4, 0, Math.PI * 2)
-    ctx.stroke()
-    ctx.setLineDash([])
-    ctx.restore()
-
-    // Countdown arc showing remaining fraction of the 3.0s invulnerability window
-    const ratio = Math.max(
-      0,
-      Math.min(1, invulnRemainingMs / GAME_CONSTANTS.SURVIVAL_LIFE_LOSS_COOLDOWN_MS)
-    )
-    ctx.strokeStyle = '#FEF08A'
-    ctx.lineWidth = 3.5
-    ctx.lineCap = 'round'
-    ctx.beginPath()
-    ctx.arc(
-      0,
-      0,
-      radius + 2,
-      -Math.PI / 2,
-      -Math.PI / 2 + Math.PI * 2 * ratio
-    )
-    ctx.stroke()
-
-    ctx.restore()
-  }
-
-  /**
    * Renders the Wizard's expressive comic shock/panic reaction above & around his head
    * when the player drops a piece:
    * - Radiating comic shock lines
    * - Flying sweat droplets
-   * - Pulsing comic exclamation badge (`😱 ❗` / `💔 -1`)
    */
   private drawMascotFallReactionOverlay(
     ctx: CanvasRenderingContext2D,
@@ -3606,7 +5132,7 @@ export class SpriteRegistry {
     cy: number,
     animTimeMs: number,
     intensity: number,
-    isSurvivalLifeLoss: boolean
+    _isSurvivalLifeLoss: boolean
   ): void {
     const alpha = Math.min(1, intensity * 1.35)
     if (alpha <= 0.03) return
@@ -3662,41 +5188,6 @@ export class SpriteRegistry {
       }
     }
 
-    // 3. Comic Shock Speech Bubble above the wizard's head
-    const popScale = 0.92 + Math.abs(Math.sin(animTimeMs * 0.022)) * 0.16
-    ctx.save()
-    ctx.translate(0, -76)
-    ctx.scale(popScale, popScale)
-
-    const bubbleW = isSurvivalLifeLoss ? 76 : 68
-    const bubbleH = 30
-    ctx.fillStyle = isSurvivalLifeLoss ? '#FEF2F2' : '#FEFCE8'
-    ctx.strokeStyle = isSurvivalLifeLoss ? '#DC2626' : '#CA8A04'
-    ctx.lineWidth = 3
-    ctx.shadowColor = 'rgba(15, 23, 42, 0.45)'
-    ctx.shadowBlur = 8
-    ctx.beginPath()
-    ctx.roundRect(-bubbleW / 2, -bubbleH / 2, bubbleW, bubbleH, 10)
-    ctx.fill()
-    ctx.stroke()
-
-    // Speech pointer triangle pointing down to wizard's hat
-    ctx.shadowBlur = 0
-    ctx.beginPath()
-    ctx.moveTo(-6, bubbleH / 2 - 1)
-    ctx.lineTo(6, bubbleH / 2 - 1)
-    ctx.lineTo(0, bubbleH / 2 + 8)
-    ctx.closePath()
-    ctx.fill()
-    ctx.stroke()
-
-    ctx.font = '900 14px "Fredoka", Inter, system-ui, sans-serif'
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    ctx.fillStyle = isSurvivalLifeLoss ? '#B91C1C' : '#854D0E'
-    ctx.fillText(isSurvivalLifeLoss ? '😱 💔!' : '😱 ❗', 0, 1)
-
-    ctx.restore()
     ctx.restore()
   }
 
@@ -3955,10 +5446,33 @@ export class SpriteRegistry {
   }
 
   /**
+   * Formats the player's currently bound key for `selfPower` or `attackPower`
+   * into a compact keycap label for the miniature button badge on the magic bubble.
+   */
+  private getPowerBubbleKeyLabel(kind: 'GOOD' | 'CHAOS'): string {
+    const action = kind === 'GOOD' ? 'selfPower' : 'attackPower'
+    const fallback = kind === 'GOOD' ? 'KeyJ' : 'KeyK'
+    const code = optionsStore.state.keybinds[action]?.[0] || fallback
+    if (code === 'Space') return 'ESPAÇO'
+    if (code === 'ArrowUp') return '↑'
+    if (code === 'ArrowDown') return '↓'
+    if (code === 'ArrowLeft') return '←'
+    if (code === 'ArrowRight') return '→'
+    if (code === 'ShiftLeft' || code === 'ShiftRight') return 'SHIFT'
+    if (code === 'ControlLeft' || code === 'ControlRight') return 'CTRL'
+    if (code === 'AltLeft' || code === 'AltRight') return 'ALT'
+    if (code === 'Enter') return 'ENTER'
+    if (code.startsWith('Key')) return code.slice(3).toUpperCase()
+    if (code.startsWith('Digit')) return code.slice(5)
+    return formatKeyCodeLabel(code).toUpperCase()
+  }
+
+  /**
    * Renders the floating circular Power Bubble(s) above the mascot's head,
    * matching the Tricky Towers visual style:
    * - Light / White-Lavender Bubble ("claro para poder bom") for `selfPower`
    * - Dark Red / Crimson Bubble ("vermelho escuro para caos") for `attackPower`
+   * - Miniature 3D button/keycap badge indicating which button to press
    */
   private drawMascotPowerBubbles(
     ctx: CanvasRenderingContext2D,
@@ -3975,7 +5489,7 @@ export class SpriteRegistry {
     ctx.translate(centerX, centerY)
 
     if (selfPower && attackPower) {
-      // Both Good Power and Chaos Power present:
+      // Both Good Power and Chaos Power present (Multiplayer):
       // Draw the Dark Red Chaos bubble slightly lower-right first, then the Light Good bubble above-left overlapping its edge
       this.drawSinglePowerBubble(
         ctx,
@@ -3983,7 +5497,8 @@ export class SpriteRegistry {
         -66 + bobChaos,
         20,
         attackPower,
-        'CHAOS'
+        'CHAOS',
+        true
       )
       this.drawSinglePowerBubble(
         ctx,
@@ -3991,7 +5506,8 @@ export class SpriteRegistry {
         -82 + bobGood,
         23,
         selfPower,
-        'GOOD'
+        'GOOD',
+        true
       )
     } else if (selfPower) {
       this.drawSinglePowerBubble(
@@ -4000,7 +5516,8 @@ export class SpriteRegistry {
         -80 + bobGood,
         24,
         selfPower,
-        'GOOD'
+        'GOOD',
+        false
       )
     } else if (attackPower) {
       this.drawSinglePowerBubble(
@@ -4009,7 +5526,8 @@ export class SpriteRegistry {
         -80 + bobChaos,
         24,
         attackPower,
-        'CHAOS'
+        'CHAOS',
+        false
       )
     }
 
@@ -4022,7 +5540,8 @@ export class SpriteRegistry {
     by: number,
     radius: number,
     powerId: PowerId,
-    kind: 'GOOD' | 'CHAOS'
+    kind: 'GOOD' | 'CHAOS',
+    hasBothBubbles: boolean = false
   ): void {
     ctx.save()
     ctx.translate(bx, by)
@@ -4112,6 +5631,101 @@ export class SpriteRegistry {
 
     // 3. Draw the custom cartoon vector icon for the power inside the bubble
     this.drawPowerBubbleVectorIcon(ctx, powerId, radius / 23)
+
+    // 4. Draw miniature 3D button/keycap badge on the rim of the magic bubble to indicate which button to press
+    const keyLabel = this.getPowerBubbleKeyLabel(kind)
+    const isWideKey = keyLabel.length > 2
+    let badgeX = radius * 0.56
+    let badgeY = radius * 0.68
+    if (hasBothBubbles) {
+      if (kind === 'GOOD') {
+        badgeX = isWideKey ? -6 : -radius * 0.56
+        badgeY = isWideKey ? radius * 0.86 : radius * 0.7
+      } else {
+        badgeX = isWideKey ? 6 : radius * 0.56
+        badgeY = isWideKey ? radius * 0.86 : radius * 0.7
+      }
+    } else if (isWideKey) {
+      badgeX = 0
+      badgeY = radius * 0.88
+    }
+    this.drawPowerBubbleKeycapBadge(ctx, badgeX, badgeY, keyLabel, kind)
+
+    ctx.restore()
+  }
+
+  /**
+   * Draws a tactile 3D miniature keycap/button badge attached to the magic bubble rim.
+   */
+  private drawPowerBubbleKeycapBadge(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    label: string,
+    kind: 'GOOD' | 'CHAOS'
+  ): void {
+    ctx.save()
+    ctx.translate(x, y)
+
+    const isWide = label.length > 2
+    const fontSize = isWide ? 8.5 : 10.5
+    ctx.font = `900 ${fontSize}px Inter, system-ui, sans-serif`
+    const textW = ctx.measureText(label).width
+    const capH = 16
+    const capW = Math.max(17, Math.ceil(textW + (isWide ? 9 : 8)))
+    const cornerR = 4.5
+    const halfW = capW * 0.5
+    const halfH = capH * 0.5
+
+    // 1. Dark outer contour + 3D bottom shadow lip
+    ctx.fillStyle = '#0E101D'
+    ctx.strokeStyle = '#0E101D'
+    ctx.lineWidth = 2.4
+    ctx.beginPath()
+    ctx.roundRect(-halfW, -halfH + 2.2, capW, capH, cornerR)
+    ctx.fill()
+    ctx.stroke()
+
+    // 2. 3D Keycap lower bevel side wall
+    ctx.fillStyle = kind === 'GOOD' ? '#6F79B2' : '#881337'
+    ctx.beginPath()
+    ctx.roundRect(-halfW, -halfH + 1.8, capW, capH - 0.5, cornerR)
+    ctx.fill()
+
+    // 3. Tactile Keycap Top Face
+    const faceGrad = ctx.createLinearGradient(0, -halfH, 0, halfH - 1.5)
+    if (kind === 'GOOD') {
+      faceGrad.addColorStop(0, '#FFFFFF')
+      faceGrad.addColorStop(0.55, '#E0E7FF')
+      faceGrad.addColorStop(1, '#B4BEE6')
+    } else {
+      faceGrad.addColorStop(0, '#FFE4E6')
+      faceGrad.addColorStop(0.55, '#FDA4AF')
+      faceGrad.addColorStop(1, '#FB7185')
+    }
+    ctx.fillStyle = faceGrad
+    ctx.strokeStyle = '#0E101D'
+    ctx.lineWidth = 2.0
+    ctx.beginPath()
+    ctx.roundRect(-halfW, -halfH, capW, capH - 1.6, cornerR)
+    ctx.fill()
+    ctx.stroke()
+
+    // 4. Crisp top specular highlight line
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.92)'
+    ctx.lineWidth = 1.2
+    ctx.beginPath()
+    ctx.moveTo(-halfW + 3, -halfH + 1.6)
+    ctx.lineTo(halfW - 3, -halfH + 1.6)
+    ctx.stroke()
+
+    // 5. Bold Key Label
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.75)'
+    ctx.fillText(label, 0, -0.1)
+    ctx.fillStyle = kind === 'GOOD' ? '#1E1B4B' : '#4C0519'
+    ctx.fillText(label, 0, -0.8)
 
     ctx.restore()
   }
@@ -4420,17 +6034,25 @@ export class SpriteRegistry {
       isCountedHighlight?: boolean
       countOrderNumber?: number
       colorPaletteIndex?: number
+      blockSkinId?: string
     }
   ): void {
     const powerEffect = options?.powerEffect || 'NONE'
     const isPetrified = Boolean(options?.isPetrified)
     const slot = this.getPieceSlot(type, variant)
+    const effectiveBlockSkinId =
+      (options?.blockSkinId || '').trim().toLowerCase() ||
+      this.activeBlockSkinId
+    const effectiveBlockSkin =
+      this.blockSkins.find((s) => s.id === effectiveBlockSkinId) ||
+      this.getActiveBlockSkin()
+    const activePalette = effectiveBlockSkin?.palette || PIECE_COLOR_PALETTE
     const paletteIdx =
       (((options?.colorPaletteIndex ?? DEFAULT_PALETTE_BY_TYPE[type] ?? 0) %
-        PIECE_COLOR_PALETTE.length) +
-        PIECE_COLOR_PALETTE.length) %
-      PIECE_COLOR_PALETTE.length
-    const selectedColorTheme = PIECE_COLOR_PALETTE[paletteIdx] || slot.placeholder
+        activePalette.length) +
+        activePalette.length) %
+      activePalette.length
+    const selectedColorTheme = activePalette[paletteIdx] || slot.placeholder
     const theme =
       isPetrified || powerEffect === 'STATIC_BRICK'
         ? {
@@ -4484,7 +6106,12 @@ export class SpriteRegistry {
     if (powerEffect === 'CASTLE_ROOF') {
       this.drawCastleRoofPiece(ctx, minX, minY, maxX, maxY, cellPx, scale)
     } else {
-      const solidColoredSource = slot.multiColorCanvases?.[paletteIdx]
+      const skinCanvases =
+        effectiveBlockSkinId !== this.activeBlockSkinId
+          ? this.getBlockSkinMultiColorCanvases(effectiveBlockSkinId, type)
+          : slot.multiColorCanvases
+      const solidColoredSource =
+        skinCanvases?.[paletteIdx] ?? slot.multiColorCanvases?.[paletteIdx]
       const drawableSource: CanvasImageSource | null =
         (isPetrified || powerEffect === 'STATIC_BRICK') && slot.staticBrickCanvas
           ? slot.staticBrickCanvas
@@ -4683,6 +6310,28 @@ export class SpriteRegistry {
         ctx.strokeRect(minX + 1, minY + 1, boxW - 2, boxH - 2)
         ctx.restore()
       }
+
+      if (
+        effectiveBlockSkinId === 'gold' &&
+        !isPetrified &&
+        powerEffect !== 'STATIC_BRICK' &&
+        powerEffect !== 'SLICK_BRICK' &&
+        powerEffect !== 'CASTLE_ROOF' &&
+        variant !== 'HEAVY_RUBBER'
+      ) {
+        this.drawGoldPieceCharmAndSparkles(
+          ctx,
+          type,
+          cells,
+          cellPx,
+          scale,
+          minX,
+          minY,
+          boxW,
+          boxH,
+          paletteIdx
+        )
+      }
     }
 
     if (options?.showCenterOfMass) {
@@ -4694,6 +6343,130 @@ export class SpriteRegistry {
       ctx.lineWidth = 1
       ctx.stroke()
     }
+  }
+
+  /**
+   * Renders a subtle golden luster charm ("um leve charme de ouro") and very sparse, delicate
+   * appearing/disappearing sparkle glints ("pouquíssimas partículas de brilho que aparecem e somem")
+   * exclusively for the `gold` block skin (`assets/sprites/block/skins/gold`).
+   */
+  private drawGoldPieceCharmAndSparkles(
+    ctx: CanvasRenderingContext2D,
+    type: PieceType,
+    cells: Array<{ x: number; y: number }>,
+    cellPx: number,
+    scale: number,
+    minX: number,
+    minY: number,
+    boxW: number,
+    boxH: number,
+    paletteIdx: number
+  ): void {
+    if (cells.length === 0) return
+    const now = performance.now()
+    const typeSeed =
+      type.charCodeAt(0) * 197 + ((paletteIdx + 1) * 439)
+
+    ctx.save()
+
+    // 1. Leve Charme de Ouro: subtle warm golden shimmer sweeping gently across the ingot cells
+    const shimmerPhase = (Math.sin(now * 0.0018 + typeSeed * 0.13) + 1) * 0.5
+    ctx.globalCompositeOperation = 'screen'
+    const sheenGrad = ctx.createLinearGradient(
+      minX + boxW * (0.15 * shimmerPhase),
+      minY,
+      minX + boxW * (0.65 + 0.35 * shimmerPhase),
+      minY + boxH
+    )
+    sheenGrad.addColorStop(0, 'rgba(254, 240, 138, 0.03)')
+    sheenGrad.addColorStop(0.45, 'rgba(255, 251, 235, 0.11)')
+    sheenGrad.addColorStop(0.55, 'rgba(253, 224, 71, 0.08)')
+    sheenGrad.addColorStop(1, 'rgba(245, 158, 11, 0.02)')
+    ctx.fillStyle = sheenGrad
+
+    const inset = Math.max(2, 3.5 * scale)
+    for (const cell of cells) {
+      const x0 = cell.x * cellPx - cellPx / 2 + inset
+      const y0 = cell.y * cellPx - cellPx / 2 + inset
+      const cw = Math.max(2, cellPx - inset * 2)
+      ctx.beginPath()
+      ctx.roundRect(x0, y0, cw, cw, 3 * scale)
+      ctx.fill()
+    }
+
+    // 2. Pouquíssimas partículas de brilho que aparecem e somem:
+    // At most 2 candidate glint slots per piece, with long cycle periods (4.3s & 5.7s) and a short 23% active duty window
+    // so most of the time 0 or 1 delicate golden sparkle is gently fading in and out.
+    const candidateSlots = [
+      {
+        cellIndex: typeSeed % cells.length,
+        ox: -0.22,
+        oy: -0.22,
+        periodMs: 4300,
+        offsetMs: (typeSeed * 613) % 4300,
+        duty: 0.23,
+        sizeFactor: 1.0,
+      },
+      {
+        cellIndex: (typeSeed + 2) % cells.length,
+        ox: 0.21,
+        oy: -0.16,
+        periodMs: 5700,
+        offsetMs: ((typeSeed + 7) * 911) % 5700,
+        duty: 0.21,
+        sizeFactor: 0.82,
+      },
+    ]
+
+    ctx.globalCompositeOperation = 'source-over'
+    for (const slot of candidateSlots) {
+      const cyclePos =
+        ((now + slot.offsetMs) % slot.periodMs) / slot.periodMs
+      if (cyclePos >= slot.duty) continue
+
+      // Smooth 0 -> 1 -> 0 fade-in and fade-out envelope
+      const t = cyclePos / slot.duty
+      const env = Math.sin(t * Math.PI)
+      if (env <= 0.02) continue
+
+      const targetCell = cells[slot.cellIndex] || cells[0]
+      const driftY = (0.5 - t) * 3.2 * scale
+      const sx = targetCell.x * cellPx + slot.ox * cellPx
+      const sy = targetCell.y * cellPx + slot.oy * cellPx + driftY
+      const arm = (3.4 + 2.8 * env) * scale * slot.sizeFactor
+      const waist = Math.max(0.7, arm * 0.24)
+
+      // Soft warm golden radial halo
+      const haloR = arm * 1.9
+      const halo = ctx.createRadialGradient(sx, sy, 0, sx, sy, haloR)
+      halo.addColorStop(0, `rgba(255, 251, 235, ${(0.65 * env).toFixed(3)})`)
+      halo.addColorStop(0.45, `rgba(253, 224, 71, ${(0.36 * env).toFixed(3)})`)
+      halo.addColorStop(1, 'rgba(245, 158, 11, 0)')
+      ctx.fillStyle = halo
+      ctx.beginPath()
+      ctx.arc(sx, sy, haloR, 0, Math.PI * 2)
+      ctx.fill()
+
+      // Crisp 4-point golden-white star glint
+      ctx.save()
+      ctx.translate(sx, sy)
+      ctx.rotate((t - 0.5) * 0.35)
+      ctx.fillStyle = `rgba(255, 251, 235, ${(0.94 * env).toFixed(3)})`
+      ctx.strokeStyle = `rgba(250, 204, 21, ${(0.78 * env).toFixed(3)})`
+      ctx.lineWidth = Math.max(0.6, 0.9 * scale)
+      ctx.beginPath()
+      ctx.moveTo(0, -arm)
+      ctx.quadraticCurveTo(waist * 0.45, -waist * 0.45, arm, 0)
+      ctx.quadraticCurveTo(waist * 0.45, waist * 0.45, 0, arm)
+      ctx.quadraticCurveTo(-waist * 0.45, waist * 0.45, -arm, 0)
+      ctx.quadraticCurveTo(-waist * 0.45, -waist * 0.45, 0, -arm)
+      ctx.closePath()
+      ctx.fill()
+      ctx.stroke()
+      ctx.restore()
+    }
+
+    ctx.restore()
   }
 
   private pieceGlowMaskCanvas: HTMLCanvasElement | null = null

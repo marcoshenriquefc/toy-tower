@@ -24,6 +24,7 @@ export interface RoomSlotPlayerDTO {
   customNick: string
   avatarUrl: string
   equippedSkin: string
+  equippedBlockSkin?: string
   isHost: boolean
   isReady: boolean
   slotIndex: number // 0, 1, 2, 3
@@ -58,6 +59,7 @@ export interface MatchPlayerRealtimeState {
   handle: string
   customNick: string
   equippedSkin: string
+  equippedBlockSkin?: string
   slotIndex: number
   activePiece: ActivePieceSnapshot | null
   settledBlocks: SettledBlockSnapshot[]
@@ -120,6 +122,7 @@ export interface MatchStartPayload {
     handle: string
     customNick: string
     equippedSkin: string
+    equippedBlockSkin?: string
     slotIndex: number
     isHost: boolean
     cupPoints?: number
@@ -140,6 +143,7 @@ export interface MatchGameOverPodiumEntry {
   handle: string
   customNick: string
   equippedSkin: string
+  equippedBlockSkin?: string
   avatarUrl?: string
   slotIndex: number
   towerHeight: number
@@ -360,6 +364,42 @@ function connect(): void {
     }
   })
 
+  socket.on(
+    'shop:order_updated',
+    (payload: {
+      order?: { coinsAmount?: number; status?: string; packageTitle?: string }
+      user?: UserAccount
+    }) => {
+      if (payload?.user) {
+        authStore.setUser(payload.user)
+      }
+      if (payload?.order?.status === 'APPROVED') {
+        pushNotification(
+          `+${payload.order.coinsAmount ?? 0} moedas creditadas na sua conta Gmail!`,
+          'success'
+        )
+      }
+    }
+  )
+
+  socket.on(
+    'shop:skin_unlocked',
+    (payload: {
+      skin?: { name?: string }
+      user?: UserAccount
+    }) => {
+      if (payload?.user) {
+        authStore.setUser(payload.user)
+      }
+      if (payload?.skin?.name) {
+        pushNotification(
+          `Skin desbloqueada: ${payload.skin.name}!`,
+          'success'
+        )
+      }
+    }
+  )
+
   const handleOnlineList = (payload: {
     handles?: string[]
     onlineHandles?: string[]
@@ -404,6 +444,7 @@ function connect(): void {
         customNick: senderProfile.customNick || h,
         email: senderProfile.email,
         equippedSkin: senderProfile.equippedSkin || 'WIZARD',
+        equippedBlockSkin: senderProfile.equippedBlockSkin || 'PLASTIC',
         requestedAt: senderProfile.requestedAt || new Date().toISOString(),
       })
     }
@@ -503,6 +544,7 @@ function connect(): void {
         handle: h,
         customNick: p.customNick,
         equippedSkin: p.equippedSkin,
+        equippedBlockSkin: p.equippedBlockSkin || 'PLASTIC',
         slotIndex: p.slotIndex,
         activePiece: null,
         settledBlocks: [],
@@ -552,6 +594,7 @@ function connect(): void {
         state.remoteLanes[h] = {
           ...remoteState,
           handle: h,
+          equippedBlockSkin: remoteState.equippedBlockSkin || 'PLASTIC',
           eliminationOrder: elimOrder,
           renderActivePiece: remoteState.activePiece
             ? { ...remoteState.activePiece }
@@ -577,9 +620,20 @@ function connect(): void {
 
       existing.customNick = remoteState.customNick
       existing.equippedSkin = remoteState.equippedSkin
+      if (remoteState.equippedBlockSkin) {
+        existing.equippedBlockSkin = remoteState.equippedBlockSkin
+      }
       existing.slotIndex = remoteState.slotIndex
       existing.activePiece = remoteState.activePiece
-      existing.settledBlocks = remoteState.settledBlocks || []
+      if (
+        (remoteState.lives <= 0 || remoteState.isEliminated) &&
+        (!remoteState.settledBlocks || remoteState.settledBlocks.length === 0) &&
+        existing.settledBlocks.length > 0
+      ) {
+        // Preserve the eliminated player's final tower blocks
+      } else {
+        existing.settledBlocks = remoteState.settledBlocks || []
+      }
       existing.towerHeight = remoteState.towerHeight
       if (
         typeof remoteState.lives === 'number' &&
@@ -691,8 +745,6 @@ function connect(): void {
           )
           lane.activePiece = null
           lane.renderActivePiece = null
-          lane.settledBlocks = []
-          lane.renderSettledBlocks = []
         }
         if (lostLife) {
           lane.lastLifeLostAtMs = performance.now()
@@ -1320,9 +1372,12 @@ async function updateCustomNick(customNick: string): Promise<void> {
   await authStore.updateCustomNick(customNick)
 }
 
-function updateEquippedSkin(equippedSkin: string): void {
+function updateEquippedSkin(
+  equippedSkin?: string,
+  equippedBlockSkin?: string
+): void {
   if (socket && socket.connected) {
-    socket.emit('profile:update_skin', { equippedSkin })
+    socket.emit('profile:update_skin', { equippedSkin, equippedBlockSkin })
   }
 }
 

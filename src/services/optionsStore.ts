@@ -245,18 +245,9 @@ function loadSavedOptions(): GameOptionsState {
           ? parsed.controlPreset
           : defaults.controlPreset,
       keybinds: mergedKeybinds,
-      showGhostPiece:
-        typeof parsed.showGhostPiece === 'boolean'
-          ? parsed.showGhostPiece
-          : defaults.showGhostPiece,
-      dynamicTintEnabled:
-        typeof parsed.dynamicTintEnabled === 'boolean'
-          ? parsed.dynamicTintEnabled
-          : defaults.dynamicTintEnabled,
-      windEnabled:
-        typeof parsed.windEnabled === 'boolean'
-          ? parsed.windEnabled
-          : defaults.windEnabled,
+      showGhostPiece: defaults.showGhostPiece,
+      dynamicTintEnabled: defaults.dynamicTintEnabled,
+      windEnabled: defaults.windEnabled,
       screenShakeEnabled:
         typeof parsed.screenShakeEnabled === 'boolean'
           ? parsed.screenShakeEnabled

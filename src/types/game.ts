@@ -74,8 +74,8 @@ export const GAME_CONSTANTS = {
   SURVIVAL_LIFE_LOSS_COOLDOWN_MS: 3000,
   /** Hold time in ms at Checkpoint line in Endless Mode (1.5 seconds = 1500ms) */
   ENDLESS_CHECKPOINT_HOLD_MS: 1500,
-  /** Vertical step in units when an Endless checkpoint is validated (+8m) */
-  ENDLESS_STEP_UNITS: 8,
+  /** Vertical step in units when an Endless checkpoint is validated (+12m) */
+  ENDLESS_STEP_UNITS: 12,
   /** Preparation time in ms before the Rising Abyss begins climbing in Multiplayer Endless Mode (5 seconds) */
   ENDLESS_ABYSS_PREP_MS: 5000,
   /** Base rising speed of the Abyss line in Multiplayer Endless Mode (0.4 blocks/second) */
@@ -90,8 +90,8 @@ export const GAME_CONSTANTS = {
   ENDLESS_MAX_CONSECUTIVE_FALLS: 5,
   /** Wind activation threshold in units above the base plate */
   WIND_START_HEIGHT_UNITS: 15,
-  /** Checkpoint height interval in units (8m, 16m, 24m) */
-  CHECKPOINT_INTERVAL_UNITS: 8,
+  /** Checkpoint height interval in units (12m, 24m) */
+  CHECKPOINT_INTERVAL_UNITS: 12,
   /** Time a settled piece must hold across a Checkpoint line to trigger & consume it (0.5 second) */
   CHECKPOINT_HOLD_MS: 500,
   /** Grace window upon touching the piece below to allow a final sideways step or Socão (0.2 second = 200ms) */

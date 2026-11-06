@@ -6,6 +6,7 @@ export interface FriendEntry {
   customNick: string
   email?: string
   equippedSkin: string
+  equippedBlockSkin?: string
 }
 
 export type FriendAccountEntry = FriendEntry
@@ -15,6 +16,7 @@ export interface FriendRequestEntry {
   customNick: string
   email?: string
   equippedSkin: string
+  equippedBlockSkin?: string
   requestedAt: string
 }
 
@@ -31,14 +33,63 @@ export interface UserAccount {
   customNick: string
   handle: string
   avatarUrl: string
-  equippedSkin: string // 'WIZARD' | 'DINO' | 'PIRATE' | 'DARK_MAGE' | 'ROBOT'
+  coins: number
+  equippedSkin: string // 'WIZARD' | 'DINO' | 'PIRATE' | 'DARK_MAGE'
   unlockedSkins: string[]
+  equippedBlockSkin: string // 'PLASTIC' | 'WOOD' | 'DIY'
+  unlockedBlockSkins: string[]
   friends: FriendEntry[]
   friendRequestsSent?: FriendRequestEntry[]
   friendRequestsReceived?: FriendRequestEntry[]
   stats: UserStats
   createdAt: string
   lastLoginAt: string
+}
+
+export interface CoinPackageDTO {
+  id: string
+  title: string
+  subtitle: string
+  coins: number
+  bonusCoins: number
+  totalCoins: number
+  priceBrl: number
+  badge?: string
+  popular?: boolean
+}
+
+export interface ShopSkinCatalogDTO {
+  code: string
+  spriteId: string
+  category: 'PLAYER_SKIN' | 'BLOCK_SKIN'
+  name: string
+  description: string
+  priceCoins: number
+  isDefaultFree: boolean
+}
+
+export interface ShopOrderDTO {
+  orderId: string
+  googleId: string
+  email: string
+  handle: string
+  packageId: string
+  packageTitle: string
+  coinsAmount: number
+  priceBrl: number
+  paymentMethod: 'PIX' | 'CARD'
+  status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED' | 'EXPIRED'
+  provider: 'MERCADO_PAGO' | 'MERCADO_PAGO_SANDBOX'
+  mpPaymentId?: string | null
+  mpPreferenceId?: string | null
+  pixQrCode?: string | null
+  pixQrCodeBase64?: string | null
+  ticketUrl?: string | null
+  checkoutUrl?: string | null
+  coinsCredited: boolean
+  createdAt: string
+  updatedAt: string
+  approvedAt?: string | null
 }
 
 const TOKEN_STORAGE_KEY = 'toy_tower_jwt_token'
@@ -58,12 +109,40 @@ const SPRITE_ID_TO_DB_SKIN: Record<string, string> = {
   player_shadow: 'DARK_MAGE',
 }
 
-export function dbSkinToSpriteId(dbSkin: string): string {
+const DB_BLOCK_SKIN_TO_SPRITE_ID: Record<string, string> = {
+  PLASTIC: 'default',
+  DEFAULT: 'default',
+  WOOD: 'wood',
+  DIY: 'diy',
+  GOLD: 'gold',
+}
+
+const SPRITE_ID_TO_DB_BLOCK_SKIN: Record<string, string> = {
+  default: 'PLASTIC',
+  plastic: 'PLASTIC',
+  wood: 'WOOD',
+  diy: 'DIY',
+  gold: 'GOLD',
+}
+
+export function dbSkinToSpriteId(dbSkin?: string | null): string {
+  if (!dbSkin) return 'player_mage'
   return DB_SKIN_TO_SPRITE_ID[dbSkin.toUpperCase()] || 'player_mage'
 }
 
-export function spriteIdToDbSkin(spriteId: string): string {
+export function spriteIdToDbSkin(spriteId?: string | null): string {
+  if (!spriteId) return 'WIZARD'
   return SPRITE_ID_TO_DB_SKIN[spriteId.toLowerCase()] || 'WIZARD'
+}
+
+export function dbBlockSkinToSpriteId(dbBlockSkin?: string | null): string {
+  if (!dbBlockSkin) return 'default'
+  return DB_BLOCK_SKIN_TO_SPRITE_ID[dbBlockSkin.toUpperCase()] || 'default'
+}
+
+export function spriteIdToDbBlockSkin(blockSpriteId?: string | null): string {
+  if (!blockSpriteId) return 'PLASTIC'
+  return SPRITE_ID_TO_DB_BLOCK_SKIN[blockSpriteId.toLowerCase()] || 'PLASTIC'
 }
 
 interface AuthState {
@@ -73,7 +152,19 @@ interface AuthState {
   error: string | null
   dbMode: 'mongodb' | 'local-fallback' | null
   googleClientId: string
+  coinPackages: CoinPackageDTO[]
+  playerSkinsCatalog: ShopSkinCatalogDTO[]
+  blockSkinsCatalog: ShopSkinCatalogDTO[]
+  mercadoPagoMode: 'LIVE' | 'SANDBOX_FALLBACK'
+  isMercadoPagoConfigured: boolean
+  activeOrder: ShopOrderDTO | null
 }
+
+const rawMpPubKey = (import.meta.env.VITE_MERCADOPAGO_PUBLIC_KEY || '').trim()
+const hasValidClientMpPubKey =
+  rawMpPubKey.length > 0 &&
+  !rawMpPubKey.includes('SEU_PUBLIC_KEY') &&
+  !rawMpPubKey.includes('YOUR_PUBLIC_KEY')
 
 const state = reactive<AuthState>({
   user: null,
@@ -85,9 +176,133 @@ const state = reactive<AuthState>({
   error: null,
   dbMode: null,
   googleClientId: (import.meta.env.VITE_GOOGLE_CLIENT_ID || '').trim(),
+  coinPackages: [],
+  playerSkinsCatalog: [],
+  blockSkinsCatalog: [],
+  mercadoPagoMode: hasValidClientMpPubKey ? 'LIVE' : 'SANDBOX_FALLBACK',
+  isMercadoPagoConfigured: hasValidClientMpPubKey,
+  activeOrder: null,
 })
 
 const isAuthenticated = computed(() => Boolean(state.user))
+
+const LOCAL_UNLOCKED_PLAYER_SKINS_KEY = 'toy_tower_local_unlocked_player_skins'
+const LOCAL_UNLOCKED_BLOCK_SKINS_KEY = 'toy_tower_local_unlocked_block_skins'
+
+function loadLocalUnlockedCodes(storageKey: string): string[] {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = window.localStorage.getItem(storageKey)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed)
+      ? parsed.map((s) => String(s).toUpperCase())
+      : []
+  } catch {
+    return []
+  }
+}
+
+const localUnlockedSkinsState = reactive<{
+  playerSkins: string[]
+  blockSkins: string[]
+}>({
+  playerSkins: loadLocalUnlockedCodes(LOCAL_UNLOCKED_PLAYER_SKINS_KEY),
+  blockSkins: loadLocalUnlockedCodes(LOCAL_UNLOCKED_BLOCK_SKINS_KEY),
+})
+
+export function unlockLocalPlayerSkin(skinIdOrCode: string): void {
+  const dbCode =
+    SPRITE_ID_TO_DB_SKIN[skinIdOrCode.toLowerCase()] ||
+    skinIdOrCode.toUpperCase()
+  if (!localUnlockedSkinsState.playerSkins.includes(dbCode)) {
+    localUnlockedSkinsState.playerSkins.push(dbCode)
+    try {
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(
+          LOCAL_UNLOCKED_PLAYER_SKINS_KEY,
+          JSON.stringify(localUnlockedSkinsState.playerSkins)
+        )
+      }
+    } catch {
+      // Ignore storage error
+    }
+  }
+}
+
+export function unlockLocalBlockSkin(blockSkinIdOrCode: string): void {
+  const dbCode =
+    SPRITE_ID_TO_DB_BLOCK_SKIN[blockSkinIdOrCode.toLowerCase()] ||
+    blockSkinIdOrCode.toUpperCase()
+  if (!localUnlockedSkinsState.blockSkins.includes(dbCode)) {
+    localUnlockedSkinsState.blockSkins.push(dbCode)
+    try {
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(
+          LOCAL_UNLOCKED_BLOCK_SKINS_KEY,
+          JSON.stringify(localUnlockedSkinsState.blockSkins)
+        )
+      }
+    } catch {
+      // Ignore storage error
+    }
+  }
+}
+
+/**
+ * Checks if a player character skin (`player_mage`, `player_dino`, `player_pirate`, `player_shadow`)
+ * is unlocked for the current Gmail account or local shop session.
+ * Default initial skin (`player_mage` / `WIZARD`) is always unlocked.
+ */
+export function isPlayerSkinUnlocked(skinIdOrCode: string): boolean {
+  const dbCode =
+    SPRITE_ID_TO_DB_SKIN[skinIdOrCode.toLowerCase()] ||
+    skinIdOrCode.toUpperCase()
+  if (dbCode === 'WIZARD') return true
+  if (localUnlockedSkinsState.playerSkins.includes(dbCode)) return true
+  if (!state.user || !Array.isArray(state.user.unlockedSkins)) return false
+  return state.user.unlockedSkins.some((s) => s.toUpperCase() === dbCode)
+}
+
+/**
+ * Checks if a block skin (`default`, `wood`, `diy`, `gold`) is unlocked for the current Gmail account or local shop session.
+ * Default initial plastic block skin (`default` / `PLASTIC`) is always unlocked.
+ */
+export function isBlockSkinUnlocked(blockSkinIdOrCode: string): boolean {
+  const dbCode =
+    SPRITE_ID_TO_DB_BLOCK_SKIN[blockSkinIdOrCode.toLowerCase()] ||
+    blockSkinIdOrCode.toUpperCase()
+  if (dbCode === 'PLASTIC') return true
+  if (localUnlockedSkinsState.blockSkins.includes(dbCode)) return true
+  if (!state.user || !Array.isArray(state.user.unlockedBlockSkins)) return false
+  return state.user.unlockedBlockSkins.some((s) => s.toUpperCase() === dbCode)
+}
+
+function enforceUnlockedSkinsOnSpriteRegistry(user: UserAccount | null): void {
+  if (!user) {
+    // Unauthenticated / default state: Normal Mage + Normal Plastic Pieces
+    spriteRegistry.setActivePlayerSkin('player_mage')
+    spriteRegistry.setActiveBlockSkin('default')
+    return
+  }
+
+  const desiredPlayerSpriteId = dbSkinToSpriteId(user.equippedSkin)
+  const validPlayerSpriteId = isPlayerSkinUnlocked(desiredPlayerSpriteId)
+    ? desiredPlayerSpriteId
+    : 'player_mage'
+  spriteRegistry.setActivePlayerSkin(validPlayerSpriteId)
+
+  const desiredBlockSpriteId = dbBlockSkinToSpriteId(
+    user.equippedBlockSkin || 'PLASTIC'
+  )
+  const validBlockSpriteId = isBlockSkinUnlocked(desiredBlockSpriteId)
+    ? desiredBlockSpriteId
+    : 'default'
+  spriteRegistry.setActiveBlockSkin(validBlockSpriteId)
+}
+
+// Enforce default initial skin (Normal Mage + Normal Plastic Pieces) until authenticated session restores
+enforceUnlockedSkinsOnSpriteRegistry(null)
 
 function isRealClientId(id?: string | null): boolean {
   const cleaned = (id || '').trim()
@@ -175,10 +390,7 @@ function applyUserSession(
       // Ignore storage errors
     }
   }
-  if (user && user.equippedSkin) {
-    const spriteId = dbSkinToSpriteId(user.equippedSkin)
-    spriteRegistry.setActivePlayerSkin(spriteId)
-  }
+  enforceUnlockedSkinsOnSpriteRegistry(user)
 }
 
 /**
@@ -436,6 +648,7 @@ async function loginWithGoogle(): Promise<{
 
 async function syncEquippedSkinBySpriteId(spriteId: string): Promise<void> {
   if (!state.user) return
+  if (!isPlayerSkinUnlocked(spriteId)) return
   const dbSkin = spriteIdToDbSkin(spriteId)
   state.user.equippedSkin = dbSkin
   try {
@@ -462,6 +675,250 @@ async function syncEquippedSkinBySpriteId(spriteId: string): Promise<void> {
     }
   } catch {
     // Ignore network sync error
+  }
+}
+
+async function syncEquippedBlockSkinById(blockSkinId: string): Promise<void> {
+  if (!state.user) return
+  if (!isBlockSkinUnlocked(blockSkinId)) return
+  const dbBlockSkin = spriteIdToDbBlockSkin(blockSkinId)
+  state.user.equippedBlockSkin = dbBlockSkin
+  try {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    }
+    if (state.token) {
+      headers.Authorization = `Bearer ${state.token}`
+    }
+    const res = await fetch('/api/auth/skin', {
+      method: 'PATCH',
+      credentials: 'include',
+      headers,
+      body: JSON.stringify({ equippedBlockSkin: dbBlockSkin }),
+    })
+    if (res.ok) {
+      const data = await parseApiJsonResponse<{
+        ok?: boolean
+        user?: UserAccount
+      }>(res)
+      if (data.ok && data.user) {
+        state.user = data.user
+      }
+    }
+  } catch {
+    // Ignore network sync error
+  }
+}
+
+async function fetchShopCatalog(): Promise<{
+  coinPackages: CoinPackageDTO[]
+  playerSkins: ShopSkinCatalogDTO[]
+  blockSkins: ShopSkinCatalogDTO[]
+  mercadoPagoMode: 'LIVE' | 'SANDBOX_FALLBACK'
+  isMercadoPagoConfigured: boolean
+}> {
+  const res = await fetch('/api/shop/catalog', {
+    method: 'GET',
+    credentials: 'include',
+  })
+  const data = await parseApiJsonResponse<{
+    ok?: boolean
+    error?: string
+    coinPackages?: CoinPackageDTO[]
+    playerSkins?: ShopSkinCatalogDTO[]
+    blockSkins?: ShopSkinCatalogDTO[]
+    mercadoPagoMode?: 'LIVE' | 'SANDBOX_FALLBACK'
+    mercadoPago?: {
+      isConfigured?: boolean
+      publicKey?: string | null
+      mode?: 'LIVE' | 'SANDBOX_SIMULATOR'
+    }
+  }>(res)
+
+  if (!res.ok || !data.ok) {
+    throw new Error(data.error || 'Não foi possível carregar o catálogo da loja.')
+  }
+
+  const mpConfigured = Boolean(
+    data.mercadoPago?.isConfigured || data.mercadoPagoMode === 'LIVE'
+  )
+
+  state.coinPackages = data.coinPackages || []
+  state.playerSkinsCatalog = data.playerSkins || []
+  state.blockSkinsCatalog = data.blockSkins || []
+  state.isMercadoPagoConfigured = mpConfigured
+  state.mercadoPagoMode = mpConfigured ? 'LIVE' : 'SANDBOX_FALLBACK'
+
+  return {
+    coinPackages: state.coinPackages,
+    playerSkins: state.playerSkinsCatalog,
+    blockSkins: state.blockSkinsCatalog,
+    mercadoPagoMode: state.mercadoPagoMode,
+    isMercadoPagoConfigured: state.isMercadoPagoConfigured,
+  }
+}
+
+async function createCoinOrder(
+  packageId: string,
+  paymentMethod: 'PIX' | 'CARD'
+): Promise<ShopOrderDTO> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  }
+  if (state.token) {
+    headers.Authorization = `Bearer ${state.token}`
+  }
+  const res = await fetch('/api/shop/orders/create', {
+    method: 'POST',
+    credentials: 'include',
+    headers,
+    body: JSON.stringify({ packageId, paymentMethod }),
+  })
+  const data = await parseApiJsonResponse<{
+    ok?: boolean
+    error?: string
+    order?: ShopOrderDTO
+  }>(res)
+  if (!res.ok || !data.ok || !data.order) {
+    throw new Error(
+      data.error || 'Não foi possível criar o pedido no Mercado Pago.'
+    )
+  }
+  state.activeOrder = data.order
+  return data.order
+}
+
+async function checkCoinOrderStatus(orderId: string): Promise<{
+  order: ShopOrderDTO
+  newlyCredited: boolean
+}> {
+  const headers: Record<string, string> = {}
+  if (state.token) {
+    headers.Authorization = `Bearer ${state.token}`
+  }
+  const res = await fetch(
+    `/api/shop/orders/status?orderId=${encodeURIComponent(orderId)}`,
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers,
+    }
+  )
+  const data = await parseApiJsonResponse<{
+    ok?: boolean
+    error?: string
+    order?: ShopOrderDTO
+    user?: UserAccount | null
+    newlyCredited?: boolean
+  }>(res)
+  if (!res.ok || !data.ok || !data.order) {
+    throw new Error(data.error || 'Não foi possível consultar o pedido.')
+  }
+  state.activeOrder = data.order
+  if (data.user) {
+    setUser(data.user)
+  }
+  return {
+    order: data.order,
+    newlyCredited: Boolean(data.newlyCredited),
+  }
+}
+
+async function listCoinOrders(): Promise<ShopOrderDTO[]> {
+  const headers: Record<string, string> = {}
+  if (state.token) {
+    headers.Authorization = `Bearer ${state.token}`
+  }
+  const res = await fetch('/api/shop/orders', {
+    method: 'GET',
+    credentials: 'include',
+    headers,
+  })
+  const data = await parseApiJsonResponse<{
+    ok?: boolean
+    error?: string
+    orders?: ShopOrderDTO[]
+  }>(res)
+  if (!res.ok || !data.ok) {
+    throw new Error(data.error || 'Não foi possível listar pedidos.')
+  }
+  return data.orders || []
+}
+
+async function simulateApproveCoinOrder(orderId: string): Promise<{
+  order: ShopOrderDTO
+  user: UserAccount | null
+  newlyCredited: boolean
+}> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  }
+  if (state.token) {
+    headers.Authorization = `Bearer ${state.token}`
+  }
+  const res = await fetch('/api/shop/orders/simulate-approve', {
+    method: 'POST',
+    credentials: 'include',
+    headers,
+    body: JSON.stringify({ orderId }),
+  })
+  const data = await parseApiJsonResponse<{
+    ok?: boolean
+    error?: string
+    order?: ShopOrderDTO
+    user?: UserAccount | null
+    newlyCredited?: boolean
+  }>(res)
+  if (!res.ok || !data.ok || !data.order) {
+    throw new Error(data.error || 'Não foi possível aprovar o pedido.')
+  }
+  state.activeOrder = data.order
+  if (data.user) {
+    setUser(data.user)
+  }
+  return {
+    order: data.order,
+    user: data.user || state.user,
+    newlyCredited: Boolean(data.newlyCredited),
+  }
+}
+
+async function buySkinWithCoins(
+  category: 'PLAYER_SKIN' | 'BLOCK_SKIN',
+  skinCode: string,
+  autoEquip: boolean = true
+): Promise<{
+  user: UserAccount
+  alreadyUnlocked: boolean
+  item: ShopSkinCatalogDTO
+}> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  }
+  if (state.token) {
+    headers.Authorization = `Bearer ${state.token}`
+  }
+  const res = await fetch('/api/shop/skins/buy', {
+    method: 'POST',
+    credentials: 'include',
+    headers,
+    body: JSON.stringify({ category, skinCode, autoEquip }),
+  })
+  const data = await parseApiJsonResponse<{
+    ok?: boolean
+    error?: string
+    user?: UserAccount
+    alreadyUnlocked?: boolean
+    item?: ShopSkinCatalogDTO
+  }>(res)
+  if (!res.ok || !data.ok || !data.user || !data.item) {
+    throw new Error(data.error || 'Não foi possível comprar a skin.')
+  }
+  setUser(data.user)
+  return {
+    user: data.user,
+    alreadyUnlocked: Boolean(data.alreadyUnlocked),
+    item: data.item,
   }
 }
 
@@ -586,10 +1043,7 @@ async function respondFriendRequest(
 
 function setUser(user: UserAccount | null): void {
   state.user = user
-  if (user && user.equippedSkin) {
-    const spriteId = dbSkinToSpriteId(user.equippedSkin)
-    spriteRegistry.setActivePlayerSkin(spriteId)
-  }
+  enforceUnlockedSkinsOnSpriteRegistry(user)
 }
 
 const PERSONAL_BEST_STORAGE_KEY = 'toy_tower_personal_best'
@@ -676,9 +1130,18 @@ async function logout(): Promise<void> {
 export const authStore = {
   state,
   isAuthenticated,
+  isPlayerSkinUnlocked,
+  isBlockSkinUnlocked,
   restoreSession,
   loginWithGoogle,
   syncEquippedSkinBySpriteId,
+  syncEquippedBlockSkinById,
+  fetchShopCatalog,
+  createCoinOrder,
+  checkCoinOrderStatus,
+  listCoinOrders,
+  simulateApproveCoinOrder,
+  buySkinWithCoins,
   addFriend,
   updateCustomNick,
   sendFriendRequest,

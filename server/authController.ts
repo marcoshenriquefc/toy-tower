@@ -6,12 +6,21 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { connectMongoDB, ensureEnvLoaded } from './db.js'
 import {
   DEFAULT_INITIAL_FRIENDS,
+  DEFAULT_UNLOCKED_BLOCK_SKINS,
   DEFAULT_UNLOCKED_SKINS,
   IFriendEntry,
   IFriendRequestEntry,
   IUser,
   UserModel,
 } from './models/User.js'
+import {
+  BLOCK_SKINS_SHOP_CATALOG,
+  normalizeBlockSkinCode,
+  normalizePlayerSkinCode,
+  PLAYER_SKINS_SHOP_CATALOG,
+  type ShopSkinCatalogItem,
+} from './models/ShopOrder.js'
+import { handleShopApiRequest } from './shopController.js'
 
 export { connectMongoDB }
 
@@ -87,8 +96,8 @@ function writeLocalUsers(users: IUser[]): void {
 /**
  * Upsert ("Find or Create") logic for a Google OAuth 2.0 user:
  * - Searches by `{ googleId }` or `{ email }`.
- * - If not found (1st login): creates a new `User` with default skins and stats.
- * - If found: updates `lastLoginAt` (and `displayName` / `avatarUrl` if changed) and returns the saved account.
+ * - If not found (1st login): creates a new `User` with default skins ('WIZARD' + 'PLASTIC'), 0 coins, and stats.
+ * - If found: updates `lastLoginAt` (and `displayName` / `avatarUrl` if changed) and migrates legacy pre-shop skin unlocks if needed.
  */
 export async function upsertGoogleUser(profile: GoogleProfilePayload): Promise<{
   user: IUser
@@ -116,8 +125,12 @@ export async function upsertGoogleUser(profile: GoogleProfilePayload): Promise<{
         customNick: deriveDefaultCustomNick(profile.displayName),
         handle: deriveDefaultHandle(profile.email, profile.googleId).toLowerCase(),
         avatarUrl: profile.avatarUrl,
+        coins: 0,
         equippedSkin: 'WIZARD',
         unlockedSkins: [...DEFAULT_UNLOCKED_SKINS],
+        equippedBlockSkin: 'PLASTIC',
+        unlockedBlockSkins: [...DEFAULT_UNLOCKED_BLOCK_SKINS],
+        shopMigratedV1: true,
         friends: [],
         friendRequestsSent: [],
         friendRequestsReceived: [],
@@ -142,9 +155,43 @@ export async function upsertGoogleUser(profile: GoogleProfilePayload): Promise<{
         doc.handle = doc.handle.toLowerCase()
       }
       if (profile.avatarUrl) doc.avatarUrl = profile.avatarUrl
-      if (!doc.unlockedSkins || doc.unlockedSkins.length === 0) {
-        doc.unlockedSkins = [...DEFAULT_UNLOCKED_SKINS]
+      if (typeof doc.coins !== 'number' || Number.isNaN(doc.coins)) {
+        doc.coins = 0
       }
+
+      // Migrate pre-shop accounts so only the default Mage ('WIZARD') + Plastic ('PLASTIC') are unlocked initially
+      if (!doc.shopMigratedV1) {
+        doc.unlockedSkins = [...DEFAULT_UNLOCKED_SKINS]
+        doc.equippedSkin = 'WIZARD'
+        doc.unlockedBlockSkins = [...DEFAULT_UNLOCKED_BLOCK_SKINS]
+        doc.equippedBlockSkin = 'PLASTIC'
+        doc.shopMigratedV1 = true
+      } else {
+        if (!doc.unlockedSkins || doc.unlockedSkins.length === 0) {
+          doc.unlockedSkins = [...DEFAULT_UNLOCKED_SKINS]
+        } else if (!doc.unlockedSkins.includes('WIZARD')) {
+          doc.unlockedSkins = ['WIZARD', ...doc.unlockedSkins]
+        }
+        if (
+          !doc.unlockedBlockSkins ||
+          doc.unlockedBlockSkins.length === 0
+        ) {
+          doc.unlockedBlockSkins = [...DEFAULT_UNLOCKED_BLOCK_SKINS]
+        } else if (!doc.unlockedBlockSkins.includes('PLASTIC')) {
+          doc.unlockedBlockSkins = ['PLASTIC', ...doc.unlockedBlockSkins]
+        }
+        if (!doc.unlockedSkins.includes(doc.equippedSkin || 'WIZARD')) {
+          doc.equippedSkin = 'WIZARD'
+        }
+        if (
+          !doc.unlockedBlockSkins.includes(
+            doc.equippedBlockSkin || 'PLASTIC'
+          )
+        ) {
+          doc.equippedBlockSkin = 'PLASTIC'
+        }
+      }
+
       if (!Array.isArray(doc.friends)) {
         doc.friends = []
       }
@@ -184,8 +231,12 @@ export async function upsertGoogleUser(profile: GoogleProfilePayload): Promise<{
       customNick: deriveDefaultCustomNick(profile.displayName),
       handle: deriveDefaultHandle(profile.email, profile.googleId).toLowerCase(),
       avatarUrl: profile.avatarUrl,
+      coins: 0,
       equippedSkin: 'WIZARD',
       unlockedSkins: [...DEFAULT_UNLOCKED_SKINS],
+      equippedBlockSkin: 'PLASTIC',
+      unlockedBlockSkins: [...DEFAULT_UNLOCKED_BLOCK_SKINS],
+      shopMigratedV1: true,
       friends: [],
       friendRequestsSent: [],
       friendRequestsReceived: [],
@@ -200,6 +251,30 @@ export async function upsertGoogleUser(profile: GoogleProfilePayload): Promise<{
     users.push(record)
   } else {
     const current = users[existingIdx]
+    const migrated = Boolean(current.shopMigratedV1)
+    const nextUnlockedSkins = migrated
+      ? Array.from(
+          new Set(['WIZARD', ...(current.unlockedSkins || DEFAULT_UNLOCKED_SKINS)])
+        )
+      : [...DEFAULT_UNLOCKED_SKINS]
+    const nextUnlockedBlockSkins = migrated
+      ? Array.from(
+          new Set([
+            'PLASTIC',
+            ...(current.unlockedBlockSkins || DEFAULT_UNLOCKED_BLOCK_SKINS),
+          ])
+        )
+      : [...DEFAULT_UNLOCKED_BLOCK_SKINS]
+    const nextEquippedSkin =
+      migrated && nextUnlockedSkins.includes(current.equippedSkin || 'WIZARD')
+        ? current.equippedSkin
+        : 'WIZARD'
+    const nextEquippedBlockSkin =
+      migrated &&
+      nextUnlockedBlockSkins.includes(current.equippedBlockSkin || 'PLASTIC')
+        ? current.equippedBlockSkin
+        : 'PLASTIC'
+
     record = {
       ...current,
       googleId: profile.googleId,
@@ -212,10 +287,12 @@ export async function upsertGoogleUser(profile: GoogleProfilePayload): Promise<{
         deriveDefaultHandle(current.email, profile.googleId)
       ).toLowerCase(),
       avatarUrl: profile.avatarUrl || current.avatarUrl,
-      unlockedSkins:
-        current.unlockedSkins && current.unlockedSkins.length > 0
-          ? current.unlockedSkins
-          : [...DEFAULT_UNLOCKED_SKINS],
+      coins: Math.max(0, Math.floor(Number(current.coins ?? 0))),
+      equippedSkin: nextEquippedSkin,
+      unlockedSkins: nextUnlockedSkins,
+      equippedBlockSkin: nextEquippedBlockSkin,
+      unlockedBlockSkins: nextUnlockedBlockSkins,
+      shopMigratedV1: true,
       friends: Array.isArray(current.friends) ? current.friends : [],
       friendRequestsSent: Array.isArray(current.friendRequestsSent)
         ? current.friendRequestsSent
@@ -243,6 +320,14 @@ export async function findUserByGoogleId(googleId: string): Promise<{
   const dbMode = await connectMongoDB()
   if (dbMode === 'mongodb') {
     const doc = await UserModel.findOne({ googleId })
+    if (doc && !doc.shopMigratedV1) {
+      doc.unlockedSkins = [...DEFAULT_UNLOCKED_SKINS]
+      doc.equippedSkin = 'WIZARD'
+      doc.unlockedBlockSkins = [...DEFAULT_UNLOCKED_BLOCK_SKINS]
+      doc.equippedBlockSkin = 'PLASTIC'
+      doc.shopMigratedV1 = true
+      await doc.save()
+    }
     return {
       user: doc ? sanitizeUser(doc.toObject()) : null,
       dbMode: 'mongodb',
@@ -250,49 +335,350 @@ export async function findUserByGoogleId(googleId: string): Promise<{
   }
 
   const users = readLocalUsers()
-  const found = users.find((u) => u.googleId === googleId) || null
+  const idx = users.findIndex((u) => u.googleId === googleId)
+  if (idx !== -1 && !users[idx].shopMigratedV1) {
+    users[idx].unlockedSkins = [...DEFAULT_UNLOCKED_SKINS]
+    users[idx].equippedSkin = 'WIZARD'
+    users[idx].unlockedBlockSkins = [...DEFAULT_UNLOCKED_BLOCK_SKINS]
+    users[idx].equippedBlockSkin = 'PLASTIC'
+    users[idx].shopMigratedV1 = true
+    writeLocalUsers(users)
+  }
+  const found = idx !== -1 ? users[idx] : null
   return {
     user: found ? sanitizeUser(found) : null,
     dbMode: 'local-fallback',
   }
 }
 
+/**
+ * Equipa a Skin do Personagem (`equippedSkin`) e/ou a Skin dos Blocos (`equippedBlockSkin`),
+ * validando obrigatoriamente se a skin já foi comprada/liberada na conta Gmail do usuário!
+ */
 export async function updateUserEquippedSkin(
   googleId: string,
-  equippedSkin: string
+  equippedSkinInput?: string,
+  equippedBlockSkinInput?: string
 ): Promise<IUser | null> {
   const dbMode = await connectMongoDB()
   if (dbMode === 'mongodb') {
-    const doc = await UserModel.findOneAndUpdate(
-      { googleId },
-      { $set: { equippedSkin } },
-      { new: true }
-    )
-    if (doc && doc.handle) {
+    const doc = await UserModel.findOne({ googleId })
+    if (!doc) return null
+
+    const unlockedPlayer = new Set<string>([
+      'WIZARD',
+      ...(Array.isArray(doc.unlockedSkins) ? doc.unlockedSkins : []),
+    ])
+    const unlockedBlock = new Set<string>([
+      'PLASTIC',
+      ...(Array.isArray(doc.unlockedBlockSkins) ? doc.unlockedBlockSkins : []),
+    ])
+
+    let nextPlayerSkin = doc.equippedSkin || 'WIZARD'
+    if (equippedSkinInput && equippedSkinInput.trim()) {
+      const normalized = normalizePlayerSkinCode(equippedSkinInput)
+      if (!unlockedPlayer.has(normalized)) {
+        throw new Error(
+          'Esta skin de personagem está bloqueada! Compre-a com moedas na Loja para liberar na sua conta.'
+        )
+      }
+      nextPlayerSkin = normalized
+    }
+
+    let nextBlockSkin = doc.equippedBlockSkin || 'PLASTIC'
+    if (equippedBlockSkinInput && equippedBlockSkinInput.trim()) {
+      const normalizedBlock = normalizeBlockSkinCode(equippedBlockSkinInput)
+      if (!unlockedBlock.has(normalizedBlock)) {
+        throw new Error(
+          'Esta skin de blocos está bloqueada! Compre-a com moedas na Loja para liberar na sua conta.'
+        )
+      }
+      nextBlockSkin = normalizedBlock
+    }
+
+    doc.equippedSkin = nextPlayerSkin
+    doc.equippedBlockSkin = nextBlockSkin
+    await doc.save()
+
+    if (doc.handle) {
       await UserModel.updateMany(
         { 'friends.handle': doc.handle.toLowerCase() },
-        { $set: { 'friends.$.equippedSkin': equippedSkin } }
+        {
+          $set: {
+            'friends.$.equippedSkin': nextPlayerSkin,
+            'friends.$.equippedBlockSkin': nextBlockSkin,
+          },
+        }
       )
     }
-    return doc ? sanitizeUser(doc.toObject()) : null
+    return sanitizeUser(doc.toObject())
   }
 
   const users = readLocalUsers()
   const idx = users.findIndex((u) => u.googleId === googleId)
   if (idx === -1) return null
-  users[idx].equippedSkin = equippedSkin
-  const myHandle = (users[idx].handle || '').toLowerCase()
+
+  const me = users[idx]
+  const unlockedPlayer = new Set<string>([
+    'WIZARD',
+    ...(Array.isArray(me.unlockedSkins) ? me.unlockedSkins : []),
+  ])
+  const unlockedBlock = new Set<string>([
+    'PLASTIC',
+    ...(Array.isArray(me.unlockedBlockSkins) ? me.unlockedBlockSkins : []),
+  ])
+
+  let nextPlayerSkin = me.equippedSkin || 'WIZARD'
+  if (equippedSkinInput && equippedSkinInput.trim()) {
+    const normalized = normalizePlayerSkinCode(equippedSkinInput)
+    if (!unlockedPlayer.has(normalized)) {
+      throw new Error(
+        'Esta skin de personagem está bloqueada! Compre-a com moedas na Loja para liberar na sua conta.'
+      )
+    }
+    nextPlayerSkin = normalized
+  }
+
+  let nextBlockSkin = me.equippedBlockSkin || 'PLASTIC'
+  if (equippedBlockSkinInput && equippedBlockSkinInput.trim()) {
+    const normalizedBlock = normalizeBlockSkinCode(equippedBlockSkinInput)
+    if (!unlockedBlock.has(normalizedBlock)) {
+      throw new Error(
+        'Esta skin de blocos está bloqueada! Compre-a com moedas na Loja para liberar na sua conta.'
+      )
+    }
+    nextBlockSkin = normalizedBlock
+  }
+
+  me.equippedSkin = nextPlayerSkin
+  me.equippedBlockSkin = nextBlockSkin
+
+  const myHandle = (me.handle || '').toLowerCase()
   for (const u of users) {
     if (Array.isArray(u.friends)) {
       for (const f of u.friends) {
         if (f.handle.toLowerCase() === myHandle) {
-          f.equippedSkin = equippedSkin
+          f.equippedSkin = nextPlayerSkin
+          f.equippedBlockSkin = nextBlockSkin
         }
       }
     }
   }
   writeLocalUsers(users)
+  return sanitizeUser(me)
+}
+
+/**
+ * Credita moedas diretamente na conta Gmail (`googleId` / `email`) do usuário após pagamento aprovado no Mercado Pago.
+ */
+export async function creditUserCoins(
+  googleId: string,
+  email: string,
+  coinsDelta: number
+): Promise<IUser | null> {
+  const safeDelta = Math.max(0, Math.floor(Number(coinsDelta) || 0))
+  if (safeDelta <= 0) {
+    const { user } = await findUserByGoogleId(googleId)
+    return user
+  }
+
+  const dbMode = await connectMongoDB()
+  if (dbMode === 'mongodb') {
+    const doc = await UserModel.findOneAndUpdate(
+      {
+        $or: [
+          { googleId },
+          ...(email ? [{ email: email.toLowerCase() }] : []),
+        ],
+      },
+      { $inc: { coins: safeDelta } },
+      { new: true }
+    )
+    return doc ? sanitizeUser(doc.toObject()) : null
+  }
+
+  const users = readLocalUsers()
+  const idx = users.findIndex(
+    (u) =>
+      u.googleId === googleId ||
+      (email && u.email.toLowerCase() === email.toLowerCase())
+  )
+  if (idx === -1) return null
+  users[idx].coins = Math.max(0, Math.floor(Number(users[idx].coins ?? 0))) + safeDelta
+  writeLocalUsers(users)
   return sanitizeUser(users[idx])
+}
+
+/**
+ * Compra uma Skin (de Personagem ou de Blocos) utilizando as moedas vinculadas à conta Gmail do usuário.
+ * A skin passa a ficar permanentemente liberada para aquela conta (`unlockedSkins` / `unlockedBlockSkins`).
+ */
+export async function purchaseSkinWithCoins(
+  googleId: string,
+  params: {
+    category: 'PLAYER' | 'BLOCK'
+    skinCode: string
+    autoEquip?: boolean
+  }
+): Promise<{
+  user: IUser
+  purchasedSkin: ShopSkinCatalogItem
+}> {
+  const category = params.category === 'BLOCK' ? 'BLOCK' : 'PLAYER'
+  const autoEquip = params.autoEquip !== false
+
+  const catalog =
+    category === 'BLOCK' ? BLOCK_SKINS_SHOP_CATALOG : PLAYER_SKINS_SHOP_CATALOG
+  const normalizedCode =
+    category === 'BLOCK'
+      ? normalizeBlockSkinCode(params.skinCode)
+      : normalizePlayerSkinCode(params.skinCode)
+
+  const skinItem = catalog.find(
+    (item) =>
+      item.code.toUpperCase() === normalizedCode.toUpperCase() ||
+      item.spriteId.toLowerCase() === params.skinCode.trim().toLowerCase()
+  )
+  if (!skinItem) {
+    throw new Error('Skin não encontrada no catálogo da Loja.')
+  }
+
+  const dbMode = await connectMongoDB()
+  if (dbMode === 'mongodb') {
+    const doc = await UserModel.findOne({ googleId })
+    if (!doc) {
+      throw new Error('Conta de usuário não encontrada.')
+    }
+
+    const currentCoins = Math.max(0, Math.floor(Number(doc.coins ?? 0)))
+    const unlockedList =
+      category === 'BLOCK'
+        ? Array.from(
+            new Set([
+              'PLASTIC',
+              ...(Array.isArray(doc.unlockedBlockSkins)
+                ? doc.unlockedBlockSkins
+                : []),
+            ])
+          )
+        : Array.from(
+            new Set([
+              'WIZARD',
+              ...(Array.isArray(doc.unlockedSkins) ? doc.unlockedSkins : []),
+            ])
+          )
+
+    if (unlockedList.includes(skinItem.code)) {
+      throw new Error('Você já possui esta skin liberada na sua conta!')
+    }
+
+    if (currentCoins < skinItem.priceCoins) {
+      throw new Error(
+        `Moedas insuficientes! Você possui ${currentCoins} moedas e "${skinItem.name}" custa ${skinItem.priceCoins} moedas.`
+      )
+    }
+
+    doc.coins = currentCoins - skinItem.priceCoins
+    if (category === 'BLOCK') {
+      doc.unlockedBlockSkins = [...unlockedList, skinItem.code]
+      if (autoEquip) {
+        doc.equippedBlockSkin = skinItem.code
+      }
+    } else {
+      doc.unlockedSkins = [...unlockedList, skinItem.code]
+      if (autoEquip) {
+        doc.equippedSkin = skinItem.code
+      }
+    }
+    doc.shopMigratedV1 = true
+    await doc.save()
+
+    if (autoEquip && doc.handle) {
+      await UserModel.updateMany(
+        { 'friends.handle': doc.handle.toLowerCase() },
+        {
+          $set: {
+            'friends.$.equippedSkin': doc.equippedSkin || 'WIZARD',
+            'friends.$.equippedBlockSkin': doc.equippedBlockSkin || 'PLASTIC',
+          },
+        }
+      )
+    }
+
+    return {
+      user: sanitizeUser(doc.toObject()),
+      purchasedSkin: skinItem,
+    }
+  }
+
+  const users = readLocalUsers()
+  const idx = users.findIndex((u) => u.googleId === googleId)
+  if (idx === -1) {
+    throw new Error('Conta de usuário não encontrada.')
+  }
+
+  const me = users[idx]
+  const currentCoins = Math.max(0, Math.floor(Number(me.coins ?? 0)))
+  const unlockedList =
+    category === 'BLOCK'
+      ? Array.from(
+          new Set([
+            'PLASTIC',
+            ...(Array.isArray(me.unlockedBlockSkins)
+              ? me.unlockedBlockSkins
+              : []),
+          ])
+        )
+      : Array.from(
+          new Set([
+            'WIZARD',
+            ...(Array.isArray(me.unlockedSkins) ? me.unlockedSkins : []),
+          ])
+        )
+
+  if (unlockedList.includes(skinItem.code)) {
+    throw new Error('Você já possui esta skin liberada na sua conta!')
+  }
+
+  if (currentCoins < skinItem.priceCoins) {
+    throw new Error(
+      `Moedas insuficientes! Você possui ${currentCoins} moedas e "${skinItem.name}" custa ${skinItem.priceCoins} moedas.`
+    )
+  }
+
+  me.coins = currentCoins - skinItem.priceCoins
+  if (category === 'BLOCK') {
+    me.unlockedBlockSkins = [...unlockedList, skinItem.code]
+    if (autoEquip) {
+      me.equippedBlockSkin = skinItem.code
+    }
+  } else {
+    me.unlockedSkins = [...unlockedList, skinItem.code]
+    if (autoEquip) {
+      me.equippedSkin = skinItem.code
+    }
+  }
+  me.shopMigratedV1 = true
+
+  if (autoEquip) {
+    const myHandle = (me.handle || '').toLowerCase()
+    for (const u of users) {
+      if (Array.isArray(u.friends)) {
+        for (const f of u.friends) {
+          if (f.handle.toLowerCase() === myHandle) {
+            f.equippedSkin = me.equippedSkin || 'WIZARD'
+            f.equippedBlockSkin = me.equippedBlockSkin || 'PLASTIC'
+          }
+        }
+      }
+    }
+  }
+
+  writeLocalUsers(users)
+  return {
+    user: sanitizeUser(me),
+    purchasedSkin: skinItem,
+  }
 }
 
 /**
@@ -409,6 +795,7 @@ export async function sendFriendRequest(
       customNick: me.customNick || deriveDefaultCustomNick(me.displayName),
       email: me.email,
       equippedSkin: me.equippedSkin || 'WIZARD',
+      equippedBlockSkin: me.equippedBlockSkin || 'PLASTIC',
       avatarUrl: me.avatarUrl || '',
       createdAt: new Date(),
     }
@@ -419,6 +806,7 @@ export async function sendFriendRequest(
         target.customNick || deriveDefaultCustomNick(target.displayName),
       email: target.email,
       equippedSkin: target.equippedSkin || 'WIZARD',
+      equippedBlockSkin: target.equippedBlockSkin || 'PLASTIC',
       avatarUrl: target.avatarUrl || '',
       createdAt: new Date(),
     }
@@ -444,6 +832,7 @@ export async function sendFriendRequest(
           customNick: targetProfile.customNick,
           email: targetProfile.email,
           equippedSkin: targetProfile.equippedSkin,
+          equippedBlockSkin: targetProfile.equippedBlockSkin || 'PLASTIC',
           avatarUrl: targetProfile.avatarUrl,
         },
         ...meFriends,
@@ -454,6 +843,7 @@ export async function sendFriendRequest(
           customNick: senderProfile.customNick,
           email: senderProfile.email,
           equippedSkin: senderProfile.equippedSkin,
+          equippedBlockSkin: senderProfile.equippedBlockSkin || 'PLASTIC',
           avatarUrl: senderProfile.avatarUrl,
         },
         ...(target.friends || []).filter(
@@ -481,6 +871,7 @@ export async function sendFriendRequest(
         customNick: targetProfile.customNick,
         email: targetProfile.email,
         equippedSkin: targetProfile.equippedSkin,
+        equippedBlockSkin: targetProfile.equippedBlockSkin || 'PLASTIC',
         avatarUrl: targetProfile.avatarUrl,
       },
       ...meFriends.filter((f) => f.handle.toLowerCase() !== targetHandle),
@@ -554,6 +945,7 @@ export async function sendFriendRequest(
     customNick: me.customNick || deriveDefaultCustomNick(me.displayName),
     email: me.email,
     equippedSkin: me.equippedSkin || 'WIZARD',
+    equippedBlockSkin: me.equippedBlockSkin || 'PLASTIC',
     avatarUrl: me.avatarUrl || '',
     createdAt: new Date(),
   }
@@ -564,6 +956,7 @@ export async function sendFriendRequest(
       target.customNick || deriveDefaultCustomNick(target.displayName),
     email: target.email,
     equippedSkin: target.equippedSkin || 'WIZARD',
+    equippedBlockSkin: target.equippedBlockSkin || 'PLASTIC',
     avatarUrl: target.avatarUrl || '',
     createdAt: new Date(),
   }
@@ -588,6 +981,7 @@ export async function sendFriendRequest(
         customNick: targetProfile.customNick,
         email: targetProfile.email,
         equippedSkin: targetProfile.equippedSkin,
+        equippedBlockSkin: targetProfile.equippedBlockSkin || 'PLASTIC',
         avatarUrl: targetProfile.avatarUrl,
       },
       ...meFriends,
@@ -605,6 +999,7 @@ export async function sendFriendRequest(
         customNick: senderProfile.customNick,
         email: senderProfile.email,
         equippedSkin: senderProfile.equippedSkin,
+        equippedBlockSkin: senderProfile.equippedBlockSkin || 'PLASTIC',
         avatarUrl: senderProfile.avatarUrl,
       },
       ...targetFriends,
@@ -629,6 +1024,7 @@ export async function sendFriendRequest(
       customNick: targetProfile.customNick,
       email: targetProfile.email,
       equippedSkin: targetProfile.equippedSkin,
+      equippedBlockSkin: targetProfile.equippedBlockSkin || 'PLASTIC',
       avatarUrl: targetProfile.avatarUrl,
     },
     ...meFriends.filter((f) => f.handle.toLowerCase() !== targetHandle),
@@ -704,6 +1100,7 @@ export async function respondToFriendRequest(
             sender.customNick || deriveDefaultCustomNick(sender.displayName),
           email: sender.email,
           equippedSkin: sender.equippedSkin || 'WIZARD',
+          equippedBlockSkin: sender.equippedBlockSkin || 'PLASTIC',
           avatarUrl: sender.avatarUrl || '',
         },
         ...meFriends,
@@ -718,6 +1115,7 @@ export async function respondToFriendRequest(
           customNick: me.customNick || deriveDefaultCustomNick(me.displayName),
           email: me.email,
           equippedSkin: me.equippedSkin || 'WIZARD',
+          equippedBlockSkin: me.equippedBlockSkin || 'PLASTIC',
           avatarUrl: me.avatarUrl || '',
         },
         ...senderFriends,
@@ -771,6 +1169,7 @@ export async function respondToFriendRequest(
           sender.customNick || deriveDefaultCustomNick(sender.displayName),
         email: sender.email,
         equippedSkin: sender.equippedSkin || 'WIZARD',
+        equippedBlockSkin: sender.equippedBlockSkin || 'PLASTIC',
         avatarUrl: sender.avatarUrl || '',
       },
       ...meFriends,
@@ -787,6 +1186,7 @@ export async function respondToFriendRequest(
         customNick: me.customNick || deriveDefaultCustomNick(me.displayName),
         email: me.email,
         equippedSkin: me.equippedSkin || 'WIZARD',
+        equippedBlockSkin: me.equippedBlockSkin || 'PLASTIC',
         avatarUrl: me.avatarUrl || '',
       },
       ...senderFriends,
@@ -914,6 +1314,7 @@ function sanitizeUser(raw: IUser): IUser {
         customNick: String(r.customNick || h),
         email: String(r.email || ''),
         equippedSkin: String(r.equippedSkin || 'WIZARD'),
+        equippedBlockSkin: String(r.equippedBlockSkin || 'PLASTIC'),
         avatarUrl: String(r.avatarUrl || ''),
       })
     }
@@ -921,6 +1322,37 @@ function sanitizeUser(raw: IUser): IUser {
   const rawReceived = Array.isArray(raw.friendRequestsReceived)
     ? raw.friendRequestsReceived.filter((r) => r && r.handle)
     : []
+
+  const unlockedSkins = Array.from(
+    new Set([
+      'WIZARD',
+      ...(Array.isArray(raw.unlockedSkins)
+        ? raw.unlockedSkins.map((s) => normalizePlayerSkinCode(String(s)))
+        : DEFAULT_UNLOCKED_SKINS),
+    ])
+  )
+  const unlockedBlockSkins = Array.from(
+    new Set([
+      'PLASTIC',
+      ...(Array.isArray(raw.unlockedBlockSkins)
+        ? raw.unlockedBlockSkins.map((s) => normalizeBlockSkinCode(String(s)))
+        : DEFAULT_UNLOCKED_BLOCK_SKINS),
+    ])
+  )
+  const rawEquippedSkin = normalizePlayerSkinCode(
+    String(raw.equippedSkin || 'WIZARD')
+  )
+  const equippedSkin = unlockedSkins.includes(rawEquippedSkin)
+    ? rawEquippedSkin
+    : 'WIZARD'
+
+  const rawEquippedBlockSkin = normalizeBlockSkinCode(
+    String(raw.equippedBlockSkin || 'PLASTIC')
+  )
+  const equippedBlockSkin = unlockedBlockSkins.includes(rawEquippedBlockSkin)
+    ? rawEquippedBlockSkin
+    : 'PLASTIC'
+
   return {
     googleId,
     email,
@@ -932,15 +1364,18 @@ function sanitizeUser(raw: IUser): IUser {
       raw.handle || deriveDefaultHandle(email, googleId)
     ).toLowerCase(),
     avatarUrl: String(raw.avatarUrl || ''),
-    equippedSkin: String(raw.equippedSkin || 'WIZARD'),
-    unlockedSkins: Array.isArray(raw.unlockedSkins)
-      ? raw.unlockedSkins.map(String)
-      : [...DEFAULT_UNLOCKED_SKINS],
+    coins: Math.max(0, Math.floor(Number(raw.coins ?? 0))),
+    equippedSkin,
+    unlockedSkins,
+    equippedBlockSkin,
+    unlockedBlockSkins,
+    shopMigratedV1: true,
     friends: mergedFriends.map((f) => ({
       handle: String(f.handle).toLowerCase(),
       customNick: String(f.customNick),
       email: String(f.email || ''),
       equippedSkin: String(f.equippedSkin || 'WIZARD'),
+      equippedBlockSkin: String(f.equippedBlockSkin || 'PLASTIC'),
       avatarUrl: String(f.avatarUrl || ''),
     })),
     friendRequestsSent: rawSent.map((r) => ({
@@ -948,6 +1383,7 @@ function sanitizeUser(raw: IUser): IUser {
       customNick: String(r.customNick),
       email: String(r.email || ''),
       equippedSkin: String(r.equippedSkin || 'WIZARD'),
+      equippedBlockSkin: String(r.equippedBlockSkin || 'PLASTIC'),
       avatarUrl: String(r.avatarUrl || ''),
       createdAt: r.createdAt || new Date(),
     })),
@@ -956,6 +1392,7 @@ function sanitizeUser(raw: IUser): IUser {
       customNick: String(r.customNick),
       email: String(r.email || ''),
       equippedSkin: String(r.equippedSkin || 'WIZARD'),
+      equippedBlockSkin: String(r.equippedBlockSkin || 'PLASTIC'),
       avatarUrl: String(r.avatarUrl || ''),
       createdAt: r.createdAt || new Date(),
     })),
@@ -1229,7 +1666,7 @@ function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
     let raw = ''
     req.on('data', (chunk) => {
       raw += chunk
-      if (raw.length > 1_000_000) {
+      if (raw.length > 300 * 1024 * 1024) {
         reject(new Error('Payload too large'))
       }
     })
@@ -1313,6 +1750,11 @@ export async function handleAuthApiRequest(
   req: IncomingMessage,
   res: ServerResponse
 ): Promise<boolean> {
+  const shopHandled = await handleShopApiRequest(req, res)
+  if (shopHandled) {
+    return true
+  }
+
   const url = resolveCanonicalAuthUrl(req)
   if (!url.startsWith('/api/auth')) {
     return false
@@ -1415,7 +1857,7 @@ export async function handleAuthApiRequest(
       return true
     }
 
-    // 4. PATCH /api/auth/skin — Sync equippedSkin to MongoDB
+    // 4. PATCH /api/auth/skin — Sync equippedSkin & equippedBlockSkin to MongoDB
     if (req.method === 'PATCH' && url === '/api/auth/skin') {
       const token = extractRequestToken(req)
       const verified = token ? verifySessionJwt(token) : null
@@ -1426,15 +1868,24 @@ export async function handleAuthApiRequest(
 
       const body = await readJsonBody(req)
       const equippedSkin =
-        typeof body.equippedSkin === 'string' ? body.equippedSkin.trim() : ''
-      if (!equippedSkin) {
+        typeof body.equippedSkin === 'string' && body.equippedSkin.trim()
+          ? body.equippedSkin.trim()
+          : undefined
+      const equippedBlockSkin =
+        typeof body.equippedBlockSkin === 'string' &&
+        body.equippedBlockSkin.trim()
+          ? body.equippedBlockSkin.trim()
+          : undefined
+
+      if (!equippedSkin && !equippedBlockSkin) {
         sendJson(res, 400, { ok: false, error: 'Skin inválida.' })
         return true
       }
 
       const updated = await updateUserEquippedSkin(
         verified.googleId,
-        equippedSkin
+        equippedSkin,
+        equippedBlockSkin
       )
       sendJson(res, 200, { ok: Boolean(updated), user: updated })
       return true

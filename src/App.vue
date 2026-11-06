@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { TowerInstance } from './game/TowerInstance'
 import {
   GAME_CONSTANTS,
@@ -24,6 +24,7 @@ import {
   selectBasePresetForSeed,
 } from './game/BaseTerrainCatalog'
 import {
+  BlockSkinInfo,
   PlayerSkinInfo,
   spriteRegistry,
   SpriteKey,
@@ -32,9 +33,15 @@ import {
 import PiecePreviewCanvas from './components/PiecePreviewCanvas.vue'
 import {
   authStore,
+  dbBlockSkinToSpriteId,
   dbSkinToSpriteId,
   FriendAccountEntry,
+  isBlockSkinUnlocked,
+  isPlayerSkinUnlocked,
+  spriteIdToDbBlockSkin,
   spriteIdToDbSkin,
+  unlockLocalBlockSkin,
+  unlockLocalPlayerSkin,
 } from './services/authStore'
 import {
   multiplayerClient,
@@ -73,6 +80,9 @@ const dynamicTintEnabled = ref<boolean>(optionsStore.state.dynamicTintEnabled)
 const spriteSlots = ref<SpriteSlot[]>(spriteRegistry.getAllSlots())
 const playerSkins = ref<PlayerSkinInfo[]>(spriteRegistry.getPlayerSkins())
 const activePlayerSkinId = ref<string>(spriteRegistry.getActivePlayerSkinId())
+const blockSkins = ref<BlockSkinInfo[]>(spriteRegistry.getBlockSkins())
+const activeBlockSkinId = ref<string>(spriteRegistry.getActiveBlockSkinId())
+const selectedSkinsColumn = ref<'PLAYER' | 'BLOCK'>('PLAYER')
 const isSkinPickerOpen = ref<boolean>(false)
 
 type ScreenFlowState =
@@ -81,10 +91,15 @@ type ScreenFlowState =
   | 'MAIN_MENU'
   | 'LOCAL_LOBBY'
   | 'MULTIPLAYER_LOBBY'
+  | 'SKINS_SCREEN'
+  | 'SHOP_SCREEN'
   | 'OPTIONS_SCREEN'
   | 'IN_GAME'
 const screenFlow = ref<ScreenFlowState>('TITLE_SCREEN')
-const selectedMenuCard = ref<'LOCAL' | 'MULTIPLAYER' | 'OPTIONS'>('LOCAL')
+const selectedMenuCard = ref<
+  'LOCAL' | 'MULTIPLAYER' | 'SKINS' | 'STORE' | 'OPTIONS'
+>('LOCAL')
+const isGamePaused = ref<boolean>(false)
 const isOptionsModalOpen = ref<boolean>(false)
 const optionsActiveTab = ref<'AUDIO' | 'CONTROLS' | 'GRAPHICS' | 'ACCOUNT'>(
   'AUDIO'
@@ -129,10 +144,10 @@ interface LobbySlotInfo {
 }
 
 const DEFAULT_SILHOUETTE_SKINS = [
-  'player_shadow',
+  'player_mage',
   'player_dino',
   'player_pirate',
-  'player_mage',
+  'player_shadow',
 ]
 
 const fallbackLobbySlots = ref<LobbySlotInfo[]>([
@@ -142,8 +157,8 @@ const fallbackLobbySlots = ref<LobbySlotInfo[]>([
     isLocalHost: true,
     customNick: 'ReiDosBlocos',
     handle: '@lucas_042',
-    skinSpriteId: 'player_shadow',
-    silhouetteSkinId: 'player_shadow',
+    skinSpriteId: 'player_mage',
+    silhouetteSkinId: 'player_mage',
     cupPoints: 0,
   },
   {
@@ -172,8 +187,8 @@ const fallbackLobbySlots = ref<LobbySlotInfo[]>([
     isLocalHost: false,
     customNick: '',
     handle: '',
-    skinSpriteId: 'player_mage',
-    silhouetteSkinId: 'player_mage',
+    skinSpriteId: 'player_shadow',
+    silhouetteSkinId: 'player_shadow',
     cupPoints: 0,
   },
 ])
@@ -255,6 +270,14 @@ const activePlayerSkin = computed<PlayerSkinInfo | null>(() => {
   return (
     playerSkins.value.find((s) => s.id === activePlayerSkinId.value) ||
     playerSkins.value[0] ||
+    null
+  )
+})
+
+const activeBlockSkin = computed<BlockSkinInfo | null>(() => {
+  return (
+    blockSkins.value.find((s) => s.id === activeBlockSkinId.value) ||
+    blockSkins.value[0] ||
     null
   )
 })
@@ -491,6 +514,49 @@ const hasAliveRemoteOpponents = computed<boolean>(() => {
   if (remotes.length === 0) return false
   return remotes.some((r) => r.lives > 0 && !r.isEliminated)
 })
+
+const isEndTowerShowcaseActive = ref<boolean>(false)
+let endTowerShowcaseTimer: number | null = null
+
+function clearEndTowerShowcase() {
+  if (endTowerShowcaseTimer !== null) {
+    window.clearTimeout(endTowerShowcaseTimer)
+    endTowerShowcaseTimer = null
+  }
+  isEndTowerShowcaseActive.value = false
+}
+
+const isMatchFinishedForOverlay = computed<boolean>(() => {
+  return (
+    multiplayerClient.state.gameOverResult !== null ||
+    snapshot.value.state === 'VICTORY' ||
+    (snapshot.value.state === 'GAME_OVER' &&
+      (!isOnlineMultiplayerMatch.value || !hasAliveRemoteOpponents.value))
+  )
+})
+
+watch(
+  isMatchFinishedForOverlay,
+  (finished, prevFinished) => {
+    if (finished && !prevFinished) {
+      if (snapshot.value.gameMode !== 'PUZZLE') {
+        if (endTowerShowcaseTimer !== null) {
+          window.clearTimeout(endTowerShowcaseTimer)
+        }
+        isEndTowerShowcaseActive.value = true
+        endTowerShowcaseTimer = window.setTimeout(() => {
+          isEndTowerShowcaseActive.value = false
+          endTowerShowcaseTimer = null
+        }, 2800)
+      } else {
+        clearEndTowerShowcase()
+      }
+    } else if (!finished) {
+      clearEndTowerShowcase()
+    }
+  },
+  { flush: 'sync' }
+)
 
 const currentLobbySelectableMode = computed<SelectableGameMode>(() => {
   if (
@@ -1352,7 +1418,9 @@ async function saveCustomNick() {
 
 async function enterMultiplayerLobby() {
   const user = authStore.state.user
-  const hostSkin = activePlayerSkinId.value || 'player_shadow'
+  const hostSkin = isPlayerSkinUnlocked(activePlayerSkinId.value)
+    ? activePlayerSkinId.value || 'player_mage'
+    : 'player_mage'
   fallbackLobbySlots.value = [
     {
       slotIndex: 0,
@@ -1361,7 +1429,7 @@ async function enterMultiplayerLobby() {
       customNick: user?.customNick || 'ReiDosBlocos',
       handle: user?.handle || '@lucas_042',
       skinSpriteId: hostSkin,
-      silhouetteSkinId: 'player_shadow',
+      silhouetteSkinId: 'player_mage',
       cupPoints: 0,
     },
     {
@@ -1390,8 +1458,8 @@ async function enterMultiplayerLobby() {
       isLocalHost: false,
       customNick: '',
       handle: '',
-      skinSpriteId: 'player_mage',
-      silhouetteSkinId: 'player_mage',
+      skinSpriteId: 'player_shadow',
+      silhouetteSkinId: 'player_shadow',
       cupPoints: 0,
     },
   ]
@@ -1483,23 +1551,6 @@ async function toggleLobbySlotReady(slotIndex: number) {
   if (!fbSlot) return
   fbSlot.state = fbSlot.state === 'READY' ? 'JOINED_UNREADY' : 'READY'
   syncLobbyCountdownState()
-}
-
-function cycleLocalLobbySkin() {
-  if (playerSkins.value.length === 0) return
-  const localSlot =
-    lobbySlots.value.find((s) => s.isLocalHost) || lobbySlots.value[0]
-  const currentIdx = playerSkins.value.findIndex(
-    (s) => s.id === localSlot.skinSpriteId
-  )
-  const nextSkin =
-    playerSkins.value[(currentIdx + 1) % playerSkins.value.length]
-  if (!nextSkin) return
-  selectPlayerSkin(nextSkin.id)
-  if (fallbackLobbySlots.value[0]) {
-    fallbackLobbySlots.value[0].skinSpriteId = nextSkin.id
-  }
-  multiplayerClient.updateEquippedSkin(spriteIdToDbSkin(nextSkin.id))
 }
 
 async function cancelLobbyCountdown() {
@@ -1734,6 +1785,7 @@ function startGame(
   onlineResolvedMode?: GameMode,
   onlineSelectedMode?: SelectableGameMode
 ) {
+  isGamePaused.value = false
   isSkinPickerOpen.value = false
   isAuthModalOpen.value = false
   isFriendsModalOpen.value = false
@@ -1811,7 +1863,9 @@ function startGame(
 }
 
 function handleReturnToLobbyFromMatch() {
+  clearEndTowerShowcase()
   multiplayerClient.emitReturnToLobby()
+  isGamePaused.value = false
   isOnlineMultiplayerMatch.value = false
   if (towerInstance) {
     towerInstance.rankBadge = null
@@ -1847,6 +1901,7 @@ async function handleGoogleLogin() {
   try {
     const result = await authStore.loginWithGoogle()
     activePlayerSkinId.value = spriteRegistry.getActivePlayerSkinId()
+    activeBlockSkinId.value = spriteRegistry.getActiveBlockSkinId()
     personalBestScore.value = Math.max(
       personalBestScore.value,
       authStore.getPersonalBest()
@@ -1884,6 +1939,8 @@ async function handleGoogleLogin() {
 async function handleLogout() {
   multiplayerClient.disconnect()
   await authStore.logout()
+  activePlayerSkinId.value = spriteRegistry.getActivePlayerSkinId()
+  activeBlockSkinId.value = spriteRegistry.getActiveBlockSkinId()
   isAuthModalOpen.value = false
   isFriendsModalOpen.value = false
   isBurgerMenuOpen.value = false
@@ -1896,6 +1953,7 @@ async function handleLogout() {
 }
 
 function returnToMainMenu() {
+  clearEndTowerShowcase()
   if (
     screenFlow.value === 'MULTIPLAYER_LOBBY' ||
     isOnlineMultiplayerMatch.value ||
@@ -1904,6 +1962,7 @@ function returnToMainMenu() {
     multiplayerClient.leaveRoom()
   }
   isOnlineMultiplayerMatch.value = false
+  isGamePaused.value = false
   isDevModeOpen.value = false
   isSkinPickerOpen.value = false
   isAuthModalOpen.value = false
@@ -1957,6 +2016,584 @@ function closeOptionsScreen() {
   returnToMainMenu()
 }
 
+function openSkinsScreen(asModal: boolean = false) {
+  selectedSkinsColumn.value = 'PLAYER'
+  isBurgerMenuOpen.value = false
+  isFriendsModalOpen.value = false
+  isGameModeModalOpen.value = false
+  isOptionsModalOpen.value = false
+  playToySfx('click')
+  if (asModal) {
+    isSkinPickerOpen.value = true
+  } else {
+    selectedMenuCard.value = 'SKINS'
+    isSkinPickerOpen.value = false
+    isAuthModalOpen.value = false
+    screenFlow.value = 'SKINS_SCREEN'
+  }
+}
+
+function closeSkinsScreen() {
+  playToySfx('click')
+  if (isSkinPickerOpen.value) {
+    isSkinPickerOpen.value = false
+    if (fallbackLobbySlots.value[0]) {
+      fallbackLobbySlots.value[0].skinSpriteId = activePlayerSkinId.value
+    }
+    return
+  }
+  returnToMainMenu()
+}
+
+type ShopCategoryTab = 'TODOS' | 'MAGOS' | 'BLOCOS' | 'MOEDAS'
+
+interface ShopCatalogItem {
+  id: string
+  titleLine1: string
+  titleLine2?: string
+  price: number
+  cardBg: string
+  category: 'MAGOS' | 'BLOCOS'
+  playerSkinId?: string
+  blockSkinId?: string
+  hideTitleWhenOwned?: boolean
+}
+
+export interface ShopCoinPackageItem {
+  id: string
+  coins: number
+  coinsLabel: string
+  title: string
+  bonusLabel?: string
+  priceBrl: number
+  priceLabel: string
+  badge?: string
+  badgeVariant?: 'popular' | 'best' | 'gold'
+  cardVariant: 'sky' | 'gold' | 'royal'
+  artType: 'PILE' | 'SACK' | 'CHEST_SMALL' | 'CHEST_OPEN' | 'SAFE' | 'MOUNTAIN'
+}
+
+const SHOP_COIN_PACKAGES: ShopCoinPackageItem[] = [
+  {
+    id: 'PACK_150',
+    coins: 150,
+    coinsLabel: '150',
+    title: 'PUNHADO DE MOEDAS',
+    priceBrl: 4.9,
+    priceLabel: 'R$ 4,90',
+    cardVariant: 'sky',
+    artType: 'PILE',
+  },
+  {
+    id: 'PACK_500',
+    coins: 500,
+    coinsLabel: '500',
+    title: 'SACO DE MOEDAS',
+    priceBrl: 14.9,
+    priceLabel: 'R$ 14,90',
+    cardVariant: 'sky',
+    artType: 'SACK',
+  },
+  {
+    id: 'PACK_1200',
+    coins: 1200,
+    coinsLabel: '1.200',
+    title: 'BAÚ PEQUENO',
+    bonusLabel: '+120 BÔNUS',
+    priceBrl: 29.9,
+    priceLabel: 'R$ 29,90',
+    badge: 'MAIS POPULAR',
+    badgeVariant: 'popular',
+    cardVariant: 'gold',
+    artType: 'CHEST_SMALL',
+  },
+  {
+    id: 'PACK_3000',
+    coins: 3000,
+    coinsLabel: '3.000',
+    title: 'BAÚ GRANDE',
+    bonusLabel: '+450 BÔNUS',
+    priceBrl: 59.9,
+    priceLabel: 'R$ 59,90',
+    cardVariant: 'sky',
+    artType: 'CHEST_OPEN',
+  },
+  {
+    id: 'PACK_6000',
+    coins: 6000,
+    coinsLabel: '6.000',
+    title: 'CAIXA FORTE',
+    bonusLabel: '+1.000 BÔNUS',
+    priceBrl: 99.9,
+    priceLabel: 'R$ 99,90',
+    badge: 'MELHOR PREÇO',
+    badgeVariant: 'best',
+    cardVariant: 'sky',
+    artType: 'SAFE',
+  },
+  {
+    id: 'PACK_15000',
+    coins: 15000,
+    coinsLabel: '15.000',
+    title: 'FORTUNA DO ABISMO',
+    bonusLabel: '+3.000 BÔNUS',
+    priceBrl: 199.9,
+    priceLabel: 'R$ 199,90',
+    badge: 'MUITO OURO!',
+    badgeVariant: 'gold',
+    cardVariant: 'royal',
+    artType: 'MOUNTAIN',
+  },
+]
+
+const SHOP_ITEMS_CATALOG: Record<string, ShopCatalogItem> = {
+  mago_sombrio: {
+    id: 'mago_sombrio',
+    titleLine1: 'MAGO SOMBRIO',
+    price: 500,
+    cardBg: '#E6B3FF',
+    category: 'MAGOS',
+    playerSkinId: 'player_shadow',
+  },
+  mago_dino: {
+    id: 'mago_dino',
+    titleLine1: 'DINO EXPLORADOR',
+    price: 450,
+    cardBg: '#A7F3D0',
+    category: 'MAGOS',
+    playerSkinId: 'player_dino',
+  },
+  mago_pirata: {
+    id: 'mago_pirata',
+    titleLine1: 'CAPITÃO PIRATA',
+    price: 450,
+    cardBg: '#FECACA',
+    category: 'MAGOS',
+    playerSkinId: 'player_pirate',
+  },
+  mago_classico: {
+    id: 'mago_classico',
+    titleLine1: 'MAGO CLÁSSICO',
+    price: 350,
+    cardBg: '#A5E3FF',
+    category: 'MAGOS',
+    playerSkinId: 'player_mage',
+  },
+  bloco_ouro: {
+    id: 'bloco_ouro',
+    titleLine1: 'BLOCO DE OURO',
+    price: 1000,
+    cardBg: '#FFE055',
+    category: 'BLOCOS',
+    blockSkinId: 'gold',
+  },
+  bloco_madeira: {
+    id: 'bloco_madeira',
+    titleLine1: 'BLOCO MADEIRA',
+    price: 500,
+    cardBg: '#FDE68A',
+    category: 'BLOCOS',
+    blockSkinId: 'wood',
+  },
+  bloco_diy: {
+    id: 'bloco_diy',
+    titleLine1: 'BLOCO PAPELÃO',
+    price: 650,
+    cardBg: '#E9D5FF',
+    category: 'BLOCOS',
+    blockSkinId: 'diy',
+  },
+  bloco_classico: {
+    id: 'bloco_classico',
+    titleLine1: 'BLOCO CLÁSSICO',
+    price: 0,
+    cardBg: '#9BA8B8',
+    category: 'BLOCOS',
+    blockSkinId: 'default',
+    hideTitleWhenOwned: true,
+  },
+}
+
+const SHOP_PLAYER_ITEM_IDS = [
+  'mago_sombrio',
+  'mago_dino',
+  'mago_pirata',
+  'mago_classico',
+]
+
+const SHOP_BLOCK_ITEM_IDS = [
+  'bloco_ouro',
+  'bloco_madeira',
+  'bloco_diy',
+  'bloco_classico',
+]
+
+const LOCAL_SHOP_COINS_KEY = 'toy_tower_local_shop_coins'
+const LOCAL_SHOP_OWNED_KEY = 'toy_tower_local_shop_owned_items'
+
+function loadInitialShopCoins(): number {
+  if (typeof window === 'undefined') return 1250
+  try {
+    const raw = window.localStorage.getItem(LOCAL_SHOP_COINS_KEY)
+    if (raw !== null) {
+      const parsed = Number(raw)
+      if (Number.isFinite(parsed) && parsed >= 0) return Math.floor(parsed)
+    }
+  } catch {
+    // Ignore storage error
+  }
+  return 1250
+}
+
+function syncOwnedShopItemsWithSkinUnlocks(itemIds: string[]) {
+  for (const id of itemIds) {
+    const item = SHOP_ITEMS_CATALOG[id]
+    if (!item) continue
+    if (item.playerSkinId) {
+      unlockLocalPlayerSkin(item.playerSkinId)
+    }
+    if (item.blockSkinId) {
+      unlockLocalBlockSkin(item.blockSkinId)
+    }
+  }
+}
+
+function loadInitialOwnedShopItems(): string[] {
+  const base = ['mago_classico', 'bloco_classico']
+  if (typeof window === 'undefined') return base
+  try {
+    const raw = window.localStorage.getItem(LOCAL_SHOP_OWNED_KEY)
+    if (!raw) {
+      syncOwnedShopItemsWithSkinUnlocks(base)
+      return base
+    }
+    const parsed = JSON.parse(raw)
+    if (Array.isArray(parsed)) {
+      const merged = Array.from(new Set([...base, ...parsed.map(String)]))
+      syncOwnedShopItemsWithSkinUnlocks(merged)
+      return merged
+    }
+  } catch {
+    // Ignore storage error
+  }
+  syncOwnedShopItemsWithSkinUnlocks(base)
+  return base
+}
+
+const shopActiveTab = ref<ShopCategoryTab>('TODOS')
+const selectedShopItemId = ref<string>('mago_sombrio')
+const selectedCoinPackageId = ref<string>('PACK_1200')
+const isCreatingCoinOrder = ref<boolean>(false)
+const localShopCoins = ref<number>(loadInitialShopCoins())
+const ownedShopItemIds = ref<string[]>(loadInitialOwnedShopItems())
+const shopPurchaseBurstActive = ref<boolean>(false)
+let shopBurstTimer: number | null = null
+
+const isMercadoPagoConfigured = computed<boolean>(() => {
+  return Boolean(authStore.state.isMercadoPagoConfigured)
+})
+
+const selectedCoinPackage = computed<ShopCoinPackageItem>(() => {
+  return (
+    SHOP_COIN_PACKAGES.find((p) => p.id === selectedCoinPackageId.value) ||
+    SHOP_COIN_PACKAGES[2]
+  )
+})
+
+const displayedShopCoins = computed<number>(() => {
+  const userCoins = authStore.state.user?.coins
+  if (typeof userCoins === 'number' && userCoins > localShopCoins.value) {
+    return userCoins
+  }
+  return localShopCoins.value
+})
+
+function formatShopCoins(amount: number): string {
+  return Math.max(0, Math.floor(amount)).toLocaleString('pt-BR')
+}
+
+function getShopItemSpriteUrl(item: ShopCatalogItem): string {
+  if (item.playerSkinId) {
+    const found = playerSkins.value.find((s) => s.id === item.playerSkinId)
+    return (
+      found?.url ||
+      spriteRegistry.getSkinSprite(item.playerSkinId, 'idle')?.src ||
+      ''
+    )
+  }
+  if (item.blockSkinId) {
+    const found = blockSkins.value.find((s) => s.id === item.blockSkinId)
+    return (
+      found?.squarePreviewUrl ||
+      found?.previewUrl ||
+      found?.pieceUrls?.O ||
+      found?.pieceUrls?.T ||
+      ''
+    )
+  }
+  return ''
+}
+
+const SHOP_ITEMS_PER_SHELF = 3
+
+const currentShopShelfItems = computed<ShopCatalogItem[]>(() => {
+  if (shopActiveTab.value === 'MAGOS') {
+    return SHOP_PLAYER_ITEM_IDS.map((id) => SHOP_ITEMS_CATALOG[id]).filter(
+      (item): item is ShopCatalogItem => Boolean(item)
+    )
+  }
+  if (shopActiveTab.value === 'BLOCOS') {
+    return SHOP_BLOCK_ITEM_IDS.map((id) => SHOP_ITEMS_CATALOG[id]).filter(
+      (item): item is ShopCatalogItem => Boolean(item)
+    )
+  }
+  if (shopActiveTab.value === 'MOEDAS') {
+    return []
+  }
+  // 'TODOS': Exibe todas as skins reais de Magos e Blocos (3 itens por prateleira)
+  return [
+    ...SHOP_PLAYER_ITEM_IDS.map((id) => SHOP_ITEMS_CATALOG[id]),
+    ...SHOP_BLOCK_ITEM_IDS.map((id) => SHOP_ITEMS_CATALOG[id]),
+  ].filter((item): item is ShopCatalogItem => Boolean(item))
+})
+
+const shopShelvesList = computed<ShopCatalogItem[][]>(() => {
+  const items = currentShopShelfItems.value
+  const shelves: ShopCatalogItem[][] = []
+  for (let i = 0; i < items.length; i += SHOP_ITEMS_PER_SHELF) {
+    shelves.push(items.slice(i, i + SHOP_ITEMS_PER_SHELF))
+  }
+  while (shelves.length < 2) {
+    shelves.push([])
+  }
+  return shelves
+})
+
+const selectedShopItem = computed<ShopCatalogItem>(() => {
+  return (
+    SHOP_ITEMS_CATALOG[selectedShopItemId.value] ||
+    SHOP_ITEMS_CATALOG.mago_sombrio
+  )
+})
+
+function isShopItemOwned(item: ShopCatalogItem): boolean {
+  if (ownedShopItemIds.value.includes(item.id)) return true
+  if (item.playerSkinId && isPlayerSkinUnlocked(item.playerSkinId)) {
+    return true
+  }
+  if (item.blockSkinId && isBlockSkinUnlocked(item.blockSkinId)) {
+    return true
+  }
+  return false
+}
+
+function saveLocalShopState() {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(
+      LOCAL_SHOP_COINS_KEY,
+      String(localShopCoins.value)
+    )
+    window.localStorage.setItem(
+      LOCAL_SHOP_OWNED_KEY,
+      JSON.stringify(ownedShopItemIds.value)
+    )
+  } catch {
+    // Ignore storage error
+  }
+}
+
+function selectShopTab(tab: ShopCategoryTab) {
+  if (shopActiveTab.value === tab) {
+    shopActiveTab.value = 'TODOS'
+  } else {
+    shopActiveTab.value = tab
+    if (tab === 'MAGOS') {
+      selectedShopItemId.value = 'mago_sombrio'
+    } else if (tab === 'BLOCOS') {
+      selectedShopItemId.value = 'bloco_ouro'
+    } else if (tab === 'MOEDAS') {
+      selectedCoinPackageId.value = 'PACK_1200'
+    }
+  }
+  playToySfx('move')
+}
+
+function openCoinRechargeTab() {
+  shopActiveTab.value = 'MOEDAS'
+  selectedCoinPackageId.value = 'PACK_1200'
+  playToySfx('click')
+}
+
+function selectShopItem(itemId: string) {
+  selectedShopItemId.value = itemId
+  playToySfx('click')
+}
+
+function selectCoinPackage(packId: string) {
+  selectedCoinPackageId.value = packId
+  playToySfx('click')
+}
+
+async function handleRechargeCoinPackage(pack?: ShopCoinPackageItem) {
+  const targetPack = pack || selectedCoinPackage.value
+  if (!targetPack) return
+  selectedCoinPackageId.value = targetPack.id
+
+  if (!isMercadoPagoConfigured.value) {
+    playToySfx('click')
+    triggerBanner(
+      '🔒 Recarga via Mercado Pago desativada até configurar as variáveis de ambiente (.env).',
+      'info'
+    )
+    return
+  }
+
+  if (!authStore.state.user) {
+    playToySfx('click')
+    isAuthModalOpen.value = true
+    triggerBanner(
+      'Faça login na sua conta Google para recarregar moedas via Mercado Pago.',
+      'warning'
+    )
+    return
+  }
+
+  if (isCreatingCoinOrder.value) return
+  isCreatingCoinOrder.value = true
+  playToySfx('click')
+
+  try {
+    const order = await authStore.createCoinOrder(targetPack.id, 'CARD')
+    const redirectUrl = order.checkoutUrl || order.ticketUrl
+    if (redirectUrl && typeof window !== 'undefined') {
+      window.open(redirectUrl, '_blank', 'noopener,noreferrer')
+      triggerBanner(
+        `Checkout Mercado Pago aberto para ${targetPack.title} (${targetPack.priceLabel})!`,
+        'success'
+      )
+    } else {
+      triggerBanner(
+        `Pedido ${order.orderId} criado! Aguardando confirmação do Mercado Pago.`,
+        'info'
+      )
+    }
+  } catch (err) {
+    triggerBanner(
+      err instanceof Error
+        ? err.message
+        : 'Não foi possível iniciar a recarga via Mercado Pago.',
+      'warning'
+    )
+  } finally {
+    isCreatingCoinOrder.value = false
+  }
+}
+
+function triggerShopPurchaseBurst() {
+  if (shopBurstTimer !== null) {
+    window.clearTimeout(shopBurstTimer)
+  }
+  shopPurchaseBurstActive.value = true
+  shopBurstTimer = window.setTimeout(() => {
+    shopPurchaseBurstActive.value = false
+    shopBurstTimer = null
+  }, 1100)
+}
+
+async function handleShopPrimaryAction() {
+  if (shopActiveTab.value === 'MOEDAS') {
+    await handleRechargeCoinPackage(selectedCoinPackage.value)
+    return
+  }
+
+  const item = selectedShopItem.value
+  if (!item) return
+
+  // Na loja apenas compramos os itens (não equipa pela loja)
+  if (isShopItemOwned(item)) {
+    return
+  }
+
+  const fullTitle = item.titleLine2
+    ? `${item.titleLine1} ${item.titleLine2}`
+    : item.titleLine1
+
+  const currentCoins = displayedShopCoins.value
+  if (currentCoins < item.price) {
+    playToySfx('click')
+    openCoinRechargeTab()
+    triggerBanner(
+      `🪙 Moedas insuficientes para ${fullTitle}! Confira a aba Recarga de Moedas.`,
+      'warning'
+    )
+    return
+  }
+
+  // Deduct coins & unlock skin (without equipping from the shop)
+  const nextCoins = Math.max(0, currentCoins - item.price)
+  localShopCoins.value = nextCoins
+  if (authStore.state.user) {
+    authStore.state.user.coins = nextCoins
+  }
+  if (!ownedShopItemIds.value.includes(item.id)) {
+    ownedShopItemIds.value = [...ownedShopItemIds.value, item.id]
+  }
+  saveLocalShopState()
+
+  if (item.playerSkinId) {
+    unlockLocalPlayerSkin(item.playerSkinId)
+    if (authStore.state.user) {
+      void authStore
+        .buySkinWithCoins(
+          'PLAYER_SKIN',
+          spriteIdToDbSkin(item.playerSkinId),
+          false
+        )
+        .catch(() => {})
+    }
+  } else if (item.blockSkinId) {
+    unlockLocalBlockSkin(item.blockSkinId)
+    if (authStore.state.user) {
+      void authStore
+        .buySkinWithCoins(
+          'BLOCK_SKIN',
+          spriteIdToDbBlockSkin(item.blockSkinId),
+          false
+        )
+        .catch(() => {})
+    }
+  }
+
+  playToySfx('victory')
+  triggerShopPurchaseBurst()
+  triggerBanner(
+    `🎉 Você comprou ${fullTitle}! Equipe na tela SKINS do menu.`,
+    'success'
+  )
+}
+
+function openShopScreen() {
+  selectedMenuCard.value = 'STORE'
+  shopActiveTab.value = 'TODOS'
+  selectedShopItemId.value = 'mago_sombrio'
+  selectedCoinPackageId.value = 'PACK_1200'
+  isBurgerMenuOpen.value = false
+  isSkinPickerOpen.value = false
+  isAuthModalOpen.value = false
+  isFriendsModalOpen.value = false
+  isGameModeModalOpen.value = false
+  isOptionsModalOpen.value = false
+  void authStore.fetchShopCatalog().catch(() => {})
+  playToySfx('click')
+  screenFlow.value = 'SHOP_SCREEN'
+}
+
+function closeShopScreen() {
+  playToySfx('click')
+  returnToMainMenu()
+}
+
 function handleFullscreenChange() {
   isFullscreen.value = Boolean(
     typeof document !== 'undefined' && document.fullscreenElement
@@ -1970,11 +2607,9 @@ async function toggleFullscreen() {
     if (!document.fullscreenElement) {
       await document.documentElement.requestFullscreen()
       isFullscreen.value = true
-      triggerBanner('🖥️ Modo Tela Cheia ativado!', 'info')
     } else {
       await document.exitFullscreen()
       isFullscreen.value = false
-      triggerBanner('🪟 Modo Janela ativado!', 'info')
     }
   } catch {
     triggerBanner(
@@ -1982,6 +2617,13 @@ async function toggleFullscreen() {
       'warning'
     )
   }
+}
+
+async function setFullscreenMode(targetFullscreen: boolean) {
+  if (typeof document === 'undefined') return
+  const currentlyFullscreen = Boolean(document.fullscreenElement)
+  if (currentlyFullscreen === targetFullscreen) return
+  await toggleFullscreen()
 }
 
 const controlsViewDevice = ref<'KEYBOARD' | 'GAMEPAD'>('KEYBOARD')
@@ -2032,16 +2674,13 @@ function toggleMuteAudio() {
   if (!optionsStore.state.isMuted) {
     playToySfx('click')
   }
-  triggerBanner(
-    optionsStore.state.isMuted
-      ? '🔇 Áudio silenciado!'
-      : '🔊 Áudio reativado!',
-    'info'
-  )
 }
 
 function toggleScreenShakeOption() {
   optionsStore.state.screenShakeEnabled = !optionsStore.state.screenShakeEnabled
+  if (towerInstance) {
+    towerInstance.screenShakeEnabled = optionsStore.state.screenShakeEnabled
+  }
   playToySfx('click')
 }
 
@@ -2053,6 +2692,9 @@ function toggleShowFpsPingOption() {
 function toggleShowOpponentHandlesOption() {
   optionsStore.state.showOpponentHandles =
     !optionsStore.state.showOpponentHandles
+  if (towerInstance) {
+    towerInstance.showPlayerNicks = optionsStore.state.showOpponentHandles
+  }
   playToySfx('click')
 }
 
@@ -2070,10 +2712,12 @@ function handleResetOptions() {
   if (towerInstance) {
     towerInstance.showGhostPiece = showGhostPiece.value
     towerInstance.setWindEnabled(windEnabled.value)
+    towerInstance.screenShakeEnabled = optionsStore.state.screenShakeEnabled
+    towerInstance.showPlayerNicks = optionsStore.state.showOpponentHandles
   }
   spriteRegistry.setDynamicTintEnabled(dynamicTintEnabled.value)
   triggerBanner(
-    '🔄 Todas as opções foram restauradas para o padrão!',
+    'Opções restauradas para o padrão!',
     'success'
   )
 }
@@ -2121,11 +2765,19 @@ function pollMenuGamepad() {
     } else if (screenFlow.value === 'MAIN_MENU') {
       if (selectedMenuCard.value === 'OPTIONS') {
         openOptionsScreen(false)
+      } else if (selectedMenuCard.value === 'STORE') {
+        openShopScreen()
+      } else if (selectedMenuCard.value === 'SKINS') {
+        openSkinsScreen()
       } else if (selectedMenuCard.value === 'MULTIPLAYER') {
         handleMultiplayerCardClick()
       } else {
         openLocalBattleLobby()
       }
+    } else if (screenFlow.value === 'SKINS_SCREEN' || isSkinPickerOpen.value) {
+      closeSkinsScreen()
+    } else if (screenFlow.value === 'SHOP_SCREEN') {
+      closeShopScreen()
     } else if (screenFlow.value === 'LOCAL_LOBBY' && !isGameModeModalOpen.value) {
       startGame()
     }
@@ -2275,9 +2927,10 @@ function computeLaneLayoutAndRanks(now: number) {
     return {
       laneOffsetX,
       slotIndex: r.slotIndex ?? 1,
-      handle: optionsStore.state.showOpponentHandles ? r.handle : '',
+      handle: '',
       customNick: r.customNick,
       skinSpriteId: dbSkinToSpriteId(r.equippedSkin),
+      blockSkinId: dbBlockSkinToSpriteId(r.equippedBlockSkin),
       rankBadge: rankByHandle.get(r.handle.toLowerCase()) || '2ND',
       towerHeight: r.towerHeight,
       lives: r.lives,
@@ -2367,7 +3020,12 @@ function startLoop() {
         ctx.clearRect(0, 0, canvasRef.value.width, canvasRef.value.height)
 
         if (screenFlow.value === 'IN_GAME' && towerInstance) {
-          if (!isDevModeOpen.value && !isOptionsModalOpen.value) {
+          if (
+            !isDevModeOpen.value &&
+            !isOptionsModalOpen.value &&
+            !isGameModeModalOpen.value &&
+            !isGamePaused.value
+          ) {
             towerInstance.update(dt)
           }
 
@@ -2436,6 +3094,18 @@ function startLoop() {
             }
           }
 
+          towerInstance.screenShakeEnabled =
+            optionsStore.state.screenShakeEnabled
+          towerInstance.showPlayerNicks =
+            optionsStore.state.showOpponentHandles
+          if (!isOnlineMultiplayerMatch.value) {
+            towerInstance.playerNick =
+              authStore.state.user?.customNick ||
+              authStore.state.user?.displayName ||
+              fallbackLobbySlots.value[0]?.customNick ||
+              'Jogador'
+          }
+
           towerInstance.render(
             ctx,
             canvasRef.value.width,
@@ -2463,7 +3133,9 @@ function startLoop() {
               showSideMascots:
                 screenFlow.value !== 'MULTIPLAYER_LOBBY' &&
                 screenFlow.value !== 'LOCAL_LOBBY' &&
-                screenFlow.value !== 'OPTIONS_SCREEN',
+                screenFlow.value !== 'SKINS_SCREEN' &&
+                screenFlow.value !== 'OPTIONS_SCREEN' &&
+                screenFlow.value !== 'SHOP_SCREEN',
             }
           )
         }
@@ -2570,13 +3242,15 @@ function pollGamepadInput(nowMs: number) {
     return
   }
 
-  // Botão Options: pausa/abre Opções durante a partida
+  // Botão Options: pausa/despausa durante a partida
   if (justOptions) {
     if (screenFlow.value === 'IN_GAME') {
       if (isOptionsModalOpen.value) {
         closeOptionsScreen()
+      } else if (isGameModeModalOpen.value) {
+        closeGameModeModal()
       } else {
-        openOptionsScreen(true)
+        togglePauseGame()
       }
       return
     } else if (screenFlow.value === 'OPTIONS_SCREEN') {
@@ -2589,7 +3263,9 @@ function pollGamepadInput(nowMs: number) {
     screenFlow.value !== 'IN_GAME' ||
     !towerInstance ||
     isDevModeOpen.value ||
-    isOptionsModalOpen.value
+    isOptionsModalOpen.value ||
+    isGameModeModalOpen.value ||
+    isGamePaused.value
   ) {
     if (gamepadWasSoftDropping && towerInstance) {
       towerInstance.isSoftDropping = false
@@ -2646,6 +3322,18 @@ function pollGamepadInput(nowMs: number) {
   } else if (justDarkMagic) {
     towerInstance.activateAttackPower()
     playToySfx('power')
+  }
+}
+
+function togglePauseGame(forceState?: boolean) {
+  if (screenFlow.value !== 'IN_GAME') return
+  const nextState =
+    forceState !== undefined ? forceState : !isGamePaused.value
+  isGamePaused.value = nextState
+  isSkinPickerOpen.value = false
+  playToySfx('click')
+  if (nextState && towerInstance) {
+    towerInstance.isSoftDropping = false
   }
 }
 
@@ -2787,6 +3475,37 @@ function handleKeyDown(e: KeyboardEvent) {
     return
   }
 
+  // Tela de SKINS (SKINS_SCREEN ou Modal de Skins no Hub Multiplayer — Coluna Esquerda = Sua Skin, Coluna Direita = Skin dos Blocos)
+  if (screenFlow.value === 'SKINS_SCREEN' || isSkinPickerOpen.value) {
+    if (e.code === 'Escape' || e.code === 'Enter' || e.code === 'Space') {
+      e.preventDefault()
+      closeSkinsScreen()
+    } else if (e.code === 'ArrowLeft' || e.code === 'KeyA') {
+      e.preventDefault()
+      selectedSkinsColumn.value = 'PLAYER'
+      playToySfx('move')
+    } else if (e.code === 'ArrowRight' || e.code === 'KeyD') {
+      e.preventDefault()
+      selectedSkinsColumn.value = 'BLOCK'
+      playToySfx('move')
+    } else if (e.code === 'ArrowUp' || e.code === 'KeyW') {
+      e.preventDefault()
+      if (selectedSkinsColumn.value === 'PLAYER') {
+        cyclePlayerSkinOption(-1)
+      } else {
+        cycleBlockSkinOption(-1)
+      }
+    } else if (e.code === 'ArrowDown' || e.code === 'KeyS') {
+      e.preventDefault()
+      if (selectedSkinsColumn.value === 'PLAYER') {
+        cyclePlayerSkinOption(1)
+      } else {
+        cycleBlockSkinOption(1)
+      }
+    }
+    return
+  }
+
   // Tela de Lobby do Multiplayer: Escape fecha o popup de amigos (se aberto) ou retorna ao MAIN_MENU
   if (screenFlow.value === 'MULTIPLAYER_LOBBY') {
     if (e.code === 'Escape') {
@@ -2800,32 +3519,87 @@ function handleKeyDown(e: KeyboardEvent) {
     return
   }
 
-  // Menu 2: MAIN_MENU — Setas alternam entre BATALHA LOCAL, MULTIPLAYER e OPÇÕES; Enter/Space confirma; Escape volta ao TITLE_SCREEN
+  // Tela de LOJA (SHOP_SCREEN)
+  if (screenFlow.value === 'SHOP_SCREEN') {
+    const items = currentShopShelfItems.value
+    const curIdx = Math.max(
+      0,
+      items.findIndex((i) => i.id === selectedShopItemId.value)
+    )
+    if (e.code === 'Escape') {
+      e.preventDefault()
+      closeShopScreen()
+    } else if (e.code === 'Enter' || e.code === 'Space') {
+      e.preventDefault()
+      void handleShopPrimaryAction()
+    } else if (e.code === 'ArrowRight' || e.code === 'KeyD') {
+      e.preventDefault()
+      const next = items[(curIdx + 1) % items.length]
+      if (next) selectShopItem(next.id)
+    } else if (e.code === 'ArrowLeft' || e.code === 'KeyA') {
+      e.preventDefault()
+      const prev = items[(curIdx - 1 + items.length) % items.length]
+      if (prev) selectShopItem(prev.id)
+    } else if (e.code === 'ArrowDown' || e.code === 'KeyS') {
+      e.preventDefault()
+      const next = items[(curIdx + 3) % items.length]
+      if (next) selectShopItem(next.id)
+    } else if (e.code === 'ArrowUp' || e.code === 'KeyW') {
+      e.preventDefault()
+      const prev = items[(curIdx - 3 + items.length) % items.length]
+      if (prev) selectShopItem(prev.id)
+    }
+    return
+  }
+
+  // Menu 2: MAIN_MENU — 3 cartões no topo (LOCAL, MULTIPLAYER, SKINS) e 2 embaixo (LOJA, OPÇÕES)
   if (screenFlow.value === 'MAIN_MENU') {
     if (e.code === 'ArrowLeft' || e.code === 'KeyA') {
       e.preventDefault()
-      selectedMenuCard.value = 'LOCAL'
+      if (selectedMenuCard.value === 'SKINS') {
+        selectedMenuCard.value = 'MULTIPLAYER'
+      } else if (selectedMenuCard.value === 'MULTIPLAYER') {
+        selectedMenuCard.value = 'LOCAL'
+      } else if (selectedMenuCard.value === 'OPTIONS') {
+        selectedMenuCard.value = 'STORE'
+      }
       playToySfx('move')
     } else if (e.code === 'ArrowRight' || e.code === 'KeyD') {
       e.preventDefault()
-      selectedMenuCard.value =
-        selectedMenuCard.value === 'OPTIONS' ? 'OPTIONS' : 'MULTIPLAYER'
+      if (selectedMenuCard.value === 'LOCAL') {
+        selectedMenuCard.value = 'MULTIPLAYER'
+      } else if (selectedMenuCard.value === 'MULTIPLAYER') {
+        selectedMenuCard.value = 'SKINS'
+      } else if (selectedMenuCard.value === 'STORE') {
+        selectedMenuCard.value = 'OPTIONS'
+      }
       playToySfx('move')
     } else if (e.code === 'ArrowDown' || e.code === 'KeyS') {
       e.preventDefault()
-      selectedMenuCard.value = 'OPTIONS'
+      if (selectedMenuCard.value === 'LOCAL') {
+        selectedMenuCard.value = 'STORE'
+      } else if (selectedMenuCard.value === 'SKINS') {
+        selectedMenuCard.value = 'OPTIONS'
+      } else if (selectedMenuCard.value === 'MULTIPLAYER') {
+        selectedMenuCard.value = 'STORE'
+      }
       playToySfx('move')
     } else if (e.code === 'ArrowUp' || e.code === 'KeyW') {
       e.preventDefault()
-      selectedMenuCard.value =
-        selectedMenuCard.value === 'OPTIONS'
-          ? 'MULTIPLAYER'
-          : selectedMenuCard.value
+      if (selectedMenuCard.value === 'STORE') {
+        selectedMenuCard.value = 'LOCAL'
+      } else if (selectedMenuCard.value === 'OPTIONS') {
+        selectedMenuCard.value = 'SKINS'
+      }
       playToySfx('move')
     } else if (e.code === 'Enter' || e.code === 'Space') {
       e.preventDefault()
       if (selectedMenuCard.value === 'MULTIPLAYER') {
         handleMultiplayerCardClick()
+      } else if (selectedMenuCard.value === 'SKINS') {
+        openSkinsScreen()
+      } else if (selectedMenuCard.value === 'STORE') {
+        openShopScreen()
       } else if (selectedMenuCard.value === 'OPTIONS') {
         openOptionsScreen(false)
       } else {
@@ -2855,6 +3629,9 @@ function handleKeyDown(e: KeyboardEvent) {
     (snapshot.value.state === 'GAME_OVER' &&
       (!isOnlineMultiplayerMatch.value || !hasAliveRemoteOpponents.value))
   ) {
+    if (isEndTowerShowcaseActive.value) {
+      return
+    }
     if (
       e.code === 'Enter' ||
       e.code === 'Space' ||
@@ -2867,18 +3644,37 @@ function handleKeyDown(e: KeyboardEvent) {
     return
   }
 
+  if (e.code === 'Escape' || e.code === 'KeyP') {
+    e.preventDefault()
+    if (e.code === 'Escape' && isSkinPickerOpen.value) {
+      isSkinPickerOpen.value = false
+      return
+    }
+    togglePauseGame()
+    return
+  }
+
   if (optionsStore.matchesAction('restartMatch', e.code)) {
     e.preventDefault()
     if (
       !isOnlineMultiplayerMatch.value ||
       Object.keys(multiplayerClient.state.remoteLanes).length === 0
     ) {
+      isGamePaused.value = false
       restartMatch(true)
     }
     return
   }
 
-  // While Developer Mode or Options Modal is open, the game is paused: ignore piece movement keys
+  // While Game Paused, Developer Mode, or Options Modal is open, ignore piece movement keys
+  if (isGamePaused.value) {
+    if (e.code === 'Enter' || e.code === 'Space') {
+      e.preventDefault()
+      togglePauseGame(false)
+    }
+    return
+  }
+
   if (isDevModeOpen.value || isOptionsModalOpen.value) {
     return
   }
@@ -2935,6 +3731,8 @@ function restartMatch(
   reRollRandomMode: boolean = true
 ) {
   if (!towerInstance) return
+  clearEndTowerShowcase()
+  isGamePaused.value = false
   const isSoloOrOffline =
     !isOnlineMultiplayerMatch.value ||
     Object.keys(multiplayerClient.state.remoteLanes).length === 0
@@ -3054,6 +3852,9 @@ function useAttackPower() {
 
 function triggerDevPower(powerId: PowerId) {
   if (!towerInstance) return
+  const cfg = getPowerConfig(powerId)
+  towerInstance.mascotCastAnimMs = 950
+  towerInstance.mascotCastCategory = cfg?.category || 'POSITIVE'
   towerInstance.triggerPowerEffect(powerId)
 }
 
@@ -3099,16 +3900,107 @@ function toggleDynamicTint() {
 }
 
 function selectPlayerSkin(skinId: string) {
+  if (!isPlayerSkinUnlocked(skinId)) {
+    playToySfx('click')
+    triggerBanner(
+      '🔒 Esta skin de personagem está bloqueada! Adquira na Loja com suas moedas para liberar na sua conta.',
+      'warning'
+    )
+    return
+  }
   spriteRegistry.setActivePlayerSkin(skinId)
   activePlayerSkinId.value = spriteRegistry.getActivePlayerSkinId()
-  isSkinPickerOpen.value = false
+  if (towerInstance) {
+    towerInstance.mascotCastAnimMs = 950
+    towerInstance.mascotCastCategory = 'POSITIVE'
+  }
+  if (fallbackLobbySlots.value[0]) {
+    fallbackLobbySlots.value[0].skinSpriteId = skinId
+  }
   void authStore.syncEquippedSkinBySpriteId(skinId)
+  multiplayerClient.updateEquippedSkin(spriteIdToDbSkin(skinId), undefined)
   playToySfx('click')
   const chosen = spriteRegistry.getActivePlayerSkin()
   triggerBanner(
-    `Skin do Personagem alterada para ${chosen ? chosen.name : skinId}!`,
+    `🎭 Sua Skin alterada para ${chosen ? chosen.name : skinId}!`,
     'success'
   )
+}
+
+function selectBlockSkin(skinId: string) {
+  if (!isBlockSkinUnlocked(skinId)) {
+    playToySfx('click')
+    triggerBanner(
+      '🔒 Esta skin de blocos está bloqueada! Adquira na Loja com suas moedas para liberar na sua conta.',
+      'warning'
+    )
+    return
+  }
+  spriteRegistry.setActiveBlockSkin(skinId)
+  activeBlockSkinId.value = spriteRegistry.getActiveBlockSkinId()
+  void authStore.syncEquippedBlockSkinById(skinId)
+  multiplayerClient.updateEquippedSkin(
+    undefined,
+    spriteIdToDbBlockSkin(skinId)
+  )
+  playToySfx('click')
+  const chosen = spriteRegistry.getActiveBlockSkin()
+  triggerBanner(
+    `${chosen?.emoji || '🧱'} Skin dos Blocos alterada para ${
+      chosen ? chosen.name : skinId
+    }!`,
+    'success'
+  )
+}
+
+function cyclePlayerSkinOption(dir: -1 | 1) {
+  selectedSkinsColumn.value = 'PLAYER'
+  const unlockedList = playerSkins.value.filter((s) =>
+    isPlayerSkinUnlocked(s.id)
+  )
+  if (unlockedList.length <= 1) {
+    playToySfx('click')
+    triggerBanner(
+      '🔒 Apenas a skin inicial (Mago Normal) está liberada! Adquira novas skins na Loja com suas moedas.',
+      'info'
+    )
+    return
+  }
+  const curIdx = Math.max(
+    0,
+    unlockedList.findIndex((s) => s.id === activePlayerSkinId.value)
+  )
+  const nextIdx =
+    (curIdx + dir + unlockedList.length) % unlockedList.length
+  const nextSkin = unlockedList[nextIdx]
+  if (nextSkin) {
+    selectPlayerSkin(nextSkin.id)
+  }
+}
+
+function cycleBlockSkinOption(dir: -1 | 1) {
+  selectedSkinsColumn.value = 'BLOCK'
+  const unlockedList = blockSkins.value.filter((s) =>
+    isBlockSkinUnlocked(s.id)
+  )
+  if (unlockedList.length <= 1) {
+    playToySfx('click')
+    triggerBanner(
+      '🔒 Apenas as peças iniciais (Plástico Normal) estão liberadas! Adquira novas skins na Loja com suas moedas.',
+      'info'
+    )
+    return
+  }
+  const curIdx = Math.max(
+    0,
+    unlockedList.findIndex((s) => s.id === activeBlockSkinId.value)
+  )
+  const nextIdx =
+    (curIdx + dir + unlockedList.length) % unlockedList.length
+  const nextSkin = unlockedList[nextIdx]
+  if (nextSkin) {
+    selectBlockSkin(nextSkin.id)
+  }
 }
 
 function selectBasePreset(presetId: BasePresetId | null) {
@@ -3157,9 +4049,11 @@ onMounted(() => {
   spriteRegistry.setDynamicTintEnabled(optionsStore.state.dynamicTintEnabled)
   // Anti-Hibernation Wake-up Ping for Render Socket.io Server on initial menu load
   multiplayerClient.wakeUpSocketServer()
+  void authStore.fetchShopCatalog()
   void authStore.restoreSession().then((restoredUser) => {
+    activePlayerSkinId.value = spriteRegistry.getActivePlayerSkinId()
+    activeBlockSkinId.value = spriteRegistry.getActiveBlockSkinId()
     if (restoredUser) {
-      activePlayerSkinId.value = spriteRegistry.getActivePlayerSkinId()
       optionsNickInput.value = restoredUser.customNick || restoredUser.displayName
       personalBestScore.value = Math.max(
         personalBestScore.value,
@@ -3220,6 +4114,7 @@ onMounted(() => {
       }
     },
     onGameOver: (payload) => {
+      towerInstance?.freezeTowerForMatchEnd()
       playToySfx('victory')
       if (payload.isTiebreaker) {
         triggerBanner(
@@ -3234,6 +4129,7 @@ onMounted(() => {
       )
     },
     onReturnToLobby: (_room: RoomStateDTO) => {
+      clearEndTowerShowcase()
       isOnlineMultiplayerMatch.value = false
       if (towerInstance) {
         towerInstance.rankBadge = null
@@ -3251,6 +4147,8 @@ onMounted(() => {
     spriteSlots.value = [...spriteRegistry.getAllSlots()]
     playerSkins.value = [...spriteRegistry.getPlayerSkins()]
     activePlayerSkinId.value = spriteRegistry.getActivePlayerSkinId()
+    blockSkins.value = [...spriteRegistry.getBlockSkins()]
+    activeBlockSkinId.value = spriteRegistry.getActiveBlockSkinId()
     forcePlaceholders.value = spriteRegistry.forcePlaceholders
     menuSprites.value = { ...spriteRegistry.getMenuSprites() }
   })
@@ -3321,6 +4219,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  clearEndTowerShowcase()
   if (unsubscribeSprites) unsubscribeSprites()
   if (rafId !== null) cancelAnimationFrame(rafId)
   window.removeEventListener('resize', handleResize)
@@ -3339,6 +4238,14 @@ onUnmounted(() => {
       :height="canvasHeight"
       class="fullscreen-canvas"
     />
+
+    <!-- Contador de FPS discreto no topo da tela (apenas o número, sem box) -->
+    <div
+      v-if="optionsStore.state.showFpsPing"
+      class="discreet-fps-counter mono"
+    >
+      {{ liveFps }}
+    </div>
 
     <!-- =================================================================== -->
     <!-- MENU 1: ESTADO TITLE_SCREEN (LOGO + TORRE COM BALANÇO + CTA)        -->
@@ -3467,8 +4374,9 @@ onUnmounted(() => {
               </button>
             </div>
 
-            <!-- Botão 1: AMIGOS (abre a lista de amigos adicionados) -->
+            <!-- Botão 1: AMIGOS (somente quando logado) -->
             <button
+              v-if="authStore.state.user"
               type="button"
               class="burger-menu-action-btn burger-menu-action-btn--friends"
               @click="openFriendsFromBurger('list')"
@@ -3485,8 +4393,9 @@ onUnmounted(() => {
               </span>
             </button>
 
-            <!-- Botão 2: ENVIAR CONVITE (abre e foca o envio de convite de amizade) -->
+            <!-- Botão 2: ENVIAR CONVITE (somente quando logado) -->
             <button
+              v-if="authStore.state.user"
               type="button"
               class="burger-menu-action-btn burger-menu-action-btn--invite"
               @click="openFriendsFromBurger('invite')"
@@ -3521,7 +4430,11 @@ onUnmounted(() => {
               v-else
               type="button"
               class="burger-menu-action-btn burger-menu-action-btn--login"
-              @click="openFriendsFromBurger('list')"
+              @click="
+                isBurgerMenuOpen = false;
+                authStore.state.error = null;
+                isAuthModalOpen = true;
+              "
             >
               <span class="burger-menu-action-icon">🔑</span>
               <span class="burger-menu-action-text">CONECTAR GOOGLE</span>
@@ -3811,11 +4724,132 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <!-- BLOCO 3: SKINS (BLOQUEADO) -->
+          <!-- BLOCO 3: SKINS (ATIVO) -->
           <div
-            class="menu-brick-card menu-brick-card--locked"
-            aria-disabled="true"
+            role="button"
+            tabindex="0"
+            class="menu-brick-card menu-brick-card--active"
+            :class="{
+              'menu-brick-card--selected': selectedMenuCard === 'SKINS',
+            }"
+            @mouseenter="selectedMenuCard = 'SKINS'"
+            @focus="selectedMenuCard = 'SKINS'"
+            @click="openSkinsScreen()"
+            @keydown.enter.prevent="openSkinsScreen()"
           >
+            <!-- 4 Cantoneiras Amarelas estilo Bloco de Montar -->
+            <svg
+              class="menu-corner-bracket menu-corner-bracket--tl"
+              viewBox="0 0 64 64"
+              aria-hidden="true"
+            >
+              <rect
+                x="8"
+                y="2"
+                width="16"
+                height="8"
+                rx="3"
+                fill="#F59E0B"
+                stroke="#1E1B4B"
+                stroke-width="3.5"
+              />
+              <rect
+                x="30"
+                y="2"
+                width="16"
+                height="8"
+                rx="3"
+                fill="#F59E0B"
+                stroke="#1E1B4B"
+                stroke-width="3.5"
+              />
+              <path
+                d="M 4,10 H 54 V 24 H 18 V 56 H 4 Z"
+                fill="#FBBF24"
+                stroke="#1E1B4B"
+                stroke-width="3.8"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M 7,13 H 50 V 17 H 14 V 52 H 7 Z"
+                fill="#FDE68A"
+              />
+            </svg>
+
+            <svg
+              class="menu-corner-bracket menu-corner-bracket--tr"
+              viewBox="0 0 64 64"
+              aria-hidden="true"
+            >
+              <rect
+                x="18"
+                y="2"
+                width="16"
+                height="8"
+                rx="3"
+                fill="#F59E0B"
+                stroke="#1E1B4B"
+                stroke-width="3.5"
+              />
+              <rect
+                x="40"
+                y="2"
+                width="16"
+                height="8"
+                rx="3"
+                fill="#F59E0B"
+                stroke="#1E1B4B"
+                stroke-width="3.5"
+              />
+              <path
+                d="M 10,10 H 60 V 56 H 46 V 24 H 10 Z"
+                fill="#FBBF24"
+                stroke="#1E1B4B"
+                stroke-width="3.8"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M 14,13 H 56 V 52 H 50 V 17 H 14 Z"
+                fill="#FDE68A"
+              />
+            </svg>
+
+            <svg
+              class="menu-corner-bracket menu-corner-bracket--bl"
+              viewBox="0 0 64 64"
+              aria-hidden="true"
+            >
+              <path
+                d="M 4,8 H 18 V 44 H 54 V 58 H 4 Z"
+                fill="#FBBF24"
+                stroke="#1E1B4B"
+                stroke-width="3.8"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M 7,12 H 14 V 48 H 50 V 53 H 7 Z"
+                fill="#FDE68A"
+              />
+            </svg>
+
+            <svg
+              class="menu-corner-bracket menu-corner-bracket--br"
+              viewBox="0 0 64 64"
+              aria-hidden="true"
+            >
+              <path
+                d="M 46,8 H 60 V 58 H 10 V 44 H 46 Z"
+                fill="#FBBF24"
+                stroke="#1E1B4B"
+                stroke-width="3.8"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M 50,12 H 56 V 53 H 14 V 48 H 50 Z"
+                fill="#FDE68A"
+              />
+            </svg>
+
             <div class="menu-brick-card-inner">
               <img
                 :src="menuSprites.screen_skins"
@@ -3827,12 +4861,149 @@ onUnmounted(() => {
                 SKINS
               </span>
             </div>
-            <div class="menu-coming-soon-ribbon">
-              <span>EM BREVE</span>
+          </div>
+
+          <!-- BLOCO 4: LOJA (ATIVA — BASEADA EM screen_store.png) -->
+          <div
+            role="button"
+            tabindex="0"
+            class="menu-brick-card menu-brick-card--active"
+            :class="{
+              'menu-brick-card--selected': selectedMenuCard === 'STORE',
+            }"
+            title="Abrir Loja Toy Tower"
+            @mouseenter="selectedMenuCard = 'STORE'"
+            @focus="selectedMenuCard = 'STORE'"
+            @click="openShopScreen"
+            @keydown.enter.prevent="openShopScreen"
+          >
+            <!-- 4 Cantoneiras Amarelas estilo Bloco de Montar -->
+            <svg
+              class="menu-corner-bracket menu-corner-bracket--tl"
+              viewBox="0 0 64 64"
+              aria-hidden="true"
+            >
+              <rect
+                x="8"
+                y="2"
+                width="16"
+                height="8"
+                rx="3"
+                fill="#F59E0B"
+                stroke="#1E1B4B"
+                stroke-width="3.5"
+              />
+              <rect
+                x="30"
+                y="2"
+                width="16"
+                height="8"
+                rx="3"
+                fill="#F59E0B"
+                stroke="#1E1B4B"
+                stroke-width="3.5"
+              />
+              <path
+                d="M 4,10 H 54 V 24 H 18 V 56 H 4 Z"
+                fill="#FBBF24"
+                stroke="#1E1B4B"
+                stroke-width="3.8"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M 7,13 H 50 V 17 H 14 V 52 H 7 Z"
+                fill="#FDE68A"
+              />
+            </svg>
+
+            <svg
+              class="menu-corner-bracket menu-corner-bracket--tr"
+              viewBox="0 0 64 64"
+              aria-hidden="true"
+            >
+              <rect
+                x="18"
+                y="2"
+                width="16"
+                height="8"
+                rx="3"
+                fill="#F59E0B"
+                stroke="#1E1B4B"
+                stroke-width="3.5"
+              />
+              <rect
+                x="40"
+                y="2"
+                width="16"
+                height="8"
+                rx="3"
+                fill="#F59E0B"
+                stroke="#1E1B4B"
+                stroke-width="3.5"
+              />
+              <path
+                d="M 10,10 H 60 V 56 H 46 V 24 H 10 Z"
+                fill="#FBBF24"
+                stroke="#1E1B4B"
+                stroke-width="3.8"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M 14,13 H 56 V 52 H 50 V 17 H 14 Z"
+                fill="#FDE68A"
+              />
+            </svg>
+
+            <svg
+              class="menu-corner-bracket menu-corner-bracket--bl"
+              viewBox="0 0 64 64"
+              aria-hidden="true"
+            >
+              <path
+                d="M 4,8 H 18 V 44 H 54 V 58 H 4 Z"
+                fill="#FBBF24"
+                stroke="#1E1B4B"
+                stroke-width="3.8"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M 7,12 H 14 V 48 H 50 V 53 H 7 Z"
+                fill="#FDE68A"
+              />
+            </svg>
+
+            <svg
+              class="menu-corner-bracket menu-corner-bracket--br"
+              viewBox="0 0 64 64"
+              aria-hidden="true"
+            >
+              <path
+                d="M 46,8 H 60 V 58 H 10 V 44 H 46 Z"
+                fill="#FBBF24"
+                stroke="#1E1B4B"
+                stroke-width="3.8"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M 50,12 H 56 V 53 H 14 V 48 H 50 Z"
+                fill="#FDE68A"
+              />
+            </svg>
+
+            <div class="menu-brick-card-inner">
+              <img
+                :src="menuSprites.screen_store"
+                alt="Loja"
+                class="menu-brick-card-img"
+                draggable="false"
+              />
+              <span class="menu-brick-card-title menu-brick-card-title--store">
+                LOJA
+              </span>
             </div>
           </div>
 
-          <!-- BLOCO 4: OPÇÕES (ATIVO) -->
+          <!-- BLOCO 5: OPÇÕES (ATIVO) -->
           <div
             role="button"
             tabindex="0"
@@ -3975,6 +5146,1253 @@ onUnmounted(() => {
     </transition>
 
     <!-- =================================================================== -->
+    <!-- TELA DA LOJA ("LOJA TOY TOWER"): ESTANTE LEGO + BANCA DOS VENDEDORES -->
+    <!-- =================================================================== -->
+    <transition name="menu-fade-300">
+      <div
+        v-if="screenFlow === 'SHOP_SCREEN'"
+        class="selecione-modo-screen shop-screen-overlay"
+      >
+        <!-- Partículas mágicas de ambiente ao fundo da Loja -->
+        <div class="shop-ambient-particles" aria-hidden="true">
+          <span
+            v-for="n in 14"
+            :key="`shop-bg-mote-${n}`"
+            class="shop-ambient-mote"
+            :class="`shop-ambient-mote--${n}`"
+          ></span>
+        </div>
+
+        <!-- TOPO DA LOJA: Botão X LEGO, Título "LOJA TOY TOWER" e Contador de Moedas LEGO -->
+        <header class="shop-top-header">
+          <!-- Botão Fechar (X) estilo Peça LEGO Vermelha -->
+          <button
+            type="button"
+            class="shop-close-lego-btn"
+            title="Voltar ao Menu Principal (Esc)"
+            @click="closeShopScreen"
+          >
+            <span class="shop-close-lego-studs" aria-hidden="true">
+              <span></span>
+              <span></span>
+            </span>
+            <span class="shop-close-lego-body">
+              <span class="shop-close-lego-x">X</span>
+            </span>
+          </button>
+
+          <!-- Título Central: LOJA (Amarelo) TOY (Azul) TOWER (Vermelho) -->
+          <h1 class="shop-header-title" aria-label="Loja Toy Tower">
+            <span class="shop-title-part shop-title-part--loja">LOJA</span>
+            <span class="shop-title-part shop-title-part--toy">TOY</span>
+            <span class="shop-title-part shop-title-part--tower">TOWER</span>
+          </h1>
+
+          <!-- Contador de Moedas estilo Bloco LEGO Dourado (Clica para abrir Recarga de Moedas) -->
+          <button
+            type="button"
+            class="shop-coin-lego-counter"
+            :class="{
+              'shop-coin-lego-counter--active': shopActiveTab === 'MOEDAS',
+            }"
+            title="Recarga de Moedas"
+            @click="openCoinRechargeTab"
+          >
+            <span class="shop-coin-side-studs" aria-hidden="true">
+              <span></span>
+              <span></span>
+            </span>
+            <span class="shop-coin-top-studs" aria-hidden="true">
+              <span></span>
+              <span></span>
+              <span></span>
+              <span></span>
+            </span>
+            <span class="shop-coin-brick-body">
+              <span class="shop-coin-brick-left-cap" aria-hidden="true"></span>
+              <span class="shop-coin-inset-box">
+                <span class="shop-coin-amount">
+                  {{ formatShopCoins(displayedShopCoins) }}
+                </span>
+                <!-- Ícone de Moeda Dourada com Coroa -->
+                <svg
+                  class="shop-coin-svg-icon"
+                  viewBox="0 0 36 36"
+                  aria-hidden="true"
+                >
+                  <circle
+                    cx="18"
+                    cy="18"
+                    r="15"
+                    fill="#F59E0B"
+                    stroke="#14111F"
+                    stroke-width="3.2"
+                  />
+                  <circle
+                    cx="18"
+                    cy="18"
+                    r="11"
+                    fill="#FBBF24"
+                    stroke="#B45309"
+                    stroke-width="2"
+                  />
+                  <path
+                    d="M 11,22 L 12.5,14 L 15.8,17.2 L 18,12.5 L 20.2,17.2 L 23.5,14 L 25,22 Z"
+                    fill="#FDE047"
+                    stroke="#92400E"
+                    stroke-width="1.5"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+              </span>
+            </span>
+          </button>
+        </header>
+
+        <!-- CORPO PRINCIPAL DA LOJA: ESQUERDA (Vitrine LEGO) + DIREITA (Banca Animada) -->
+        <div class="shop-main-content">
+          <!-- =============================================================== -->
+          <!-- PAINEL ESQUERDO: MOLDURA LEGO COM PINOS + ABAS + CONTEÚDO        -->
+          <!-- =============================================================== -->
+          <section class="shop-left-lego-panel" aria-label="Catálogo da Loja">
+            <!-- Pinos superiores da moldura LEGO -->
+            <div class="shop-frame-top-studs" aria-hidden="true">
+              <span v-for="s in 14" :key="`top-stud-${s}`"></span>
+            </div>
+
+            <div class="shop-frame-outer-box">
+              <!-- Barra Superior da Moldura com Pinos Circulares -->
+              <div class="shop-frame-beam-top" aria-hidden="true">
+                <span
+                  v-for="s in 14"
+                  :key="`beam-top-stud-${s}`"
+                  class="shop-stud-circle"
+                ></span>
+              </div>
+
+              <!-- Coluna Lateral Esquerda (Azul -> Laranja -> Azul -> Laranja) -->
+              <div class="shop-frame-col shop-frame-col--left" aria-hidden="true">
+                <div class="shop-frame-segment shop-frame-segment--blue-top">
+                  <span v-for="s in 3" :key="`l-bt-${s}`" class="shop-stud-circle"></span>
+                </div>
+                <div class="shop-frame-segment shop-frame-segment--orange-mid">
+                  <span
+                    v-for="s in 6"
+                    :key="`l-om-${s}`"
+                    class="shop-stud-circle shop-stud-circle--orange"
+                  ></span>
+                </div>
+                <div class="shop-frame-segment shop-frame-segment--blue-bot">
+                  <span v-for="s in 4" :key="`l-bb-${s}`" class="shop-stud-circle"></span>
+                </div>
+              </div>
+
+              <!-- Coluna Lateral Direita (Azul -> Laranja -> Azul -> Laranja) -->
+              <div class="shop-frame-col shop-frame-col--right" aria-hidden="true">
+                <div class="shop-frame-segment shop-frame-segment--blue-top">
+                  <span v-for="s in 3" :key="`r-bt-${s}`" class="shop-stud-circle"></span>
+                </div>
+                <div class="shop-frame-segment shop-frame-segment--orange-mid">
+                  <span
+                    v-for="s in 6"
+                    :key="`r-om-${s}`"
+                    class="shop-stud-circle shop-stud-circle--orange"
+                  ></span>
+                </div>
+                <div class="shop-frame-segment shop-frame-segment--blue-bot">
+                  <span v-for="s in 4" :key="`r-bb-${s}`" class="shop-stud-circle"></span>
+                </div>
+              </div>
+
+              <!-- Interior do Armário LEGO -->
+              <div class="shop-cabinet-inner">
+                <!-- 3 Abas Reais usando os Sprites de Blocos Dinâmicos (MAGOS, BLOCOS, MOEDAS) -->
+                <nav class="shop-category-tabs" aria-label="Categorias da Loja">
+                  <button
+                    type="button"
+                    class="shop-tab-brick"
+                    :class="{ 'shop-tab-brick--active': shopActiveTab === 'MAGOS' }"
+                    @click="selectShopTab('MAGOS')"
+                  >
+                    <img
+                      :src="menuSprites.button_clean_purple || menuSprites.button_clean"
+                      alt=""
+                      class="shop-tab-brick-img"
+                      aria-hidden="true"
+                      draggable="false"
+                    />
+                    <span class="shop-tab-brick-label">MAGOS</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    class="shop-tab-brick"
+                    :class="{ 'shop-tab-brick--active': shopActiveTab === 'BLOCOS' }"
+                    @click="selectShopTab('BLOCOS')"
+                  >
+                    <img
+                      :src="menuSprites.button_clean_orange || menuSprites.button_clean"
+                      alt=""
+                      class="shop-tab-brick-img"
+                      aria-hidden="true"
+                      draggable="false"
+                    />
+                    <span class="shop-tab-brick-label">BLOCOS</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    class="shop-tab-brick"
+                    :class="{ 'shop-tab-brick--active': shopActiveTab === 'MOEDAS' }"
+                    @click="selectShopTab('MOEDAS')"
+                  >
+                    <img
+                      :src="menuSprites.button_clean_yellow || menuSprites.button_clean"
+                      alt=""
+                      class="shop-tab-brick-img"
+                      aria-hidden="true"
+                      draggable="false"
+                    />
+                    <span class="shop-tab-brick-label">MOEDAS</span>
+                  </button>
+                </nav>
+
+                <!-- ========================================================= -->
+                <!-- VISÃO 1: ABA "RECARGA DE MOEDAS" (GRID 3x2 DE PACOTES)    -->
+                <!-- ========================================================= -->
+                <div
+                  v-if="shopActiveTab === 'MOEDAS'"
+                  class="shop-coins-recharge-view"
+                >
+                  <div class="shop-coins-recharge-header">
+                    <span class="shop-coins-recharge-title">RECARGA DE MOEDAS</span>
+                    <span
+                      v-if="!isMercadoPagoConfigured"
+                      class="shop-coins-mp-status-pill"
+                      title="Configure MERCADOPAGO_ACCESS_TOKEN e VITE_MERCADOPAGO_PUBLIC_KEY no .env para ativar compras reais"
+                    >
+                      MERCADO PAGO DESATIVADO
+                    </span>
+                  </div>
+
+                  <div class="shop-coins-grid">
+                    <div
+                      v-for="pack in SHOP_COIN_PACKAGES"
+                      :key="pack.id"
+                      class="shop-coin-pack-card"
+                      :class="[
+                        `shop-coin-pack-card--${pack.cardVariant}`,
+                        {
+                          'shop-coin-pack-card--selected':
+                            selectedCoinPackageId === pack.id,
+                        },
+                      ]"
+                      @click="selectCoinPackage(pack.id)"
+                    >
+                      <!-- Selo Superior Opcional (MAIS POPULAR / MELHOR PREÇO / MUITO OURO!) -->
+                      <div
+                        v-if="pack.badge"
+                        class="shop-coin-pack-badge"
+                        :class="`shop-coin-pack-badge--${pack.badgeVariant || 'popular'}`"
+                      >
+                        <span>{{ pack.badge }}</span>
+                      </div>
+
+                      <div class="shop-coin-pack-surface">
+                        <!-- Quantidade de Moedas no Topo + Ícone de Moeda -->
+                        <div class="shop-coin-pack-amount-row">
+                          <span class="shop-coin-pack-amount-num">
+                            {{ pack.coinsLabel }}
+                          </span>
+                          <svg
+                            class="shop-coin-pack-amount-icon"
+                            viewBox="0 0 36 36"
+                            aria-hidden="true"
+                          >
+                            <circle
+                              cx="18"
+                              cy="18"
+                              r="15"
+                              fill="#F59E0B"
+                              stroke="#14111F"
+                              stroke-width="3.2"
+                            />
+                            <circle
+                              cx="18"
+                              cy="18"
+                              r="10.5"
+                              fill="#FBBF24"
+                              stroke="#B45309"
+                              stroke-width="2"
+                            />
+                            <path
+                              d="M 11,22 L 12.5,14 L 15.8,17.2 L 18,12.5 L 20.2,17.2 L 23.5,14 L 25,22 Z"
+                              fill="#FDE047"
+                              stroke="#92400E"
+                              stroke-width="1.4"
+                              stroke-linejoin="round"
+                            />
+                          </svg>
+                        </div>
+
+                        <!-- Ilustração Vetorial do Pacote (igual à imagem de referência) -->
+                        <div class="shop-coin-pack-art" aria-hidden="true">
+                          <!-- 1. PUNHADO DE MOEDAS (150) -->
+                          <svg
+                            v-if="pack.artType === 'PILE'"
+                            viewBox="0 0 120 76"
+                            class="shop-coin-pack-svg"
+                          >
+                            <ellipse cx="60" cy="64" rx="44" ry="8" fill="rgba(20,17,31,0.18)" />
+                            <!-- Moedas empilhadas -->
+                            <g stroke="#14111F" stroke-width="2.6">
+                              <ellipse cx="36" cy="54" rx="15" ry="7" fill="#D97706" />
+                              <ellipse cx="36" cy="50" rx="15" ry="7" fill="#FBBF24" />
+                              <ellipse cx="82" cy="55" rx="15" ry="7" fill="#D97706" />
+                              <ellipse cx="82" cy="51" rx="15" ry="7" fill="#FBBF24" />
+                              <ellipse cx="58" cy="58" rx="17" ry="7.5" fill="#D97706" />
+                              <ellipse cx="58" cy="53" rx="17" ry="7.5" fill="#FBBF24" />
+                              <ellipse cx="58" cy="48" rx="17" ry="7.5" fill="#FDE047" />
+                              <!-- Moeda em pé central com coroa -->
+                              <circle cx="59" cy="34" r="16" fill="#F59E0B" />
+                              <circle cx="59" cy="34" r="11.5" fill="#FDE047" stroke="#B45309" stroke-width="1.8" />
+                              <path
+                                d="M 52,38 L 53.5,30 L 56.5,33 L 59,28.5 L 61.5,33 L 64.5,30 L 66,38 Z"
+                                fill="#F59E0B"
+                                stroke="#92400E"
+                                stroke-width="1.2"
+                                stroke-linejoin="round"
+                              />
+                            </g>
+                            <path d="M 24,24 L 26,18 L 28,24 L 34,26 L 28,28 L 26,34 L 24,28 L 18,26 Z" fill="#FFFFFF" />
+                            <path d="M 92,20 L 93.5,15 L 95,20 L 100,21.5 L 95,23 L 93.5,28 L 92,23 L 87,21.5 Z" fill="#FEF08A" />
+                          </svg>
+
+                          <!-- 2. SACO DE MOEDAS (500) -->
+                          <svg
+                            v-else-if="pack.artType === 'SACK'"
+                            viewBox="0 0 120 76"
+                            class="shop-coin-pack-svg"
+                          >
+                            <ellipse cx="60" cy="66" rx="44" ry="8" fill="rgba(20,17,31,0.2)" />
+                            <!-- Moedas ao redor da base -->
+                            <g stroke="#14111F" stroke-width="2.4">
+                              <ellipse cx="28" cy="59" rx="12" ry="5.5" fill="#F59E0B" />
+                              <ellipse cx="92" cy="58" rx="12" ry="5.5" fill="#F59E0B" />
+                              <!-- Corpo do saco de pano marrom -->
+                              <path
+                                d="M 43,25 C 30,33 27,54 36,63 C 45,68 75,68 84,63 C 93,54 90,33 77,25 Z"
+                                fill="#9A5B32"
+                                stroke-width="3"
+                                stroke-linejoin="round"
+                              />
+                              <path
+                                d="M 47,28 C 37,35 35,52 42,60"
+                                fill="none"
+                                stroke="#C27D4E"
+                                stroke-width="3"
+                                stroke-linecap="round"
+                              />
+                              <!-- Moedas transbordando no topo do saco -->
+                              <circle cx="51" cy="21" r="8" fill="#FBBF24" />
+                              <circle cx="60" cy="18" r="9" fill="#FDE047" />
+                              <circle cx="69" cy="21" r="8" fill="#F59E0B" />
+                              <!-- Corda amarrada -->
+                              <rect x="42" y="23" width="36" height="6" rx="3" fill="#D97706" />
+                              <!-- Emblema de moeda no saco -->
+                              <circle cx="60" cy="46" r="10.5" fill="#FBBF24" />
+                              <circle cx="60" cy="46" r="7" fill="#FDE047" stroke="#B45309" stroke-width="1.5" />
+                            </g>
+                          </svg>
+
+                          <!-- 3. BAÚ PEQUENO (1.200) -->
+                          <svg
+                            v-else-if="pack.artType === 'CHEST_SMALL'"
+                            viewBox="0 0 120 76"
+                            class="shop-coin-pack-svg"
+                          >
+                            <ellipse cx="60" cy="65" rx="46" ry="8" fill="rgba(20,17,31,0.22)" />
+                            <g stroke="#14111F" stroke-width="2.6" stroke-linejoin="round">
+                              <!-- Base de madeira do baú -->
+                              <rect x="26" y="34" width="58" height="28" rx="4" fill="#8C4A23" />
+                              <!-- Tampa arqueada do baú -->
+                              <path d="M 24,34 C 24,19 86,19 86,34 Z" fill="#A85B2E" />
+                              <!-- Faixas metálicas douradas -->
+                              <rect x="33" y="22" width="8" height="40" fill="#FBBF24" />
+                              <rect x="69" y="22" width="8" height="40" fill="#FBBF24" />
+                              <rect x="25" y="32" width="60" height="6" fill="#F59E0B" />
+                              <!-- Fechadura central -->
+                              <rect x="49" y="30" width="12" height="14" rx="3" fill="#FDE047" />
+                              <circle cx="55" cy="36" r="2" fill="#14111F" />
+                              <!-- Moedas ao lado direito do baú -->
+                              <ellipse cx="89" cy="60" rx="11" ry="5" fill="#F59E0B" />
+                              <circle cx="92" cy="49" r="11" fill="#FBBF24" />
+                              <circle cx="92" cy="49" r="7.5" fill="#FDE047" stroke="#B45309" stroke-width="1.5" />
+                            </g>
+                          </svg>
+
+                          <!-- 4. BAÚ GRANDE ABERTO (3.000) -->
+                          <svg
+                            v-else-if="pack.artType === 'CHEST_OPEN'"
+                            viewBox="0 0 120 76"
+                            class="shop-coin-pack-svg"
+                          >
+                            <ellipse cx="60" cy="66" rx="48" ry="8" fill="rgba(20,17,31,0.22)" />
+                            <g stroke="#14111F" stroke-width="2.5" stroke-linejoin="round">
+                              <!-- Tampa aberta ao fundo -->
+                              <path d="M 24,28 C 26,12 94,12 96,28 Z" fill="#7C3F1D" />
+                              <rect x="34" y="15" width="8" height="14" fill="#F59E0B" />
+                              <rect x="78" y="15" width="8" height="14" fill="#F59E0B" />
+                              <!-- Monte de moedas de ouro brilhantes dentro do baú -->
+                              <circle cx="40" cy="31" r="9" fill="#F59E0B" />
+                              <circle cx="52" cy="27" r="10" fill="#FDE047" />
+                              <circle cx="67" cy="27" r="10" fill="#FBBF24" />
+                              <circle cx="80" cy="31" r="9" fill="#F59E0B" />
+                              <circle cx="60" cy="32" r="10" fill="#FEF08A" />
+                              <!-- Caixa inferior do baú -->
+                              <rect x="24" y="34" width="72" height="29" rx="4" fill="#9A5229" />
+                              <rect x="33" y="34" width="9" height="29" fill="#FBBF24" />
+                              <rect x="78" y="34" width="9" height="29" fill="#FBBF24" />
+                              <!-- Fechadura dourada -->
+                              <rect x="53" y="32" width="14" height="15" rx="3" fill="#FDE047" />
+                              <circle cx="60" cy="39" r="2.2" fill="#14111F" />
+                            </g>
+                            <path d="M 18,22 L 20,16 L 22,22 L 28,24 L 22,26 L 20,32 L 18,26 L 12,24 Z" fill="#FFFFFF" />
+                            <path d="M 100,18 L 101.5,13 L 103,18 L 108,19.5 L 103,21 L 101.5,26 L 100,21 L 95,19.5 Z" fill="#FEF08A" />
+                          </svg>
+
+                          <!-- 5. CAIXA FORTE (6.000) -->
+                          <svg
+                            v-else-if="pack.artType === 'SAFE'"
+                            viewBox="0 0 120 76"
+                            class="shop-coin-pack-svg"
+                          >
+                            <ellipse cx="60" cy="66" rx="48" ry="8" fill="rgba(20,17,31,0.24)" />
+                            <g stroke="#14111F" stroke-width="2.6" stroke-linejoin="round">
+                              <!-- Moedas espalhadas na base do cofre -->
+                              <ellipse cx="24" cy="60" rx="11" ry="5" fill="#F59E0B" />
+                              <ellipse cx="96" cy="60" rx="11" ry="5" fill="#F59E0B" />
+                              <!-- Pés do cofre -->
+                              <rect x="34" y="59" width="10" height="6" rx="1.5" fill="#334155" />
+                              <rect x="76" y="59" width="10" height="6" rx="1.5" fill="#334155" />
+                              <!-- Corpo blindado de aço -->
+                              <rect x="28" y="13" width="64" height="48" rx="6" fill="#64748B" />
+                              <!-- Porta interna do cofre -->
+                              <rect x="35" y="19" width="50" height="36" rx="4" fill="#94A3B8" />
+                              <!-- Dobradiças direitas -->
+                              <rect x="82" y="23" width="6" height="8" rx="1.5" fill="#475569" />
+                              <rect x="82" y="42" width="6" height="8" rx="1.5" fill="#475569" />
+                              <!-- Volante giratório dourado/metálico do cofre -->
+                              <circle cx="57" cy="37" r="12" fill="#E2E8F0" />
+                              <line x1="57" y1="25" x2="57" y2="49" stroke="#14111F" stroke-width="2.6" />
+                              <line x1="45" y1="37" x2="69" y2="37" stroke="#14111F" stroke-width="2.6" />
+                              <circle cx="57" cy="37" r="5" fill="#FBBF24" />
+                              <!-- Pilha de moedas na frente -->
+                              <ellipse cx="86" cy="62" rx="12" ry="5.5" fill="#FBBF24" />
+                              <ellipse cx="86" cy="58" rx="12" ry="5.5" fill="#FDE047" />
+                            </g>
+                          </svg>
+
+                          <!-- 6. FORTUNA DO ABISMO (15.000) -->
+                          <svg
+                            v-else
+                            viewBox="0 0 120 76"
+                            class="shop-coin-pack-svg"
+                          >
+                            <ellipse cx="60" cy="67" rx="52" ry="8" fill="rgba(20,17,31,0.25)" />
+                            <g stroke="#14111F" stroke-width="2.4" stroke-linejoin="round">
+                              <!-- Picos da montanha rochosa ao fundo -->
+                              <polygon points="16,62 44,14 72,62" fill="#64748B" />
+                              <polygon points="44,14 57,36 37,38" fill="#CBD5E1" />
+                              <polygon points="48,62 78,18 106,62" fill="#475569" />
+                              <polygon points="78,18 89,35 70,36" fill="#94A3B8" />
+                              <!-- Montanha de ouro brilhante na base -->
+                              <path
+                                d="M 14,63 C 22,40 42,33 60,33 C 78,33 98,40 106,63 Z"
+                                fill="#F59E0B"
+                              />
+                              <path
+                                d="M 22,63 C 30,45 45,39 60,39 C 75,39 90,45 98,63 Z"
+                                fill="#FDE047"
+                              />
+                              <!-- 2 Baús de tesouro sobre a montanha de ouro -->
+                              <rect x="26" y="42" width="26" height="16" rx="2.5" fill="#8C4A23" />
+                              <rect x="30" y="42" width="4" height="16" fill="#FBBF24" />
+                              <rect x="44" y="42" width="4" height="16" fill="#FBBF24" />
+                              <rect x="68" y="40" width="28" height="18" rx="2.5" fill="#8C4A23" />
+                              <rect x="72" y="40" width="4" height="18" fill="#FBBF24" />
+                              <rect x="88" y="40" width="4" height="18" fill="#FBBF24" />
+                              <!-- Moeda central em destaque -->
+                              <circle cx="60" cy="52" r="11" fill="#FBBF24" />
+                              <circle cx="60" cy="52" r="7.5" fill="#FEF08A" stroke="#B45309" stroke-width="1.5" />
+                            </g>
+                            <path d="M 20,22 L 22,15 L 24,22 L 31,24 L 24,26 L 22,33 L 20,26 L 13,24 Z" fill="#FFFFFF" />
+                            <path d="M 98,16 L 100,10 L 102,16 L 108,18 L 102,20 L 100,26 L 98,20 L 92,18 Z" fill="#FEF08A" />
+                          </svg>
+                        </div>
+
+                        <!-- Nome do Pacote e Bônus -->
+                        <div class="shop-coin-pack-captions">
+                          <span class="shop-coin-pack-title">{{ pack.title }}</span>
+                          <span
+                            v-if="pack.bonusLabel"
+                            class="shop-coin-pack-bonus"
+                          >
+                            {{ pack.bonusLabel }}
+                          </span>
+                        </div>
+
+                        <!-- Botão de Preço em Reais (Mercado Pago — desativado até configurar .env) -->
+                        <button
+                          type="button"
+                          class="shop-coin-pack-price-btn"
+                          :class="{
+                            'shop-coin-pack-price-btn--disabled':
+                              !isMercadoPagoConfigured || isCreatingCoinOrder,
+                          }"
+                          :disabled="!isMercadoPagoConfigured || isCreatingCoinOrder"
+                          :title="
+                            isMercadoPagoConfigured
+                              ? `Recarregar ${pack.coinsLabel} moedas por ${pack.priceLabel} via Mercado Pago`
+                              : 'Recarga via Mercado Pago desativada até configurar as variáveis de ambiente (.env)'
+                          "
+                          @click.stop="handleRechargeCoinPackage(pack)"
+                        >
+                          <span>{{ pack.priceLabel }}</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- ========================================================= -->
+                <!-- VISÃO 2: PRATELEIRAS DE MADEIRA (3 ITENS POR PRATELEIRA)  -->
+                <!-- ========================================================= -->
+                <div v-else class="shop-shelves-container">
+                  <div
+                    v-for="(shelfItems, shelfIdx) in shopShelvesList"
+                    :key="`shop-shelf-${shelfIdx}`"
+                    class="shop-shelf-unit"
+                  >
+                    <div class="shop-shelf-cards-row">
+                      <button
+                        v-for="item in shelfItems"
+                        :key="item.id"
+                        type="button"
+                        class="shop-item-card"
+                        :class="{
+                          'shop-item-card--selected': selectedShopItemId === item.id,
+                          'shop-item-card--owned': isShopItemOwned(item),
+                        }"
+                        :style="{ '--shop-card-bg': item.cardBg }"
+                        @click="selectShopItem(item.id)"
+                      >
+                        <div class="shop-item-card-surface">
+                          <!-- Sprite Real do Item (Player Skin ou Block Skin) -->
+                          <div class="shop-item-visual">
+                            <img
+                              :src="getShopItemSpriteUrl(item)"
+                              :alt="item.titleLine1"
+                              class="shop-item-sprite"
+                              :class="{
+                                'shop-item-sprite--player': Boolean(item.playerSkinId),
+                                'shop-item-sprite--block': Boolean(item.blockSkinId),
+                                'shop-item-sprite--gold': item.blockSkinId === 'gold',
+                              }"
+                              draggable="false"
+                            />
+                          </div>
+
+                          <!-- Nome do Item no Card (Oculto no Bloco Clássico quando Obtido, igual à imagem) -->
+                          <div
+                            v-if="!(isShopItemOwned(item) && item.hideTitleWhenOwned)"
+                            class="shop-item-title-wrap"
+                          >
+                            <span class="shop-item-title-line">{{ item.titleLine1 }}</span>
+                            <span
+                              v-if="item.titleLine2"
+                              class="shop-item-title-line"
+                            >
+                              {{ item.titleLine2 }}
+                            </span>
+                          </div>
+
+                          <!-- Carimbo Verde Inclinado "OBTIDO" quando já adquirido -->
+                          <div
+                            v-if="isShopItemOwned(item)"
+                            class="shop-item-owned-stamp"
+                          >
+                            <span>OBTIDO</span>
+                          </div>
+                        </div>
+
+                        <!-- Plaquinha de Preço na Base da Prateleira (quando ainda não obtido) -->
+                        <div
+                          v-if="!isShopItemOwned(item)"
+                          class="shop-item-price-tag"
+                        >
+                          <span class="shop-item-price-num">
+                            {{ formatShopCoins(item.price) }}
+                          </span>
+                          <span class="shop-item-price-coin" aria-hidden="true"></span>
+                        </div>
+                      </button>
+                    </div>
+
+                    <!-- Tábua de Madeira Horizontal da Prateleira + Suportes -->
+                    <div class="shop-wood-shelf-plank" aria-hidden="true">
+                      <span class="shop-wood-shelf-bracket shop-wood-shelf-bracket--left"></span>
+                      <span class="shop-wood-shelf-bracket shop-wood-shelf-bracket--right"></span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Barra Inferior da Moldura (Cantos Laranja + Centro Azul com Pinos) -->
+              <div class="shop-frame-beam-bottom" aria-hidden="true">
+                <div class="shop-frame-bot-corner shop-frame-bot-corner--left">
+                  <span
+                    v-for="s in 3"
+                    :key="`bot-l-${s}`"
+                    class="shop-stud-circle shop-stud-circle--orange"
+                  ></span>
+                </div>
+                <div class="shop-frame-bot-center">
+                  <span
+                    v-for="s in 8"
+                    :key="`bot-c-${s}`"
+                    class="shop-stud-circle"
+                  ></span>
+                </div>
+                <div class="shop-frame-bot-corner shop-frame-bot-corner--right">
+                  <span
+                    v-for="s in 3"
+                    :key="`bot-r-${s}`"
+                    class="shop-stud-circle shop-stud-circle--orange"
+                  ></span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- =============================================================== -->
+          <!-- PAINEL DIREITO: BANCA ANIMADA (shelf.png + vendedores + table)  -->
+          <!-- =============================================================== -->
+          <section class="shop-right-stall-panel" aria-label="Balcão da Loja">
+            <div
+              class="shop-stall-scene"
+              :class="{ 'shop-stall-scene--burst': shopPurchaseBurstActive }"
+            >
+              <!-- CAMADA 1 (FUNDO): Prateleira e estrutura de madeira (shelf.png) -->
+              <img
+                :src="menuSprites.shelf"
+                alt=""
+                class="shop-scene-shelf-bg"
+                draggable="false"
+              />
+
+              <!-- CAMADA 2 (VITRINE CENTRAL SUPERIOR): Brilho Mágico + Item ou Pacote Selecionado -->
+              <div class="shop-showcase-stage">
+                <!-- Aura mágica rosada/dourada atrás do item em destaque -->
+                <div class="shop-showcase-aura" aria-hidden="true"></div>
+
+                <!-- Estrelas de 4 pontas e partículas cintilantes ao redor do item -->
+                <div class="shop-showcase-sparkles" aria-hidden="true">
+                  <svg
+                    class="shop-sparkle-star shop-sparkle-star--1"
+                    viewBox="0 0 32 32"
+                  >
+                    <path
+                      d="M16 0 L20 12 L32 16 L20 20 L16 32 L12 20 L0 16 L12 12 Z"
+                      fill="#FFFFFF"
+                    />
+                  </svg>
+                  <svg
+                    class="shop-sparkle-star shop-sparkle-star--2"
+                    viewBox="0 0 32 32"
+                  >
+                    <path
+                      d="M16 2 L19 13 L30 16 L19 19 L16 30 L13 19 L2 16 L13 13 Z"
+                      fill="#FEF08A"
+                    />
+                  </svg>
+                  <svg
+                    class="shop-sparkle-star shop-sparkle-star--3"
+                    viewBox="0 0 32 32"
+                  >
+                    <path
+                      d="M16 2 L19 13 L30 16 L19 19 L16 30 L13 19 L2 16 L13 13 Z"
+                      fill="#FEF08A"
+                    />
+                  </svg>
+                  <svg
+                    class="shop-sparkle-star shop-sparkle-star--4"
+                    viewBox="0 0 32 32"
+                  >
+                    <path
+                      d="M16 0 L20 12 L32 16 L20 20 L16 32 L12 20 L0 16 L12 12 Z"
+                      fill="#FFFFFF"
+                    />
+                  </svg>
+                  <span class="shop-magic-dot shop-magic-dot--1"></span>
+                  <span class="shop-magic-dot shop-magic-dot--2"></span>
+                  <span class="shop-magic-dot shop-magic-dot--3"></span>
+                  <span class="shop-magic-dot shop-magic-dot--4"></span>
+                  <span class="shop-magic-dot shop-magic-dot--5"></span>
+                  <span class="shop-magic-dot shop-magic-dot--6"></span>
+                </div>
+
+                <!-- Item Flutuante Completo em Destaque com Glow -->
+                <div class="shop-pedestal-float-wrap">
+                  <!-- Quando na aba MOEDAS, destaca o Pacote de Moedas selecionado -->
+                  <div
+                    v-if="shopActiveTab === 'MOEDAS'"
+                    class="shop-pedestal-featured-item shop-pedestal-featured-item--coins"
+                  >
+                    <svg
+                      viewBox="0 0 120 110"
+                      class="shop-pedestal-coin-treasure-svg"
+                      aria-hidden="true"
+                    >
+                      <g stroke="#14111F" stroke-width="3.2" stroke-linejoin="round">
+                        <!-- Baú e Moedas Douradas Flutuantes com Glow -->
+                        <rect x="24" y="48" width="72" height="38" rx="6" fill="#8C4A23" />
+                        <path d="M 22,48 C 22,26 98,26 98,48 Z" fill="#A85B2E" />
+                        <rect x="34" y="30" width="10" height="56" fill="#FBBF24" />
+                        <rect x="76" y="30" width="10" height="56" fill="#FBBF24" />
+                        <rect x="23" y="45" width="74" height="7" fill="#F59E0B" />
+                        <circle cx="60" cy="44" r="18" fill="#F59E0B" />
+                        <circle cx="60" cy="44" r="13" fill="#FDE047" stroke="#B45309" stroke-width="2.2" />
+                        <path
+                          d="M 51,49 L 53,39 L 56.5,43 L 60,37 L 63.5,43 L 67,39 L 69,49 Z"
+                          fill="#F59E0B"
+                          stroke="#92400E"
+                          stroke-width="1.5"
+                        />
+                      </g>
+                    </svg>
+                    <span class="shop-pedestal-coin-pack-badge">
+                      +{{ selectedCoinPackage.coinsLabel }} MOEDAS
+                    </span>
+                  </div>
+
+                  <!-- Quando nas abas de Skins (TODOS, MAGOS, BLOCOS), exibe o Sprite Real Completo -->
+                  <div v-else class="shop-pedestal-featured-item">
+                    <img
+                      :src="getShopItemSpriteUrl(selectedShopItem)"
+                      :alt="selectedShopItem.titleLine1"
+                      class="shop-pedestal-hero-img"
+                      :class="{
+                        'shop-pedestal-hero-img--player': Boolean(selectedShopItem.playerSkinId),
+                        'shop-pedestal-hero-img--block': Boolean(selectedShopItem.blockSkinId),
+                        'shop-pedestal-hero-img--shadow':
+                          selectedShopItem.playerSkinId === 'player_shadow',
+                        'shop-pedestal-hero-img--gold':
+                          selectedShopItem.blockSkinId === 'gold',
+                      }"
+                      draggable="false"
+                    />
+                    <template v-if="selectedShopItem.playerSkinId === 'player_shadow'">
+                      <span class="shop-potion-particle shop-potion-particle--1"></span>
+                      <span class="shop-potion-particle shop-potion-particle--2"></span>
+                      <span class="shop-potion-particle shop-potion-particle--3"></span>
+                    </template>
+                  </div>
+                </div>
+              </div>
+
+              <!-- CAMADA 3 (MEIO - VENDEDORES ATRÁS DO BALCÃO): shop_dino.png e shop_shadow.png -->
+              <div class="shop-keepers-layer" aria-hidden="true">
+                <!-- Vendedor Esquerdo: Dino Explorador Acenando -->
+                <div class="shop-keeper-actor shop-keeper-actor--dino">
+                  <img
+                    :src="menuSprites.shop_dino"
+                    alt="Vendedor Dino"
+                    class="shop-keeper-sprite"
+                    draggable="false"
+                  />
+                </div>
+
+                <!-- Vendedor Direito: Mago Sombrio Apontando + Partículas da Poção -->
+                <div class="shop-keeper-actor shop-keeper-actor--shadow">
+                  <img
+                    :src="menuSprites.shop_shadow"
+                    alt="Vendedor Mago Sombrio"
+                    class="shop-keeper-sprite"
+                    draggable="false"
+                  />
+                  <span class="shop-keeper-potion-bubble shop-keeper-potion-bubble--1"></span>
+                  <span class="shop-keeper-potion-bubble shop-keeper-potion-bubble--2"></span>
+                  <span class="shop-keeper-potion-bubble shop-keeper-potion-bubble--3"></span>
+                </div>
+              </div>
+
+              <!-- CAMADA 4 (FRENTE): Mesa/Balcão com Baú de Tesouro e Colunas LEGO (table.png) -->
+              <img
+                :src="menuSprites.table"
+                alt=""
+                class="shop-scene-table-fg"
+                draggable="false"
+              />
+
+              <!-- Brilhos dourados nas moedas e no baú sobre a mesa -->
+              <div class="shop-table-treasure-glints" aria-hidden="true">
+                <span class="shop-treasure-glint shop-treasure-glint--chest"></span>
+                <span class="shop-treasure-glint shop-treasure-glint--coins-left"></span>
+                <span class="shop-treasure-glint shop-treasure-glint--coins-right"></span>
+              </div>
+
+              <!-- Explosão de partículas ao comprar um item -->
+              <div
+                v-if="shopPurchaseBurstActive"
+                class="shop-purchase-burst-fx"
+                aria-hidden="true"
+              >
+                <span
+                  v-for="b in 12"
+                  :key="`burst-p-${b}`"
+                  class="shop-burst-particle"
+                  :class="`shop-burst-particle--${b}`"
+                ></span>
+              </div>
+
+              <!-- CAMADA 5 (ACIONAMENTO NO BALCÃO): Plaquinha de Preço + Botão Verde LEGO "COMPRAR" -->
+              <div class="shop-counter-cta-dock">
+                <!-- Plaquinha Marrom de Preço na aba MOEDAS -->
+                <div
+                  v-if="shopActiveTab === 'MOEDAS'"
+                  class="shop-counter-price-badge"
+                >
+                  <span class="shop-counter-price-value">
+                    {{ selectedCoinPackage.priceLabel }}
+                  </span>
+                </div>
+
+                <!-- Plaquinha Marrom de Preço nas abas de Skins (somente quando ainda não obtido) -->
+                <div
+                  v-else-if="!isShopItemOwned(selectedShopItem)"
+                  class="shop-counter-price-badge"
+                >
+                  <svg
+                    class="shop-counter-price-coin"
+                    viewBox="0 0 36 36"
+                    aria-hidden="true"
+                  >
+                    <circle
+                      cx="18"
+                      cy="18"
+                      r="15"
+                      fill="#F59E0B"
+                      stroke="#14111F"
+                      stroke-width="3.2"
+                    />
+                    <circle
+                      cx="18"
+                      cy="18"
+                      r="10.5"
+                      fill="#FBBF24"
+                      stroke="#B45309"
+                      stroke-width="2"
+                    />
+                    <path
+                      d="M 11,22 L 12.5,14 L 15.8,17.2 L 18,12.5 L 20.2,17.2 L 23.5,14 L 25,22 Z"
+                      fill="#FDE047"
+                      stroke="#92400E"
+                      stroke-width="1.4"
+                      stroke-linejoin="round"
+                    />
+                  </svg>
+                  <span class="shop-counter-price-value">
+                    {{ formatShopCoins(selectedShopItem.price) }}
+                  </span>
+                </div>
+
+                <!-- Grande Botão LEGO "COMPRAR" (ou "OBTIDO" / desativado quando Mercado Pago sem env) -->
+                <button
+                  type="button"
+                  class="shop-buy-lego-btn"
+                  :class="{
+                    'shop-buy-lego-btn--owned':
+                      shopActiveTab === 'MOEDAS'
+                        ? !isMercadoPagoConfigured || isCreatingCoinOrder
+                        : isShopItemOwned(selectedShopItem),
+                  }"
+                  :disabled="
+                    shopActiveTab === 'MOEDAS'
+                      ? !isMercadoPagoConfigured || isCreatingCoinOrder
+                      : isShopItemOwned(selectedShopItem)
+                  "
+                  :title="
+                    shopActiveTab === 'MOEDAS' && !isMercadoPagoConfigured
+                      ? 'Recarga via Mercado Pago desativada até configurar as variáveis de ambiente (.env)'
+                      : undefined
+                  "
+                  @click="handleShopPrimaryAction"
+                >
+                  <span class="shop-buy-lego-studs" aria-hidden="true">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                  </span>
+                  <span class="shop-buy-lego-body">
+                    <span class="shop-buy-lego-label">
+                      {{
+                        shopActiveTab === 'MOEDAS'
+                          ? isMercadoPagoConfigured
+                            ? 'RECARREGAR'
+                            : 'DESATIVADO'
+                          : isShopItemOwned(selectedShopItem)
+                            ? 'OBTIDO'
+                            : 'COMPRAR'
+                      }}
+                    </span>
+                  </span>
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </transition>
+
+    <!-- =================================================================== -->
+    <!-- TELA DE SKINS ("SKINS E BLOCOS"): SUA SKIN + SKIN DOS SEUS BLOCOS   -->
+    <!-- =================================================================== -->
+    <transition name="menu-fade-300">
+      <div
+        v-if="screenFlow === 'SKINS_SCREEN' || isSkinPickerOpen"
+        class="selecione-modo-screen skins-screen-overlay"
+      >
+        <!-- Botão superior esquerdo (X) para voltar -->
+        <button
+          type="button"
+          class="mp-lobby-back-btn"
+          :title="
+            isSkinPickerOpen
+              ? 'Voltar para a Sala Multiplayer (Esc)'
+              : 'Voltar ao Menu Principal (Esc)'
+          "
+          @click="closeSkinsScreen"
+        >
+          <img
+            :src="menuSprites.button_x"
+            alt="Voltar"
+            draggable="false"
+          />
+        </button>
+
+        <!-- 1. Topo em Pedra: "SKINS E BLOCOS" -->
+        <header class="selecione-modo-top-banner" aria-hidden="true">
+          <div class="selecione-modo-stone-header">
+            <div class="selecione-modo-stone-wing selecione-modo-stone-wing--left"></div>
+            <div class="selecione-modo-stone-pillar"></div>
+            <div class="selecione-modo-stone-center">
+              <span class="selecione-modo-banner-title">SKINS E BLOCOS</span>
+            </div>
+            <div class="selecione-modo-stone-pillar"></div>
+            <div class="selecione-modo-stone-wing selecione-modo-stone-wing--right"></div>
+            <div class="selecione-modo-stone-ledge">
+              <span></span><span></span><span></span>
+            </div>
+          </div>
+        </header>
+
+        <!-- 2. Dois Seletores Quadrados Lado a Lado: SUA SKIN & SKIN DOS BLOCOS -->
+        <div class="selecione-modo-stage">
+          <!-- COLUNA ESQUERDA: SUA SKIN (PERSONAGEM) -->
+          <div
+            class="selecione-modo-col"
+            @mouseenter="selectedSkinsColumn = 'PLAYER'"
+            @click="selectedSkinsColumn = 'PLAYER'"
+          >
+            <!-- Seta Superior ▲ -->
+            <button
+              type="button"
+              class="selecione-modo-arrow-btn"
+              title="Personagem anterior"
+              aria-label="Personagem anterior"
+              @click.stop="cyclePlayerSkinOption(-1)"
+            >
+              <svg viewBox="0 0 84 52" aria-hidden="true">
+                <path
+                  d="M 36,6 Q 42,0 48,6 L 78,38 Q 84,45 75,47 H 9 Q 0,45 6,38 Z"
+                  fill="#94a3b8"
+                  stroke="#181425"
+                  stroke-width="4"
+                  stroke-linejoin="round"
+                />
+                <path
+                  d="M 38,10 Q 42,6 46,10 L 72,38 H 12 Z"
+                  fill="#cbd5e1"
+                />
+                <polygon
+                  points="42,16 58,34 26,34"
+                  fill="#f97316"
+                  stroke="#9a3412"
+                  stroke-width="2"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
+
+            <!-- Cartão Quadrado de Parede LEGO: SUA SKIN -->
+            <div
+              class="selecione-modo-brick-box"
+              :class="{
+                'selecione-modo-brick-box--active':
+                  selectedSkinsColumn === 'PLAYER',
+              }"
+              @click="selectedSkinsColumn = 'PLAYER'"
+            >
+              <!-- 8 Pinos Superiores Escuros -->
+              <div class="selecione-modo-box-studs" aria-hidden="true">
+                <span v-for="s in 8" :key="s"></span>
+              </div>
+
+              <!-- 4 Cantoneiras Amarelas/Laranjas quando focado -->
+              <template v-if="selectedSkinsColumn === 'PLAYER'">
+                <span class="selecione-corner selecione-corner--tl" aria-hidden="true"></span>
+                <span class="selecione-corner selecione-corner--tr" aria-hidden="true"></span>
+                <span class="selecione-corner selecione-corner--bl" aria-hidden="true"></span>
+                <span class="selecione-corner selecione-corner--br" aria-hidden="true"></span>
+              </template>
+
+              <div class="selecione-modo-card-inner skins-card-inner">
+                <div class="selecione-single-mode-art skins-player-art">
+                  <div class="selecione-char-cloud-wrap selecione-char-cloud-wrap--center">
+                    <img
+                      v-if="activePlayerSkin"
+                      :src="activePlayerSkin.url"
+                      :alt="activePlayerSkin.name"
+                      class="selecione-char-img selecione-char-img--large"
+                      draggable="false"
+                    />
+                    <svg class="selecione-cloud-svg selecione-cloud-svg--large" viewBox="0 0 140 60" aria-hidden="true">
+                      <path
+                        d="M 28,50 C 14,50 8,40 13,30 C 16,23 24,20 31,22 C 36,11 49,6 62,10 C 70,3 85,3 93,11 C 104,8 118,14 120,25 C 129,27 134,35 130,43 C 127,48 120,50 111,50 Z"
+                        fill="#ffffff"
+                        stroke="#181425"
+                        stroke-width="3.8"
+                        stroke-linejoin="round"
+                      />
+                      <path
+                        d="M 22,43 C 36,48 104,48 120,42"
+                        fill="none"
+                        stroke="#cbd5e1"
+                        stroke-width="4"
+                        stroke-linecap="round"
+                      />
+                    </svg>
+                  </div>
+                </div>
+
+                <div class="selecione-card-bottom-captions">
+                  <span class="selecione-card-main-title">
+                    {{ activePlayerSkin?.shortName || 'MAGO' }}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Seta Inferior ▼ -->
+            <button
+              type="button"
+              class="selecione-modo-arrow-btn"
+              title="Próximo personagem"
+              aria-label="Próximo personagem"
+              @click.stop="cyclePlayerSkinOption(1)"
+            >
+              <svg viewBox="0 0 84 52" aria-hidden="true">
+                <path
+                  d="M 9,5 H 75 Q 84,7 78,14 L 48,46 Q 42,52 36,46 L 6,14 Q 0,7 9,5 Z"
+                  fill="#94a3b8"
+                  stroke="#181425"
+                  stroke-width="4"
+                  stroke-linejoin="round"
+                />
+                <path
+                  d="M 12,11 H 72 L 46,39 Q 42,43 38,39 Z"
+                  fill="#cbd5e1"
+                />
+                <polygon
+                  points="42,36 58,18 26,18"
+                  fill="#f97316"
+                  stroke="#9a3412"
+                  stroke-width="2"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
+          </div>
+
+          <!-- COLUNA DIREITA: SKIN DOS BLOCOS -->
+          <div
+            class="selecione-modo-col"
+            @mouseenter="selectedSkinsColumn = 'BLOCK'"
+            @click="selectedSkinsColumn = 'BLOCK'"
+          >
+            <!-- Seta Superior ▲ -->
+            <button
+              type="button"
+              class="selecione-modo-arrow-btn"
+              title="Skin de bloco anterior"
+              aria-label="Skin de bloco anterior"
+              @click.stop="cycleBlockSkinOption(-1)"
+            >
+              <svg viewBox="0 0 84 52" aria-hidden="true">
+                <path
+                  d="M 36,6 Q 42,0 48,6 L 78,38 Q 84,45 75,47 H 9 Q 0,45 6,38 Z"
+                  fill="#94a3b8"
+                  stroke="#181425"
+                  stroke-width="4"
+                  stroke-linejoin="round"
+                />
+                <path
+                  d="M 38,10 Q 42,6 46,10 L 72,38 H 12 Z"
+                  fill="#cbd5e1"
+                />
+                <polygon
+                  points="42,16 58,34 26,34"
+                  fill="#f97316"
+                  stroke="#9a3412"
+                  stroke-width="2"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
+
+            <!-- Cartão Quadrado de Parede LEGO: SKIN DOS BLOCOS -->
+            <div
+              class="selecione-modo-brick-box"
+              :class="{
+                'selecione-modo-brick-box--active':
+                  selectedSkinsColumn === 'BLOCK',
+                'selecione-modo-brick-box--wood':
+                  activeBlockSkinId === 'wood',
+                'selecione-modo-brick-box--gold':
+                  activeBlockSkinId === 'gold',
+              }"
+              @click="selectedSkinsColumn = 'BLOCK'"
+            >
+              <!-- 8 Pinos Superiores Escuros -->
+              <div class="selecione-modo-box-studs" aria-hidden="true">
+                <span v-for="s in 8" :key="s"></span>
+              </div>
+
+              <!-- 4 Cantoneiras Amarelas/Laranjas quando focado -->
+              <template v-if="selectedSkinsColumn === 'BLOCK'">
+                <span class="selecione-corner selecione-corner--tl" aria-hidden="true"></span>
+                <span class="selecione-corner selecione-corner--tr" aria-hidden="true"></span>
+                <span class="selecione-corner selecione-corner--bl" aria-hidden="true"></span>
+                <span class="selecione-corner selecione-corner--br" aria-hidden="true"></span>
+              </template>
+
+              <div class="selecione-modo-card-inner skins-card-inner">
+                <!-- Vitrine Dinâmica de Peças com as Cores da Skin Selecionada -->
+                <div class="skins-blocks-showcase-grid">
+                  <div class="skins-block-preview-cell">
+                    <PiecePreviewCanvas
+                      type="T"
+                      variant="NORMAL"
+                      :color-palette-index="0"
+                      :size="108"
+                    />
+                  </div>
+                  <div class="skins-block-preview-cell">
+                    <PiecePreviewCanvas
+                      type="L"
+                      variant="NORMAL"
+                      :color-palette-index="2"
+                      :size="108"
+                    />
+                  </div>
+                  <div class="skins-block-preview-cell">
+                    <PiecePreviewCanvas
+                      type="O"
+                      variant="NORMAL"
+                      :color-palette-index="1"
+                      :size="108"
+                    />
+                  </div>
+                  <div class="skins-block-preview-cell">
+                    <PiecePreviewCanvas
+                      type="Z"
+                      variant="NORMAL"
+                      :color-palette-index="3"
+                      :size="108"
+                    />
+                  </div>
+                </div>
+
+                <div class="selecione-card-bottom-captions">
+                  <span class="selecione-card-main-title">
+                    {{ activeBlockSkin?.shortName || 'PLÁSTICO' }}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Seta Inferior ▼ -->
+            <button
+              type="button"
+              class="selecione-modo-arrow-btn"
+              title="Próxima skin de bloco"
+              aria-label="Próxima skin de bloco"
+              @click.stop="cycleBlockSkinOption(1)"
+            >
+              <svg viewBox="0 0 84 52" aria-hidden="true">
+                <path
+                  d="M 9,5 H 75 Q 84,7 78,14 L 48,46 Q 42,52 36,46 L 6,14 Q 0,7 9,5 Z"
+                  fill="#94a3b8"
+                  stroke="#181425"
+                  stroke-width="4"
+                  stroke-linejoin="round"
+                />
+                <path
+                  d="M 12,11 H 72 L 46,39 Q 42,43 38,39 Z"
+                  fill="#cbd5e1"
+                />
+                <polygon
+                  points="42,36 58,18 26,18"
+                  fill="#f97316"
+                  stroke="#9a3412"
+                  stroke-width="2"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- 3. Botões LEGO no Canto Inferior Direito: PRONTO e VOLTAR -->
+        <div class="selecione-modo-bottom-right-actions">
+          <button
+            type="button"
+            class="selecione-action-brick-btn selecione-action-brick-btn--ready"
+            @click="closeSkinsScreen"
+          >
+            <span class="selecione-action-studs" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </span>
+            <span class="selecione-action-body">PRONTO</span>
+          </button>
+
+          <button
+            type="button"
+            class="selecione-action-brick-btn selecione-action-brick-btn--back"
+            @click="closeSkinsScreen"
+          >
+            <span class="selecione-action-studs" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </span>
+            <span class="selecione-action-body">VOLTAR</span>
+          </button>
+        </div>
+      </div>
+    </transition>
+
+    <!-- =================================================================== -->
     <!-- TELA E MODAL DE OPÇÕES COMPLETA ("OPÇÕES DO JOGO")                  -->
     <!-- =================================================================== -->
     <transition name="menu-fade-300">
@@ -4017,7 +6435,7 @@ onUnmounted(() => {
 
         <!-- 2. Painel Central Estilo LEGO com 4 Abas -->
         <div class="options-main-container">
-          <!-- Abas de Navegação estilo Peça LEGO -->
+          <!-- Abas de Navegação estilo Peça LEGO (Minimalistas sem ícones) -->
           <div class="options-lego-tabs" role="tablist">
             <button
               type="button"
@@ -4035,7 +6453,7 @@ onUnmounted(() => {
               <span class="options-tab-studs" aria-hidden="true">
                 <span></span><span></span><span></span>
               </span>
-              <span class="options-tab-body">🔊 ÁUDIO &amp; GERAL</span>
+              <span class="options-tab-body">ÁUDIO &amp; GERAL</span>
             </button>
 
             <button
@@ -4054,7 +6472,7 @@ onUnmounted(() => {
               <span class="options-tab-studs" aria-hidden="true">
                 <span></span><span></span><span></span>
               </span>
-              <span class="options-tab-body">🎮 CONTROLES</span>
+              <span class="options-tab-body">CONTROLES</span>
             </button>
 
             <button
@@ -4073,7 +6491,7 @@ onUnmounted(() => {
               <span class="options-tab-studs" aria-hidden="true">
                 <span></span><span></span><span></span>
               </span>
-              <span class="options-tab-body">🖥️ GRÁFICOS &amp; HUD</span>
+              <span class="options-tab-body">GRÁFICOS &amp; HUD</span>
             </button>
 
             <button
@@ -4092,7 +6510,7 @@ onUnmounted(() => {
               <span class="options-tab-studs" aria-hidden="true">
                 <span></span><span></span><span></span>
               </span>
-              <span class="options-tab-body">👤 CONTA &amp; SOCIAL</span>
+              <span class="options-tab-body">CONTA &amp; SOCIAL</span>
             </button>
           </div>
 
@@ -4102,15 +6520,10 @@ onUnmounted(() => {
             <!-- ABA 1: ÁUDIO & GERAL                                        -->
             <!-- =========================================================== -->
             <div v-if="optionsActiveTab === 'AUDIO'" class="options-tab-panel">
-              <!-- Card de Volume Geral + Botão Mute + Testar Som -->
+              <!-- Card de Volume -->
               <div class="options-section-card">
                 <div class="options-section-header">
-                  <div>
-                    <h3 class="options-section-title">🔊 Controle de Volume</h3>
-                    <p class="options-section-desc">
-                      Ajuste o volume dos efeitos sintéticos de blocos, poderes e música
-                    </p>
-                  </div>
+                  <h3 class="options-section-title">Volume</h3>
                   <div class="options-header-actions">
                     <button
                       type="button"
@@ -4122,26 +6535,22 @@ onUnmounted(() => {
                       "
                       @click="toggleMuteAudio"
                     >
-                      {{
-                        optionsStore.state.isMuted
-                          ? '🔇 MUDO ATIVO'
-                          : '🔊 SOM ATIVO'
-                      }}
+                      {{ optionsStore.state.isMuted ? 'MUDO' : 'SOM ATIVO' }}
                     </button>
                     <button
                       type="button"
                       class="options-pill-btn options-pill-btn--gold"
                       @click="playToySfx('victory')"
                     >
-                      🎵 Testar Som
+                      Testar Som
                     </button>
                   </div>
                 </div>
 
-                <!-- Volume Geral (Master) -->
+                <!-- Volume Geral -->
                 <div class="options-slider-row">
                   <div class="options-slider-label">
-                    <span>🎚️ Volume Geral (Master)</span>
+                    <span>Volume Geral</span>
                     <strong class="mono">{{ optionsStore.state.masterVolume }}%</strong>
                   </div>
                   <input
@@ -4160,10 +6569,10 @@ onUnmounted(() => {
                   />
                 </div>
 
-                <!-- Volume de Efeitos Sonoros (SFX) -->
+                <!-- Volume de Efeitos Sonoros -->
                 <div class="options-slider-row">
                   <div class="options-slider-label">
-                    <span>🧱 Efeitos Sonoros (SFX de Peças e Poderes)</span>
+                    <span>Efeitos Sonoros</span>
                     <strong class="mono">{{ optionsStore.state.sfxVolume }}%</strong>
                   </div>
                   <input
@@ -4182,10 +6591,10 @@ onUnmounted(() => {
                   />
                 </div>
 
-                <!-- Volume da Música (BGM) -->
+                <!-- Volume da Música -->
                 <div class="options-slider-row">
                   <div class="options-slider-label">
-                    <span>🎶 Música Ambiente (BGM)</span>
+                    <span>Música</span>
                     <strong class="mono">{{ optionsStore.state.bgmVolume }}%</strong>
                   </div>
                   <input
@@ -4205,40 +6614,30 @@ onUnmounted(() => {
                 </div>
               </div>
 
-              <!-- Opções Gerais de Tela e Assistência -->
+              <!-- Modo de Tela Minimalista (Janela / FullScreen) -->
               <div class="options-toggles-grid">
                 <div class="options-toggle-item">
                   <div class="options-toggle-info">
-                    <strong>🖥️ Modo Tela Cheia (Fullscreen)</strong>
-                    <small>
-                      Expande o jogo para ocupar 100% do monitor sem barras do navegador
-                    </small>
+                    <strong>Modo de Tela</strong>
                   </div>
-                  <button
-                    type="button"
-                    class="options-switch-btn"
-                    :class="{ 'options-switch-btn--on': isFullscreen }"
-                    @click="toggleFullscreen"
-                  >
-                    {{ isFullscreen ? 'ATIVADO' : 'JANELA' }}
-                  </button>
-                </div>
-
-                <div class="options-toggle-item">
-                  <div class="options-toggle-info">
-                    <strong>👻 Sombra de Encaixe (Ghost Piece)</strong>
-                    <small>
-                      Exibe a silhueta projetada na base/torre indicando onde a peça cairá
-                    </small>
+                  <div class="options-segmented-group">
+                    <button
+                      type="button"
+                      class="options-switch-btn"
+                      :class="{ 'options-switch-btn--on': !isFullscreen }"
+                      @click="setFullscreenMode(false)"
+                    >
+                      Janela
+                    </button>
+                    <button
+                      type="button"
+                      class="options-switch-btn"
+                      :class="{ 'options-switch-btn--on': isFullscreen }"
+                      @click="setFullscreenMode(true)"
+                    >
+                      FullScreen
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    class="options-switch-btn"
-                    :class="{ 'options-switch-btn--on': showGhostPiece }"
-                    @click="toggleGhostPiece"
-                  >
-                    {{ showGhostPiece ? 'LIGADO' : 'DESLIGADO' }}
-                  </button>
                 </div>
               </div>
             </div>
@@ -4309,7 +6708,7 @@ onUnmounted(() => {
                         >
                           {{
                             controlsViewDevice === 'GAMEPAD'
-                              ? 'D-Pad ⬅️'
+                              ? 'D-Pad Esq'
                               : getPrimaryKeycapLabel('moveLeft')
                           }}
                         </button>
@@ -4325,7 +6724,7 @@ onUnmounted(() => {
                         >
                           {{
                             controlsViewDevice === 'GAMEPAD'
-                              ? 'D-Pad ➡️'
+                              ? 'D-Pad Dir'
                               : getPrimaryKeycapLabel('moveRight')
                           }}
                         </button>
@@ -4344,7 +6743,7 @@ onUnmounted(() => {
                         >
                           {{
                             controlsViewDevice === 'GAMEPAD'
-                              ? 'D-Pad ⬇️'
+                              ? 'D-Pad Baixo'
                               : getPrimaryKeycapLabel('softDrop')
                           }}
                         </button>
@@ -4481,7 +6880,7 @@ onUnmounted(() => {
             </div>
 
             <!-- =========================================================== -->
-            <!-- ABA 3: GRÁFICOS, FÍSICA LOCAL & HUD                         -->
+            <!-- ABA 3: GRÁFICOS & HUD (MINIMALISTA)                         -->
             <!-- =========================================================== -->
             <div
               v-else-if="optionsActiveTab === 'GRAPHICS'"
@@ -4490,44 +6889,7 @@ onUnmounted(() => {
               <div class="options-toggles-grid">
                 <div class="options-toggle-item">
                   <div class="options-toggle-info">
-                    <strong>🎨 Colorização Plástica 3-Tons (ABS)</strong>
-                    <small>
-                      Pinta os blocos em 10 cores vibrantes de brinquedo (desative para cinza original)
-                    </small>
-                  </div>
-                  <button
-                    type="button"
-                    class="options-switch-btn"
-                    :class="{ 'options-switch-btn--on': dynamicTintEnabled }"
-                    @click="toggleDynamicTint"
-                  >
-                    {{ dynamicTintEnabled ? 'ATIVO (3-TONS)' : 'CINZA' }}
-                  </button>
-                </div>
-
-                <div class="options-toggle-item">
-                  <div class="options-toggle-info">
-                    <strong>💨 Efeito de Vento e Folhas (15m+)</strong>
-                    <small>
-                      Ativa rajadas de vento e partículas de folhas a partir de 15m de altura no modo local
-                    </small>
-                  </div>
-                  <button
-                    type="button"
-                    class="options-switch-btn"
-                    :class="{ 'options-switch-btn--on': windEnabled }"
-                    @click="toggleWind"
-                  >
-                    {{ windEnabled ? 'LIGADO' : 'DESLIGADO' }}
-                  </button>
-                </div>
-
-                <div class="options-toggle-item">
-                  <div class="options-toggle-info">
-                    <strong>💥 Impacto Visual (Screen Shake)</strong>
-                    <small>
-                      Vibração sutil ao encaixar blocos pesados e receber poderes de caos
-                    </small>
+                    <strong>Screen Shake</strong>
                   </div>
                   <button
                     type="button"
@@ -4548,10 +6910,7 @@ onUnmounted(() => {
 
                 <div class="options-toggle-item">
                   <div class="options-toggle-info">
-                    <strong>📊 Contador de FPS &amp; Status de Rede</strong>
-                    <small>
-                      Exibe a taxa de quadros por segundo (FPS) no topo esquerdo durante a partida
-                    </small>
+                    <strong>Contador de FPS</strong>
                   </div>
                   <button
                     type="button"
@@ -4562,17 +6921,14 @@ onUnmounted(() => {
                     @click="toggleShowFpsPingOption"
                   >
                     {{
-                      optionsStore.state.showFpsPing ? 'VISÍVEL' : 'OCULTO'
+                      optionsStore.state.showFpsPing ? 'LIGADO' : 'DESLIGADO'
                     }}
                   </button>
                 </div>
 
                 <div class="options-toggle-item">
                   <div class="options-toggle-info">
-                    <strong>🏷️ Mostrar @handle nas Torres Adversárias</strong>
-                    <small>
-                      Exibe o identificador @nome_000 abaixo do apelido nas raias do Multiplayer
-                    </small>
+                    <strong>Mostrar Apelido</strong>
                   </div>
                   <button
                     type="button"
@@ -4585,8 +6941,8 @@ onUnmounted(() => {
                   >
                     {{
                       optionsStore.state.showOpponentHandles
-                        ? 'VISÍVEL'
-                        : 'OCULTO'
+                        ? 'LIGADO'
+                        : 'DESLIGADO'
                     }}
                   </button>
                 </div>
@@ -4594,34 +6950,30 @@ onUnmounted(() => {
             </div>
 
             <!-- =========================================================== -->
-            <!-- ABA 4: CONTA, SKIN & PRIVACIDADE SOCIAL                     -->
+            <!-- ABA 4: CONTA & SOCIAL (MINIMALISTA, SEM SKINS)              -->
             <!-- =========================================================== -->
             <div v-else class="options-tab-panel">
               <!-- Perfil e Apelido -->
               <div class="options-section-card">
                 <div class="options-section-header">
-                  <div>
-                    <h3 class="options-section-title">
-                      👤 Perfil de Jogador &amp; Conta Google
-                    </h3>
-                    <p class="options-section-desc">
-                      Personalize como você aparece na Sala Multiplayer e na Grande Copa
-                    </p>
-                  </div>
+                  <h3 class="options-section-title">Conta</h3>
                   <button
                     v-if="authStore.state.user"
                     type="button"
                     class="options-pill-btn options-pill-btn--gold"
                     @click="copyMyHandle"
                   >
-                    📋 Copiar {{ authStore.state.user.handle }}
+                    Copiar {{ authStore.state.user.handle }}
                   </button>
                 </div>
 
                 <div class="options-account-row">
-                  <div class="options-nick-editor">
+                  <div
+                    v-if="authStore.state.user"
+                    class="options-nick-editor"
+                  >
                     <label class="options-field-label" for="options-nick-input">
-                      Apelido na Sala (2 a 16 caracteres):
+                      Apelido
                     </label>
                     <div class="options-nick-input-group">
                       <input
@@ -4639,7 +6991,7 @@ onUnmounted(() => {
                         :disabled="isSavingCustomNick"
                         @click="saveOptionsCustomNick"
                       >
-                        {{ isSavingCustomNick ? 'SALVANDO...' : 'SALVAR APELIDO' }}
+                        {{ isSavingCustomNick ? 'SALVANDO...' : 'SALVAR' }}
                       </button>
                     </div>
                   </div>
@@ -4661,15 +7013,12 @@ onUnmounted(() => {
                         class="options-pill-btn options-pill-btn--danger"
                         @click="handleLogout"
                       >
-                        🚪 Sair
+                        Sair
                       </button>
                     </template>
                     <template v-else>
                       <div class="options-account-meta">
-                        <strong>Conta Offline (Convidado)</strong>
-                        <small>
-                          Conecte sua conta Google para adicionar amigos e jogar online
-                        </small>
+                        <strong>Convidado</strong>
                       </div>
                       <button
                         type="button"
@@ -4679,41 +7028,10 @@ onUnmounted(() => {
                           isAuthModalOpen = true;
                         "
                       >
-                        🔑 Conectar Google
+                        Conectar Google
                       </button>
                     </template>
                   </div>
-                </div>
-              </div>
-
-              <!-- Seletor Rápido de Skin do Mascote -->
-              <div class="options-section-card">
-                <h3 class="options-section-title" style="margin-bottom: 8px">
-                  🎭 Personagem Equipado
-                </h3>
-                <div class="options-skins-row">
-                  <button
-                    v-for="skin in playerSkins"
-                    :key="skin.id"
-                    type="button"
-                    class="options-skin-chip"
-                    :class="{
-                      'options-skin-chip--active':
-                        activePlayerSkinId === skin.id,
-                    }"
-                    @click="selectPlayerSkin(skin.id)"
-                  >
-                    <img
-                      :src="skin.url"
-                      :alt="skin.name"
-                      class="options-skin-chip-img"
-                      draggable="false"
-                    />
-                    <div class="options-skin-chip-text">
-                      <strong>{{ skin.shortName }}</strong>
-                      <small>{{ skin.name }}</small>
-                    </div>
-                  </button>
                 </div>
               </div>
 
@@ -4721,10 +7039,7 @@ onUnmounted(() => {
               <div class="options-toggles-grid">
                 <div class="options-toggle-item">
                   <div class="options-toggle-info">
-                    <strong>📨 Alertas de Convite durante a Partida</strong>
-                    <small>
-                      Exibe notificações no topo caso um amigo te convide enquanto você está jogando
-                    </small>
+                    <strong>Alertas de Convite</strong>
                   </div>
                   <button
                     type="button"
@@ -4737,8 +7052,8 @@ onUnmounted(() => {
                   >
                     {{
                       optionsStore.state.allowInvitesInGame
-                        ? 'PERMITIR'
-                        : 'SILENCIAR'
+                        ? 'LIGADO'
+                        : 'DESLIGADO'
                     }}
                   </button>
                 </div>
@@ -4878,7 +7193,11 @@ onUnmounted(() => {
                 'selecione-modo-brick-box--active':
                   selectedModeScreenColumn === 'MODE',
               }"
-              @click="selectedModeScreenColumn = 'MODE'"
+              @click.stop="
+                !showCupSelectionColumn
+                  ? startGame()
+                  : (selectedModeScreenColumn = 'MODE')
+              "
             >
               <!-- 8 Pinos Superiores Escuros -->
               <div class="selecione-modo-box-studs" aria-hidden="true">
@@ -5768,7 +8087,11 @@ onUnmounted(() => {
     <!-- =================================================================== -->
     <transition name="menu-fade-300">
       <div
-        v-if="screenFlow === 'MULTIPLAYER_LOBBY' && !isGameModeModalOpen"
+        v-if="
+          screenFlow === 'MULTIPLAYER_LOBBY' &&
+          !isGameModeModalOpen &&
+          !isSkinPickerOpen
+        "
         class="mp-lobby-screen"
       >
         <!-- Botão discreto no canto superior esquerdo para voltar ao Menu Principal -->
@@ -5976,11 +8299,11 @@ onUnmounted(() => {
                   }"
                   :title="
                     slot.isLocalHost
-                      ? 'Clique no personagem para trocar de skin'
+                      ? 'Clique no seu personagem para alterar seu mago e seus blocos'
                       : slot.customNick
                   "
                   draggable="false"
-                  @click="slot.isLocalHost && cycleLocalLobbySkin()"
+                  @click="slot.isLocalHost && openSkinsScreen(true)"
                 />
 
                 <!-- Placa branca inferior: Linha 1 (customNick editável para o player local) e Linha 2 (@handle imutável) -->
@@ -6653,214 +8976,6 @@ onUnmounted(() => {
     <!-- IN-GAME HUD & MATCH OVERLAYS                                        -->
     <!-- =================================================================== -->
     <template v-if="screenFlow === 'IN_GAME'">
-      <!-- MINIMAL FLOATING TOP-LEFT HUD (MODE, LIVES, RACE/SURVIVAL/PUZZLE/ENDLESS INFO & WIND) -->
-      <div class="floating-hud-left">
-        <div
-          class="hud-pill"
-          :class="
-            snapshot.gameMode === 'SURVIVAL'
-              ? 'hud-pill--survival-mode'
-              : snapshot.gameMode === 'PUZZLE'
-                ? 'hud-pill--puzzle-mode'
-                : snapshot.gameMode === 'ENDLESS'
-                  ? 'hud-pill--endless-mode'
-                  : 'hud-pill--race-mode'
-          "
-        >
-          <span class="hud-pill-label">MODO</span>
-          <span class="hud-pill-value">
-            {{
-              snapshot.gameMode === 'SURVIVAL'
-                ? '❤️ SOBREVIVÊNCIA'
-                : snapshot.gameMode === 'PUZZLE'
-                  ? '🧩 QUEBRA-CABEÇA'
-                  : snapshot.gameMode === 'ENDLESS'
-                    ? snapshot.isSinglePlayer
-                      ? '🌌 INFINITO'
-                      : '🌋 ABISMO'
-                    : '🏁 CORRIDA'
-            }}
-          </span>
-        </div>
-
-        <div
-          v-if="snapshot.gameMode === 'SURVIVAL'"
-          class="hud-pill hud-pill--lives"
-          :class="{
-            'hud-pill--lives-danger': snapshot.lives <= 1,
-            'hud-pill--lives-invulnerable':
-              (snapshot.invulnerableRemainingMs || 0) > 0,
-            'hud-pill--lives-flash': (snapshot.fallFlashRemainingMs || 0) > 0,
-          }"
-        >
-          <span class="hud-pill-label">VIDAS</span>
-          <span class="hud-pill-value hud-lives-hearts">
-            <span
-              v-for="idx in snapshot.maxLives"
-              :key="`heart-${idx}`"
-              class="hud-heart-icon"
-              :class="{ 'hud-heart-icon--lost': idx > snapshot.lives }"
-            >
-              {{ idx <= snapshot.lives ? '❤️' : '🖤' }}
-            </span>
-          </span>
-          <span
-            v-if="(snapshot.invulnerableRemainingMs || 0) > 0"
-            class="hud-invulnerable-badge mono"
-            title="Invulnerável por 3 segundos para estabilizar a torre!"
-          >
-            🛡️ {{ ((snapshot.invulnerableRemainingMs || 0) / 1000).toFixed(1) }}s
-          </span>
-        </div>
-
-        <div class="hud-pill">
-          <span class="hud-pill-label">
-            {{
-              snapshot.gameMode === 'ENDLESS' && !snapshot.isSinglePlayer
-                ? '⏱️ ABISMO'
-                : 'TEMPO'
-            }}
-          </span>
-          <span class="hud-pill-value mono">
-            {{
-              snapshot.gameMode === 'ENDLESS' && !snapshot.isSinglePlayer
-                ? formattedAbyssRemainingTime
-                : formattedTime
-            }}
-          </span>
-        </div>
-
-        <div
-          v-if="
-            snapshot.gameMode === 'ENDLESS' &&
-            !snapshot.isSinglePlayer &&
-            snapshot.isAbyssOvertime
-          "
-          class="hud-pill hud-pill--abyss-overtime"
-        >
-          <span>⚡ ABISMO ACELERANDO!</span>
-        </div>
-
-        <div v-if="snapshot.gameMode === 'SURVIVAL'" class="hud-pill">
-          <span class="hud-pill-label">🧱 PEÇAS</span>
-          <span class="hud-pill-value mono">
-            {{ snapshot.piecesPlaced }}<small>/{{ snapshot.survivalGoalPieces }}</small>
-            <small style="margin-left: 4px; color: #fde047">
-              • FALTAM {{ Math.max(0, snapshot.survivalGoalPieces - snapshot.piecesPlaced) }}
-            </small>
-          </span>
-        </div>
-
-        <div
-          v-else-if="
-            snapshot.gameMode === 'PUZZLE' &&
-            (snapshot.state === 'PUZZLE_COUNTING' || snapshot.state === 'VICTORY')
-          "
-          class="hud-pill"
-        >
-          <span class="hud-pill-label">🧱 PEÇAS</span>
-          <span class="hud-pill-value mono">
-            {{ snapshot.countedPieces ?? snapshot.settledBlocks.length }}
-          </span>
-        </div>
-
-        <div
-          v-else-if="
-            snapshot.gameMode === 'ENDLESS' &&
-            snapshot.isSinglePlayer &&
-            (snapshot.consecutiveAbyssFalls || 0) > 0
-          "
-          class="hud-pill hud-pill--lives-danger"
-          title="Perder 5 peças seguidas no abismo encerra a partida por colapso da base!"
-        >
-          <span class="hud-pill-label">⚠️ RISCO ABISMO</span>
-          <span class="hud-pill-value mono">
-            {{ snapshot.consecutiveAbyssFalls }}/5 quedas
-          </span>
-        </div>
-
-        <div class="hud-pill">
-          <span class="hud-pill-label">ALTURA</span>
-          <span v-if="snapshot.gameMode === 'SURVIVAL'" class="hud-pill-value mono">
-            {{ snapshot.towerHeight.toFixed(1) }}m
-            <small>MÁX {{ snapshot.maxTowerHeight.toFixed(1) }}m</small>
-          </span>
-          <span v-else-if="snapshot.gameMode === 'PUZZLE'" class="hud-pill-value mono">
-            {{ snapshot.towerHeight.toFixed(1) }}<small>/9m ⚡</small>
-          </span>
-          <span v-else-if="snapshot.gameMode === 'ENDLESS'" class="hud-pill-value mono">
-            {{ snapshot.towerHeight.toFixed(1) }}m
-            <small v-if="snapshot.isSinglePlayer">
-              / 🏁 {{ (snapshot.nextCheckpointHeightUnits ?? 10).toFixed(0) }}m
-            </small>
-            <small v-else>
-              • 🪨 {{ (snapshot.petrifyLineHeightUnits ?? 0).toFixed(1) }}m
-            </small>
-          </span>
-          <span v-else class="hud-pill-value mono">
-            {{ snapshot.towerHeight.toFixed(1) }}<small>/30m</small>
-          </span>
-        </div>
-
-        <div
-          v-if="snapshot.gameMode === 'PUZZLE'"
-          class="hud-pill"
-          title="Cada peça que cai na água eleva sua ilha estreita em +0.5 bloco em direção ao feixe de laser!"
-        >
-          <span class="hud-pill-label">🌊 SUBIDA</span>
-          <span class="hud-pill-value mono">
-            +{{ (snapshot.puzzleBaseRiseUnits || 0).toFixed(1) }}<small>bl</small>
-          </span>
-        </div>
-
-        <div
-          class="hud-pill"
-          :title="`Elevação [Col 0..7]: [${snapshot.baseElevations.join(', ')}]`"
-        >
-          <span class="hud-pill-label">🏠 BASE</span>
-          <span class="hud-pill-value">{{ snapshot.basePresetName }}</span>
-        </div>
-        <div
-          v-if="snapshot.windActive"
-          class="hud-pill hud-pill--wind"
-        >
-          <span class="hud-pill-label">💨 VENTO</span>
-          <span class="hud-pill-value">
-            {{
-              snapshot.windForce > 0.05
-                ? `→ ${Math.round(snapshot.windForce * 100)}%`
-                : snapshot.windForce < -0.05
-                  ? `← ${Math.round(Math.abs(snapshot.windForce) * 100)}%`
-                  : 'Calmo'
-            }}
-          </span>
-        </div>
-        <div
-          v-if="optionsStore.state.showFpsPing"
-          class="hud-pill"
-        >
-          <span class="hud-pill-label">📊 FPS</span>
-          <span class="hud-pill-value mono">
-            {{ liveFps }}
-            <small v-if="isOnlineMultiplayerMatch" style="color: #4ade80">
-              • ONLINE
-            </small>
-          </span>
-        </div>
-        <div
-          v-if="isShiftHeld"
-          class="hud-pill hud-pill--subgrid"
-        >
-          <span>🥊 Shift: Socão (Investida)</span>
-        </div>
-        <div
-          v-if="isDevModeOpen"
-          class="hud-pill hud-pill--paused"
-        >
-          <span>⏸️ PAUSADO (MODO DEV)</span>
-        </div>
-      </div>
-
       <!-- TOP-CENTER HUD: ENDLESS SCORE + NEXT PIECE BANNER (MATCHING REFERENCE IMAGE) -->
       <div
         v-if="snapshot.nextQueue.length > 0 || snapshot.gameMode === 'ENDLESS'"
@@ -6946,9 +9061,14 @@ onUnmounted(() => {
 
           <div
             v-if="snapshot.gameMode === 'SURVIVAL'"
-            class="survival-remaining-pieces-tag mono"
+            class="survival-remaining-pieces-tag"
           >
-            🧱 RESTAM {{ Math.max(0, snapshot.survivalGoalPieces - snapshot.piecesPlaced) }}
+            <span
+              :key="Math.max(0, snapshot.survivalGoalPieces - snapshot.piecesPlaced)"
+              class="survival-remaining-num"
+            >
+              {{ Math.max(0, snapshot.survivalGoalPieces - snapshot.piecesPlaced) }}
+            </span>
           </div>
         </div>
       </div>
@@ -6966,176 +9086,13 @@ onUnmounted(() => {
         PERSONAL BEST: {{ displayPersonalBest }}
       </div>
 
-      <!-- MINIMAL FLOATING TOP-RIGHT HUD (SINGLE-SLOT POWER + DEV MODE) -->
+      <!-- MINIMAL FLOATING TOP-RIGHT HUD (APENAS MODO DESENVOLVEDOR) -->
       <div
         class="floating-hud-right"
         :class="{
           'floating-hud-right--endless': snapshot.gameMode === 'ENDLESS',
         }"
       >
-        <!-- SINGLE-SLOT POWER INVENTORY CARD (8m / 16m / 24m CHECKPOINTS) -->
-        <div
-          class="power-slot-card"
-          :class="{
-            'power-slot-card--ready': currentSelfPower || currentAttackPower,
-          }"
-        >
-          <div class="power-slot-header">
-            <span class="power-slot-title">⚡ PODER (SLOT ÚNICO)</span>
-            <span class="power-slot-mode">
-              {{
-                snapshot.gameMode === 'PUZZLE'
-                  ? '1x Cola'
-                  : snapshot.gameMode === 'ENDLESS'
-                    ? 'Checkpoint +8m'
-                    : snapshot.isSinglePlayer
-                      ? 'MVP Solo'
-                      : 'Multi'
-              }}
-            </span>
-          </div>
-
-          <template v-if="currentSelfPower || currentAttackPower">
-            <button
-              v-if="currentSelfPower"
-              class="power-activate-btn power-activate-btn--positive"
-              title="Ativar Poder Positivo em sua torre (Tecla Espaço)"
-              @click="useSelfPower"
-            >
-              <span class="power-icon">{{ currentSelfPower.icon }}</span>
-              <span class="power-info">
-                <strong>{{ currentSelfPower.name }}</strong>
-                <small>{{ currentSelfPower.shortDescription }}</small>
-              </span>
-              <kbd class="power-kbd">ESPAÇO</kbd>
-            </button>
-
-            <button
-              v-if="currentAttackPower"
-              class="power-activate-btn power-activate-btn--negative"
-              title="Disparar Poder Negativo nos Inimigos (Tecla C ou B)"
-              @click="useAttackPower"
-            >
-              <span class="power-icon">{{ currentAttackPower.icon }}</span>
-              <span class="power-info">
-                <strong>{{ currentAttackPower.name }}</strong>
-                <small>Atacar Inimigos (Caos)</small>
-              </span>
-              <kbd class="power-kbd">C / B</kbd>
-            </button>
-          </template>
-          <div v-else-if="snapshot.gameMode === 'PUZZLE'" class="power-slot-empty">
-            🧴 <strong>Super Cola única utilizada</strong> • Sem magias no Modo Quebra-Cabeça
-          </div>
-          <div v-else-if="snapshot.gameMode === 'ENDLESS'" class="power-slot-empty">
-            Estabilize <strong>1.5s</strong> na linha das bandeiras (<strong>{{ (snapshot.nextCheckpointHeightUnits ?? 10).toFixed(0) }}m</strong>) para subir +8m e ganhar Poder!
-          </div>
-          <div v-else class="power-slot-empty">
-            Estabilize 0.5s em
-            <strong>
-              {{
-                snapshot.gameMode === 'SURVIVAL'
-                  ? '8m, 16m, 24m+ ou 10/20/30 peças'
-                  : '8m, 16m ou 24m'
-              }}
-            </strong>
-          </div>
-        </div>
-
-        <!-- CHARACTER SKIN SELECTOR PILL + POPOVER (assets/sprites/player) -->
-        <div v-if="playerSkins.length > 0" class="hud-skin-selector-wrap">
-          <button
-            class="hud-action-btn hud-skin-btn"
-            :class="{ 'hud-skin-btn--open': isSkinPickerOpen }"
-            title="Escolher Skin do Personagem (Mago, Dino, Pirata, Sombra)"
-            @click="isSkinPickerOpen = !isSkinPickerOpen"
-          >
-            <img
-              v-if="activePlayerSkin"
-              :src="activePlayerSkin.url"
-              :alt="activePlayerSkin.name"
-              class="hud-skin-thumb"
-            />
-            <span class="hud-skin-label">
-              <small>PERSONAGEM</small>
-              <strong>{{ activePlayerSkin ? activePlayerSkin.shortName : 'Skin' }}</strong>
-            </span>
-          </button>
-
-          <transition name="fade">
-            <div v-if="isSkinPickerOpen" class="hud-skin-popover">
-              <div class="hud-skin-popover-head">
-                <span>🎭 Variações de Skin (<code>assets/sprites/player</code>)</span>
-                <button
-                  class="hud-skin-close"
-                  title="Fechar"
-                  @click="isSkinPickerOpen = false"
-                >
-                  ✕
-                </button>
-              </div>
-              <div class="hud-skin-grid">
-                <button
-                  v-for="skin in playerSkins"
-                  :key="skin.id"
-                  class="hud-skin-card"
-                  :class="{
-                    'hud-skin-card--active': activePlayerSkinId === skin.id,
-                  }"
-                  :style="{ '--skin-accent': skin.accentColor }"
-                  @click="selectPlayerSkin(skin.id)"
-                >
-                  <div class="hud-skin-card-img-wrap">
-                    <img
-                      :src="skin.url"
-                      :alt="skin.name"
-                      class="hud-skin-card-img"
-                    />
-                  </div>
-                  <div class="hud-skin-card-meta">
-                    <strong>{{ skin.name }}</strong>
-                    <small>{{ skin.description }}</small>
-                  </div>
-                </button>
-              </div>
-            </div>
-          </transition>
-        </div>
-
-        <button
-          v-if="!isOnlineMultiplayerMatch"
-          class="hud-action-btn"
-          title="Selecionar o Modo de Jogo"
-          @click="openGameModeModal"
-        >
-          ⚙️ Modo
-        </button>
-
-        <button
-          class="hud-action-btn"
-          title="Abrir Opções de Áudio, Controles e Gráficos"
-          @click="openOptionsScreen(true)"
-        >
-          🎛️ Opções
-        </button>
-
-        <button
-          v-if="!isOnlineMultiplayerMatch"
-          class="hud-action-btn"
-          title="Nova Partida com Nova Seed (Tecla R)"
-          @click="restartMatch(true)"
-        >
-          🎲 Reiniciar
-        </button>
-
-        <button
-          class="hud-action-btn"
-          title="Voltar ao Menu Principal"
-          @click="returnToMainMenu"
-        >
-          🏠 Menu
-        </button>
-
         <button
           class="hud-action-btn hud-dev-btn"
           :class="{ 'hud-dev-btn--active': isDevModeOpen }"
@@ -7182,68 +9139,6 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- RESPAWN PENALTY OVERLAY (1.5s) -->
-      <div
-        v-if="snapshot.state === 'RESPAWN_DELAY'"
-        class="penalty-overlay"
-      >
-        <div
-          class="penalty-box"
-          :class="{
-            'penalty-box--survival': snapshot.gameMode === 'SURVIVAL',
-            'penalty-box--flash': (snapshot.fallFlashRemainingMs || 0) > 0,
-          }"
-        >
-          <div class="penalty-title">
-            {{
-              snapshot.gameMode === 'SURVIVAL'
-                ? `💔 PERDEU 1 VIDA! (${snapshot.lives}/${snapshot.maxLives})`
-                : snapshot.gameMode === 'PUZZLE'
-                  ? '🌊 CAIU NA ÁGUA! (+0.5 BLOCO NA BASE)'
-                  : snapshot.gameMode === 'ENDLESS'
-                    ? '🪨 CAIU NO ABISMO! (-1 SCORE)'
-                    : '⚠️ CAIU NA ÁGUA!'
-            }}
-          </div>
-          <div
-            v-if="
-              snapshot.gameMode === 'SURVIVAL' &&
-              (snapshot.invulnerableRemainingMs || 0) > 0
-            "
-            class="penalty-shield-pill"
-          >
-            🛡️ INVULNERÁVEL POR
-            <strong>
-              {{ ((snapshot.invulnerableRemainingMs || 0) / 1000).toFixed(1) }}s
-            </strong>
-            (ESTABILIZE SUA TORRE!)
-          </div>
-          <div
-            v-else-if="snapshot.gameMode === 'PUZZLE'"
-            class="penalty-shield-pill"
-          >
-            ⬆️ SUA ILHA SUBIU
-            <strong>+0.5 BLOCO</strong>
-            EM DIREÇÃO AO LASER (TOTAL: +{{ (snapshot.puzzleBaseRiseUnits || 0).toFixed(1) }} BL)
-          </div>
-          <div
-            v-else-if="
-              snapshot.gameMode === 'ENDLESS' && snapshot.isSinglePlayer
-            "
-            class="penalty-shield-pill"
-          >
-            ⚠️ QUEDAS SEGUIDAS NO ABISMO:
-            <strong>{{ snapshot.consecutiveAbyssFalls ?? 0 }}/5</strong>
-          </div>
-          <div class="penalty-sub">
-            Respawn em
-            <strong>
-              {{ (snapshot.respawnDelayRemainingMs / 1000).toFixed(1) }}s
-            </strong>
-          </div>
-        </div>
-      </div>
-
       <!-- INITIAL 3, 2, 1, GO! COUNTDOWN OVERLAY -->
       <div
         v-if="snapshot.state === 'COUNTDOWN'"
@@ -7257,6 +9152,77 @@ onUnmounted(() => {
           }}
         </div>
       </div>
+
+      <!-- PAUSE OVERLAY (ATIVADO COM ESC OU P) -->
+      <transition name="menu-fade-300">
+        <div
+          v-if="
+            isGamePaused &&
+            !isOptionsModalOpen &&
+            !isGameModeModalOpen &&
+            !isDevModeOpen
+          "
+          class="pause-game-overlay"
+          @click.self="togglePauseGame(false)"
+        >
+          <div class="pause-game-card">
+            <div class="selecione-modo-box-studs" aria-hidden="true">
+              <span v-for="s in 6" :key="s"></span>
+            </div>
+
+            <div class="pause-game-header">
+              <span class="pause-game-title">JOGO PAUSADO</span>
+            </div>
+
+            <div class="pause-game-actions">
+              <button
+                type="button"
+                class="selecione-action-brick-btn selecione-action-brick-btn--ready pause-brick-btn"
+                @click="togglePauseGame(false)"
+              >
+                <span class="selecione-action-studs" aria-hidden="true">
+                  <span></span><span></span><span></span><span></span>
+                </span>
+                <span class="selecione-action-body">CONTINUAR</span>
+              </button>
+
+              <button
+                v-if="!isOnlineMultiplayerMatch"
+                type="button"
+                class="selecione-action-brick-btn pause-brick-btn pause-brick-btn--blue"
+                @click="restartMatch(true)"
+              >
+                <span class="selecione-action-studs" aria-hidden="true">
+                  <span></span><span></span><span></span><span></span>
+                </span>
+                <span class="selecione-action-body">REINICIAR</span>
+              </button>
+
+              <button
+                type="button"
+                class="selecione-action-brick-btn pause-brick-btn pause-brick-btn--slate"
+                @click="openOptionsScreen(true)"
+              >
+                <span class="selecione-action-studs" aria-hidden="true">
+                  <span></span><span></span><span></span><span></span>
+                </span>
+                <span class="selecione-action-body">OPÇÕES</span>
+              </button>
+
+              <button
+                type="button"
+                class="selecione-action-brick-btn selecione-action-brick-btn--back pause-brick-btn"
+                @click="returnToMainMenu"
+              >
+                <span class="selecione-action-studs" aria-hidden="true">
+                  <span></span><span></span><span></span><span></span>
+                </span>
+                <span class="selecione-action-body">MENU PRINCIPAL</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </transition>
 
       <!-- SURVIVAL / ENDLESS ELIMINATED SPECTATOR BANNER IN ONLINE MULTIPLAYER -->
       <div
@@ -7285,6 +9251,7 @@ onUnmounted(() => {
       <!-- ================================================================= -->
       <div
         v-if="
+          !isEndTowerShowcaseActive &&
           !isOnlineMultiplayerMatch &&
           multiplayerClient.state.gameOverResult === null &&
           snapshot.state === 'GAME_OVER'
@@ -7370,6 +9337,7 @@ onUnmounted(() => {
 
       <div
         v-else-if="
+          !isEndTowerShowcaseActive &&
           !isOnlineMultiplayerMatch &&
           multiplayerClient.state.gameOverResult === null &&
           snapshot.state === 'VICTORY'
@@ -7464,6 +9432,7 @@ onUnmounted(() => {
       <!-- ================================================================= -->
       <div
         v-else-if="
+          !isEndTowerShowcaseActive &&
           (isOnlineMultiplayerMatch ||
             multiplayerClient.state.gameOverResult !== null) &&
           grandeCopaScoreboard.victoryCondition === 'SINGLE_WIN' &&
@@ -7565,6 +9534,7 @@ onUnmounted(() => {
       <!-- ================================================================= -->
       <div
         v-else-if="
+          !isEndTowerShowcaseActive &&
           (isOnlineMultiplayerMatch ||
             multiplayerClient.state.gameOverResult !== null) &&
           grandeCopaScoreboard.victoryCondition !== 'SINGLE_WIN' &&

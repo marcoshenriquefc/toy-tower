@@ -7,6 +7,8 @@ export type SkinCatalogCode =
   | 'DARK_MAGE'
   | 'ROBOT'
 
+export type BlockSkinCatalogCode = 'PLASTIC' | 'WOOD' | 'DIY' | 'GOLD'
+
 export interface IUserStats {
   matchesPlayed: number
   wins: number
@@ -18,6 +20,7 @@ export interface IFriendEntry {
   customNick: string
   email?: string
   equippedSkin: string
+  equippedBlockSkin?: string
   avatarUrl?: string
 }
 
@@ -26,6 +29,7 @@ export interface IFriendRequestEntry {
   customNick: string
   email: string
   equippedSkin: string
+  equippedBlockSkin?: string
   avatarUrl?: string
   createdAt?: Date | string
 }
@@ -37,8 +41,12 @@ export interface IUser {
   customNick: string // Nick personalizável exibido no Lobby (2 a 16 caracteres)
   handle: string // Identificador único imutável (formato @nome_000 em minúsculas)
   avatarUrl: string // Foto de perfil do Google
-  equippedSkin: string // Default: 'WIZARD'
-  unlockedSkins: string[] // Default: ['WIZARD', 'DINO', 'PIRATE', 'DARK_MAGE', 'ROBOT']
+  coins: number // Saldo de moedas vinculado à conta Gmail (Default: 0)
+  equippedSkin: string // Default: 'WIZARD' (Mago Normal)
+  unlockedSkins: string[] // Default: ['WIZARD'] (Demais skins só liberam ao comprar)
+  equippedBlockSkin: string // Default: 'PLASTIC' (Peças de Plástico Normal)
+  unlockedBlockSkins: string[] // Default: ['PLASTIC'] (Demais skins de blocos só liberam ao comprar)
+  shopMigratedV1?: boolean // Controle de migração para garantir que apenas a skin padrão venha liberada inicialmente
   friends: IFriendEntry[] // Amigos que aceitaram o pedido de amizade
   friendRequestsSent: IFriendRequestEntry[] // Pedidos enviados pendentes
   friendRequestsReceived: IFriendRequestEntry[] // Pedidos recebidos pendentes
@@ -49,13 +57,14 @@ export interface IUser {
 
 export interface IUserDocument extends IUser, Document {}
 
-export const DEFAULT_UNLOCKED_SKINS: SkinCatalogCode[] = [
-  'WIZARD',
-  'DINO',
-  'PIRATE',
-  'DARK_MAGE',
-  'ROBOT',
-]
+/**
+ * A skin inicial padrão de toda conta é apenas o Mago Normal ('WIZARD' / 'player_mage')
+ * com as Peças de Plástico Normal ('PLASTIC' / 'default').
+ * Todas as outras skins ficam bloqueadas até que o usuário as compre com moedas na Loja.
+ */
+export const DEFAULT_UNLOCKED_SKINS: SkinCatalogCode[] = ['WIZARD']
+
+export const DEFAULT_UNLOCKED_BLOCK_SKINS: BlockSkinCatalogCode[] = ['PLASTIC']
 
 export const DEFAULT_INITIAL_FRIENDS: IFriendEntry[] = []
 
@@ -74,6 +83,7 @@ const FriendEntrySchema = new Schema<IFriendEntry>(
     customNick: { type: String, required: true, trim: true },
     email: { type: String, default: '' },
     equippedSkin: { type: String, default: 'WIZARD' },
+    equippedBlockSkin: { type: String, default: 'PLASTIC' },
     avatarUrl: { type: String, default: '' },
   },
   { _id: false }
@@ -85,6 +95,7 @@ const FriendRequestEntrySchema = new Schema<IFriendRequestEntry>(
     customNick: { type: String, required: true, trim: true },
     email: { type: String, default: '' },
     equippedSkin: { type: String, default: 'WIZARD' },
+    equippedBlockSkin: { type: String, default: 'PLASTIC' },
     avatarUrl: { type: String, default: '' },
     createdAt: { type: Date, default: () => new Date() },
   },
@@ -128,6 +139,11 @@ const UserSchema = new Schema<IUserDocument>(
       type: String,
       default: '',
     },
+    coins: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     equippedSkin: {
       type: String,
       default: 'WIZARD',
@@ -135,6 +151,18 @@ const UserSchema = new Schema<IUserDocument>(
     unlockedSkins: {
       type: [String],
       default: () => [...DEFAULT_UNLOCKED_SKINS],
+    },
+    equippedBlockSkin: {
+      type: String,
+      default: 'PLASTIC',
+    },
+    unlockedBlockSkins: {
+      type: [String],
+      default: () => [...DEFAULT_UNLOCKED_BLOCK_SKINS],
+    },
+    shopMigratedV1: {
+      type: Boolean,
+      default: true,
     },
     friends: {
       type: [FriendEntrySchema],
@@ -173,5 +201,6 @@ const UserSchema = new Schema<IUserDocument>(
 export const UserModel: Model<IUserDocument> =
   (mongoose.models.User as Model<IUserDocument>) ||
   mongoose.model<IUserDocument>('User', UserSchema)
+
 
 

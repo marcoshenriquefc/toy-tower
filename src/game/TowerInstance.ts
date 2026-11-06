@@ -35,6 +35,7 @@ import {
   selectBasePresetForSeed,
 } from './BaseTerrainCatalog'
 import { spriteRegistry } from '../sprites/SpriteRegistry'
+import { optionsStore, formatKeyCodeLabel } from '../services/optionsStore'
 
 const { Engine, World, Bodies, Body, Events, Collision } = Matter
 
@@ -71,6 +72,7 @@ export interface RemoteLaneRenderData {
   handle: string
   customNick: string
   skinSpriteId: string
+  blockSkinId?: string
   rankBadge: '1ST' | '2ND' | '3RD' | '4TH'
   towerHeight: number
   lives: number
@@ -433,8 +435,11 @@ export class TowerInstance {
   private mascotHoverXUnits: number = 6.2
   private mascotHoverYUnits: number = 3.5
   private victoryAnimTimeMs: number = 0
+  public isExternalMatchEnded: boolean = false
   public showDebugColliders: boolean = false
   public showGhostPiece: boolean = false
+  public screenShakeEnabled: boolean = true
+  public showPlayerNicks: boolean = true
 
   /** Real-time Multiplayer rank badge, player nick, slot index, mascot cast animation, and remote lane render buffers */
   public rankBadge: '1ST' | '2ND' | '3RD' | '4TH' | null = null
@@ -661,16 +666,6 @@ export class TowerInstance {
         return
       }
 
-      // Special Power 2: STATIC_BRICK ("Bloco de Ferro"):
-      // In the exact millisecond it touches ANY piece of the tower (or the base),
-      // it freezes in space and converts from Dynamic to Static!
-      if (powerEffect === 'STATIC_BRICK') {
-        Body.setVelocity(activeBody, { x: 0, y: 0 })
-        Body.setAngularVelocity(activeBody, 0)
-        this.pendingLandPiece = true
-        return
-      }
-
       // Compute horizontal and vertical bounding overlap between the two colliding squares
       const overlapX =
         Math.min(activePart.bounds.max.x, otherPart.bounds.max.x) -
@@ -695,6 +690,14 @@ export class TowerInstance {
       if (isBottomSupport) {
         if (!otherPart.parent.isStatic && otherPart.parent.isSleeping) {
           Matter.Sleeping.set(otherPart.parent, false)
+        }
+        // Special Power 2: STATIC_BRICK ("Bloco de Ferro / Pedra"):
+        // As soon as it touches a supporting surface below, it snaps flush and petrifies immediately!
+        if (powerEffect === 'STATIC_BRICK') {
+          Body.setVelocity(activeBody, { x: 0, y: 0 })
+          Body.setAngularVelocity(activeBody, 0)
+          this.pendingLandPiece = true
+          return
         }
         // Start / sustain the 0.5s (500ms) bottom-contact grace window so the player can walk sideways
         // or perform a "Socão" to one of the sides before the piece locks in place!
@@ -824,6 +827,7 @@ export class TowerInstance {
     this.mascotHoverXUnits = 6.2
     this.mascotHoverYUnits = 3.5
     this.victoryAnimTimeMs = 0
+    this.isExternalMatchEnded = false
     this.lastNudgeAtMs = -1000
     this.pistonTimerMs = 0
     this.shakeTimerMs = 0
@@ -1019,6 +1023,7 @@ export class TowerInstance {
    */
   public activateAttackPower(): boolean {
     if (
+      this.isSinglePlayer ||
       this.state === 'GOAL_COUNTDOWN' ||
       this.state === 'ROOF_DROP' ||
       this.state === 'VICTORY' ||
@@ -2432,13 +2437,15 @@ export class TowerInstance {
       return
     }
 
-    // Positive Power 2: STATIC_BRICK ("Bloco Base Cinza / Âncora Estática")
-    // Freezes in mid-air as an indestructible Static body on the exact millisecond of contact!
+    // Positive Power 2: STATIC_BRICK ("Bloco Base Cinza / Âncora Estática / Poder de Pedra")
+    // Seats 100% flush onto supporting blocks (zero floating gap) and petrifies as an indestructible Static body!
     if (piece.powerEffect === 'STATIC_BRICK') {
+      this.snapStaticBrickFlushToSupport(body)
       Body.setVelocity(body, { x: 0, y: 0 })
       Body.setAngularVelocity(body, 0)
       Body.setStatic(body, true)
       piece.isStaticAnchor = true
+      piece.isPetrified = true
       piece.snapped = true
       this.spawnColoredBurst(
         body.position.x - this.offsetX,
@@ -2501,6 +2508,51 @@ export class TowerInstance {
     this.onPieceSettled?.(this.towerHeight, this.settledPieces.length)
     this.state = 'SETTLING'
     this.settlingTimerMs = 170
+  }
+
+  /**
+   * Snaps a `STATIC_BRICK` ("Poder de Rock / Pedra") vertically flush onto the highest supporting block
+   * directly below it (`gapY = 0.0px`) before converting it to a Static body, eliminating any floating gap
+   * caused by early sensor detection or horizontal slot-clearance micro-lifts.
+   */
+  private snapStaticBrickFlushToSupport(body: Matter.Body): void {
+    const candidates: Matter.Body[] = [
+      this.baseBody,
+      ...this.islands.filter((i) => !i.body.isSensor).map((i) => i.body),
+      ...this.settledPieces.map((p) => p.body),
+    ]
+    const activeParts =
+      body.parts.length > 1 ? body.parts.slice(1) : [body]
+
+    let minGapY = Infinity
+    for (const other of candidates) {
+      if (other === body) continue
+      const otherParts =
+        other.parts.length > 1 ? other.parts.slice(1) : [other]
+
+      for (const partA of activeParts) {
+        for (const partB of otherParts) {
+          const overlapX =
+            Math.min(partA.bounds.max.x, partB.bounds.max.x) -
+            Math.max(partA.bounds.min.x, partB.bounds.min.x)
+          if (overlapX <= 3.5) continue
+
+          const dy = partB.position.y - partA.position.y
+          if (dy < 7) continue
+
+          const gapY = partB.bounds.min.y - partA.bounds.max.y
+          if (gapY >= -4.5 && gapY <= 7.5) {
+            if (gapY < minGapY) {
+              minGapY = gapY
+            }
+          }
+        }
+      }
+    }
+
+    if (minGapY !== Infinity && Math.abs(minGapY) > 0.02) {
+      this.setBodyPositionClean(body, body.position.x, body.position.y + minGapY)
+    }
   }
 
   /**
@@ -2964,8 +3016,9 @@ export class TowerInstance {
     const body = piece.body
     const origPos = { x: body.position.x, y: body.position.y }
 
-    // If Bloco de Ferro (`STATIC_BRICK`) is already touching any block laterally/vertically, freeze immediately!
+    // If Bloco de Ferro / Pedra (`STATIC_BRICK`) is already resting on bottom support on a normal move, petrify flush!
     if (
+      !isShiftNudge &&
       piece.powerEffect === 'STATIC_BRICK' &&
       this.isStaticBrickTouchingTower(body)
     ) {
@@ -2982,10 +3035,7 @@ export class TowerInstance {
     if (isShiftNudge && this.state === 'FALLING') {
       const preContacts = this.detectLateralTowerContacts(body, dir)
       if (preContacts.length > 0) {
-        if (piece.powerEffect === 'STATIC_BRICK') {
-          this.landActivePiece()
-          return
-        }
+        this.snapBodyLaterallyFlush(body, dir, 6)
         this.triggerImpulseNudge(dir, preContacts, true)
         this.landActivePiece()
         return
@@ -3045,23 +3095,29 @@ export class TowerInstance {
 
     Matter.Sleeping.set(body, false)
 
-    // Test requested step on exact grid alignment without penetrating any block
-    if (this.tryMoveBodyWithSlotClearance(body, targetX, origPos.y)) {
+    // Test requested step on exact grid alignment without penetrating any block.
+    // For a mid-air Socão (`isShiftNudge && !wasTouchingBottom`), do not lift Y upward over lateral blocks so it genuinely collides with them!
+    const allowMicroLift = !isShiftNudge || wasTouchingBottom
+    if (
+      this.tryMoveBodyWithSlotClearance(
+        body,
+        targetX,
+        origPos.y,
+        allowMicroLift
+      )
+    ) {
       this.checkExtraLifeBalloonCatch()
       if (clampedByBoundary) {
         this.boundaryShakeDir = dir
         this.boundaryShakeTimerMs = 110
       }
-      if (
-        piece.powerEffect === 'STATIC_BRICK' &&
-        this.isStaticBrickTouchingTower(body)
-      ) {
-        this.landActivePiece()
-        return
-      }
       if (isShiftNudge && this.state === 'FALLING') {
-        const postContacts = this.detectLateralTowerContacts(body, dir)
+        let postContacts = this.detectLateralTowerContacts(body, dir)
+        if (postContacts.length === 0) {
+          postContacts = this.detectAnyCloseTowerContacts(body, dir)
+        }
         if (postContacts.length > 0) {
+          this.snapBodyLaterallyFlush(body, dir, 5)
           this.triggerImpulseNudge(dir, postContacts, true)
           this.landActivePiece()
           return
@@ -3078,6 +3134,13 @@ export class TowerInstance {
         this.triggerImpulseNudge(dir, [])
         return
       }
+      if (
+        piece.powerEffect === 'STATIC_BRICK' &&
+        this.isStaticBrickTouchingTower(body)
+      ) {
+        this.landActivePiece()
+        return
+      }
       // Normal 0.5u step: if the piece walked off a supporting ledge into open air, reset the 0.5s grace timer so it falls!
       if (!this.isPieceSupportedBelow(body)) {
         this.bottomTouchTimerMs = 0
@@ -3087,7 +3150,7 @@ export class TowerInstance {
     }
 
     // If Shift + Arrow ("O Socão") tried 1.0u and was blocked by another piece along the path:
-    // Slide up to 0.5u (or pixel-by-pixel flush against the blocking piece), punch it, and immediately land!
+    // Slide up to 0.5u (or pixel-by-pixel flush against the blocking piece), punch it, and immediately land/petrify!
     if (isShiftNudge && this.state === 'FALLING') {
       this.setBodyPositionClean(body, origPos.x, origPos.y)
       const halfLeftEdgeUnits =
@@ -3097,30 +3160,21 @@ export class TowerInstance {
         Math.min(maxBodyXUnits, halfLeftEdgeUnits - leftEdgeOffsetUnits)
       )
       const halfTargetX = this.offsetX + halfBodyXUnits * u
-      if (!this.tryMoveBodyWithSlotClearance(body, halfTargetX, origPos.y)) {
+      if (
+        !this.tryMoveBodyWithSlotClearance(
+          body,
+          halfTargetX,
+          origPos.y,
+          wasTouchingBottom
+        )
+      ) {
         this.setBodyPositionClean(body, origPos.x, origPos.y)
       }
 
-      // Sweep in 1px increments from current X toward targetX to close any remaining gap flush against the blocking piece
-      const startSweepX = body.position.x
-      const startSweepY = body.position.y
-      const remainingPx = Math.round(Math.abs(targetX - startSweepX))
-      let lastClearX = startSweepX
-      let lastClearY = startSweepY
-      for (let s = 1; s <= remainingPx; s++) {
-        const testX = startSweepX + dir * s
-        if (this.tryMoveBodyWithSlotClearance(body, testX, startSweepY)) {
-          lastClearX = body.position.x
-          lastClearY = body.position.y
-        } else {
-          break
-        }
-      }
-      this.setBodyPositionClean(body, lastClearX, lastClearY)
-
-      if (piece.powerEffect === 'STATIC_BRICK') {
-        this.landActivePiece()
-        return
+      // Sweep in 1px increments at current Y toward targetX to close any remaining lateral gap flush against the blocking piece
+      const remainingPx = Math.round(Math.abs(targetX - body.position.x))
+      if (remainingPx > 0) {
+        this.snapBodyLaterallyFlush(body, dir, remainingPx)
       }
 
       let hitContacts = this.detectLateralTowerContacts(body, dir)
@@ -3132,27 +3186,84 @@ export class TowerInstance {
       return
     }
 
-    // If Bloco de Ferro (`STATIC_BRICK`) was blocked because moving toward `targetX` hit a block laterally,
-    // slide it flush up to the side of that block and freeze immediately!
-    if (piece.powerEffect === 'STATIC_BRICK') {
-      const maxSteps = Math.max(1, Math.round(Math.abs(targetX - origPos.x)))
-      let lastClearX = origPos.x
-      for (let s = 1; s <= maxSteps; s++) {
-        const testX = origPos.x + dir * s
-        this.setBodyPositionClean(body, testX, origPos.y)
-        if (this.getOverlappingTowerBodies(body).length === 0) {
-          lastClearX = testX
-        } else {
-          break
+    // Revert to original grid position if blocked
+    this.setBodyPositionClean(body, origPos.x, origPos.y)
+  }
+
+  /**
+   * Slides `body` horizontally in `1px` steps along `dir` at its current `y` until its outer visual face
+   * sits flush against the adjacent tower piece (without eating the 1px outer collider inset or lifting Y).
+   */
+  private snapBodyLaterallyFlush(
+    body: Matter.Body,
+    dir: -1 | 1,
+    maxStepsPx: number
+  ): void {
+    const startX = body.position.x
+    const fixedY = body.position.y
+    let bestX = startX
+
+    const getMinVisualGapPx = (): number => {
+      const activeParts =
+        body.parts.length > 1 ? body.parts.slice(1) : [body]
+      const candidates: Matter.Body[] = [
+        ...this.settledPieces.map((s) => s.body),
+        this.baseBody,
+        ...this.islands.filter((i) => !i.body.isSensor).map((i) => i.body),
+      ]
+      let minGap = Infinity
+      for (const otherBody of candidates) {
+        if (otherBody === body) continue
+        const otherParts =
+          otherBody.parts.length > 1 ? otherBody.parts.slice(1) : [otherBody]
+        for (const partA of activeParts) {
+          const aLeft = partA.bounds.min.x - 1.0
+          const aRight = partA.bounds.max.x + 1.0
+          const aTop = partA.bounds.min.y + 1.0
+          const aBottom = partA.bounds.max.y - 1.0
+          for (const partB of otherParts) {
+            const bLeft = partB.bounds.min.x - 1.0
+            const bRight = partB.bounds.max.x + 1.0
+            const bTop = partB.bounds.min.y + 1.0
+            const bBottom = partB.bounds.max.y - 1.0
+            const overlapY = Math.min(aBottom, bBottom) - Math.max(aTop, bTop)
+            if (overlapY < 1.5) continue
+            const isAhead =
+              dir === 1
+                ? partB.bounds.max.x > partA.bounds.max.x + 1
+                : partB.bounds.min.x < partA.bounds.min.x - 1
+            if (!isAhead) continue
+            const visualGapPx = dir === 1 ? bLeft - aRight : aLeft - bRight
+            if (visualGapPx < minGap) {
+              minGap = visualGapPx
+            }
+          }
         }
       }
-      this.setBodyPositionClean(body, lastClearX, origPos.y)
-      this.landActivePiece()
+      return minGap
+    }
+
+    if (getMinVisualGapPx() <= 0.25) {
       return
     }
 
-    // Revert to original grid position if blocked
-    this.setBodyPositionClean(body, origPos.x, origPos.y)
+    for (let s = 1; s <= maxStepsPx; s++) {
+      const testX = startX + dir * s
+      this.setBodyPositionClean(body, testX, fixedY)
+      if (this.getOverlappingTowerBodies(body).length > 0) {
+        break
+      }
+      const gap = getMinVisualGapPx()
+      if (gap < -0.5) {
+        break
+      }
+      bestX = testX
+      if (gap <= 0.25) {
+        break
+      }
+    }
+
+    this.setBodyPositionClean(body, bestX, fixedY)
   }
 
   /**
@@ -3170,14 +3281,15 @@ export class TowerInstance {
   /**
    * Attempts to place `body` at exact grid `(targetX, targetY)` without off-grid horizontal shifts
    * that could wedge the piece inside neighboring blocks. Includes small upward micro-lifts (`-1.5 .. -4.5px`)
-   * so pieces resting on a block during the 0.5s bottom-contact window can slide sideways smoothly.
+   * when `allowMicroLift` is true so pieces resting on a block during the 0.5s bottom-contact window can slide sideways smoothly.
    */
   private tryMoveBodyWithSlotClearance(
     body: Matter.Body,
     targetX: number,
-    targetY: number
+    targetY: number,
+    allowMicroLift: boolean = true
   ): boolean {
-    const yOffsets = [0, -1.5, -3.0, -4.5]
+    const yOffsets = allowMicroLift ? [0, -1.5, -3.0, -4.5] : [0]
 
     for (const dy of yOffsets) {
       this.setBodyPositionClean(body, targetX, targetY + dy)
@@ -3375,21 +3487,25 @@ export class TowerInstance {
         // Visual outer edges of partA (accounting for 1.0px outer collider inset)
         const aLeft = partA.bounds.min.x - 1.0
         const aRight = partA.bounds.max.x + 1.0
-        const aTop = partA.bounds.min.y + 3.0
-        const aBottom = partA.bounds.max.y - 3.0
+        const aTop = partA.bounds.min.y + 1.0
+        const aBottom = partA.bounds.max.y - 1.0
 
         for (const partB of otherParts) {
           const bLeft = partB.bounds.min.x - 1.0
           const bRight = partB.bounds.max.x + 1.0
-          const bTop = partB.bounds.min.y + 3.0
-          const bBottom = partB.bounds.max.y - 3.0
+          const bTop = partB.bounds.min.y + 1.0
+          const bBottom = partB.bounds.max.y - 1.0
 
           // Must overlap vertically on the side face
           const overlapY = Math.min(aBottom, bBottom) - Math.max(aTop, bTop)
-          if (overlapY <= 0) continue
+          if (overlapY < 1.5) continue
 
-          // Ensure partB is genuinely on the `dir` side of partA
-          if ((partB.position.x - partA.position.x) * dir <= 4) continue
+          // Ensure partB is genuinely on the `dir` side of partA (works for both 1x1 cells and merged base/island rects)
+          const isAheadInDir =
+            dir === 1
+              ? partB.bounds.max.x > partA.bounds.max.x + 1
+              : partB.bounds.min.x < partA.bounds.min.x - 1
+          if (!isAheadInDir) continue
 
           // Horizontal visual gap in pixels in direction `dir`
           const visualGapPx = dir === 1 ? bLeft - aRight : aLeft - bRight
@@ -3894,9 +4010,9 @@ export class TowerInstance {
   }
 
   /**
-   * Checks if a `STATIC_BRICK` ("Bloco de Ferro") is touching any block in the tower,
-   * the base plate, or a Side Island—including lateral (side-to-side) contact!
-   * Accounts for the 1.0px outer collider inset per cell (`gapX <= 3.8px` when visually flush).
+   * Checks if a `STATIC_BRICK` ("Bloco de Ferro / Pedra") has reached tight bottom contact
+   * (`gapY <= 0.6px`, `overlapX > 5.5px`) with any supporting block in the tower, the base plate,
+   * or a Side Island. (Lateral petrification is triggered exclusively when using "O Socão" into another piece!)
    */
   private isStaticBrickTouchingTower(testBody: Matter.Body): boolean {
     const candidates: Matter.Body[] = [
@@ -3914,39 +4030,16 @@ export class TowerInstance {
 
       for (const partA of testParts) {
         for (const partB of otherParts) {
-          const col = Collision.collides(partA, partB)
-          if (col && col.collided) {
-            return true
-          }
-
-          const gapX = Math.max(
-            0,
-            Math.max(
-              partA.bounds.min.x - partB.bounds.max.x,
-              partB.bounds.min.x - partA.bounds.max.x
-            )
-          )
-          const gapY = Math.max(
-            0,
-            Math.max(
-              partA.bounds.min.y - partB.bounds.max.y,
-              partB.bounds.min.y - partA.bounds.max.y
-            )
-          )
           const overlapX =
             Math.min(partA.bounds.max.x, partB.bounds.max.x) -
             Math.max(partA.bounds.min.x, partB.bounds.min.x)
-          const overlapY =
-            Math.min(partA.bounds.max.y, partB.bounds.max.y) -
-            Math.max(partA.bounds.min.y, partB.bounds.min.y)
+          if (overlapX <= 5.5) continue
 
-          // 1. Lateral touch (side-by-side): collider inset is 1.0px on each block (2.0px total when visually flush)
-          if (gapX <= 3.8 && overlapY >= 2.0) {
-            return true
-          }
+          const dy = partB.position.y - partA.position.y
+          if (dy < 7) continue
 
-          // 2. Vertical touch (top or bottom): collider inset is 1.0px on each block (2.0px total when visually flush)
-          if (gapY <= 2.8 && overlapX >= 2.0) {
+          const gapY = partB.bounds.min.y - partA.bounds.max.y
+          if (gapY >= -6.0 && gapY <= 0.6) {
             return true
           }
         }
@@ -4055,7 +4148,7 @@ export class TowerInstance {
       return
     }
 
-    if (this.state === 'GAME_OVER') {
+    if (this.state === 'GAME_OVER' || this.isExternalMatchEnded) {
       this.updateCamera(dtMs)
       this.updateNudgeEffects(dtMs)
       this.tickSnapshots(dtMs)
@@ -4154,7 +4247,10 @@ export class TowerInstance {
         this.gameMode === 'PUZZLE' && this.pendingPuzzleBaseRiseUnits > 0.0005
       const isRestingOnBottom =
         this.state === 'FALLING' &&
-        (this.hasBottomSupportThisTick || this.isPieceSupportedBelow(body))
+        (this.hasBottomSupportThisTick ||
+          (this.activePiece.powerEffect === 'STATIC_BRICK'
+            ? this.isStaticBrickTouchingTower(body)
+            : this.isPieceSupportedBelow(body)))
 
       if (isRestingOnBottom || isPausedForPuzzleRise) {
         // Hold piece gently during the 0.5s grace window or while the puzzle island is rising smoothly
@@ -4207,14 +4303,15 @@ export class TowerInstance {
     // 5a. Prevent Matter.js warm-started positionImpulse explosions & clamp anomalous velocity spikes
     this.stabilizePhysicsStep()
 
-    // 5a-bis. Bloco de Ferro (`STATIC_BRICK`): if it touches any block even laterally while falling, freeze immediately!
+    // 5a-bis. Bloco de Ferro / Pedra (`STATIC_BRICK`): as soon as it touches a supporting block below, snap flush and petrify!
     if (
       !this.pendingLandPiece &&
       !this.pieceRecallAnim &&
       this.activePiece &&
       this.state === 'FALLING' &&
       this.activePiece.powerEffect === 'STATIC_BRICK' &&
-      this.isStaticBrickTouchingTower(this.activePiece.body)
+      (this.hasBottomSupportThisTick ||
+        this.isStaticBrickTouchingTower(this.activePiece.body))
     ) {
       this.pendingLandPiece = true
     }
@@ -4254,6 +4351,8 @@ export class TowerInstance {
     this.updateSettledBlocksAndHeight()
     if (this.gameMode === 'PUZZLE') {
       this.updatePuzzleLaserAndOverload(dtMs)
+    } else if (this.gameMode === 'ENDLESS') {
+      this.updateEndlessMode(dtMs)
     } else {
       this.updateCheckpoints(dtMs)
       this.updateGoalCountdown(dtMs)
@@ -4880,33 +4979,8 @@ export class TowerInstance {
       ? Math.min(2.8 * u, petrifyWorldY + 0.25 * u)
       : 2.8 * u
 
-    // Garbage Collection (Limpeza de Memória no modo ENDLESS):
-    // Qualquer bloco estático totalmente abaixo da borda inferior da câmera (cameraBottomY + 150px)
-    // é removido do mundo físico para rodar liso mesmo com 500+ peças no SCORE!
-    if (this.gameMode === 'ENDLESS' && this.cameraCenterHeightUnits > 8) {
-      const cameraBottomWorldY =
-        -(this.cameraCenterHeightUnits - 6.5) * u + 150
-      for (let i = this.settledPieces.length - 1; i >= 0; i--) {
-        const piece = this.settledPieces[i]
-        const body = piece.body
-        if (body.isStatic && body.bounds.min.y > cameraBottomWorldY) {
-          for (let j = this.glueWeldLinks.length - 1; j >= 0; j--) {
-            const link = this.glueWeldLinks[j]
-            if (link.bodyA === body || link.bodyB === body) {
-              this.glueWeldLinks.splice(j, 1)
-            }
-          }
-          for (let j = this.glueVines.length - 1; j >= 0; j--) {
-            const v = this.glueVines[j]
-            if (v.bodyA === body || v.bodyB === body) {
-              this.glueVines.splice(j, 1)
-            }
-          }
-          World.remove(this.engine.world, body)
-          this.settledPieces.splice(i, 1)
-        }
-      }
-    }
+    // Mantém todos os blocos estáticos/petrificados da torre para que, ao fim da partida,
+    // a câmera possa se afastar e exibir a torre inteira da base até o topo!
 
     if (this.activePiece && this.activePiece.body.position.y > abyssPhysY) {
       // If the Castle Roof in ROOF_DROP somehow missed the tower completely, snap it onto the top of the tower and win!
@@ -5067,16 +5141,6 @@ export class TowerInstance {
       this.lastFallFeedbackAtMs = this.elapsedTimeMs
       this.playCountdownAbortedBuzzer()
       this.spawnColoredBurst(calloutStartX, dropLocalY, '#94A3B8', 12)
-      this.fallFeedbackCallouts.push({
-        x: calloutStartX,
-        y: calloutStartY,
-        startY: calloutStartY,
-        title: '🪨 -1 PONTO NO ABISMO!',
-        subtitle: `QUEDAS SEGUIDAS: ${this.consecutiveAbyssFalls}/${GAME_CONSTANTS.ENDLESS_MAX_CONSECUTIVE_FALLS}`,
-        tone: 'LIFE_LOSS',
-        ageMs: 0,
-        maxAgeMs: 1550,
-      })
       this.onLifeLost?.()
 
       if (
@@ -5089,10 +5153,6 @@ export class TowerInstance {
         return
       }
 
-      this.onEventBanner?.(
-        `🪨 -1 Ponto! Peça caiu no Abismo (Score: ${this.endlessScore} • Quedas seguidas: ${this.consecutiveAbyssFalls}/${GAME_CONSTANTS.ENDLESS_MAX_CONSECUTIVE_FALLS})`,
-        'danger'
-      )
       this.emitSnapshotNow()
       return
     }
@@ -5105,21 +5165,7 @@ export class TowerInstance {
         this.lastFallFeedbackAtMs = this.elapsedTimeMs
         this.playCountdownAbortedBuzzer()
         this.spawnColoredBurst(calloutStartX, dropLocalY, '#FFFFFF', 12)
-        this.fallFeedbackCallouts.push({
-          x: calloutStartX,
-          y: calloutStartY,
-          startY: calloutStartY,
-          title: '⚠️ PEÇA CAIU!',
-          subtitle: '⏱️ +1.0s PENALIDADE',
-          tone: 'PIECE_DROP',
-          ageMs: 0,
-          maxAgeMs: 1450,
-        })
         this.onLifeLost?.()
-        this.onEventBanner?.(
-          'Peça Ativa caiu no Abismo! Penalidade de +1.0s no Spawn!',
-          'danger'
-        )
         this.emitSnapshotNow()
       } else if (this.elapsedTimeMs - this.lastFallFeedbackAtMs >= 650) {
         this.lastFallFeedbackAtMs = this.elapsedTimeMs
@@ -5127,16 +5173,6 @@ export class TowerInstance {
         this.mascotFallReactionMs = Math.max(this.mascotFallReactionMs, 1850)
         this.shakeTimerMs = Math.max(this.shakeTimerMs, 150)
         this.spawnColoredBurst(calloutStartX, dropLocalY, '#FFFFFF', 10)
-        this.fallFeedbackCallouts.push({
-          x: calloutStartX,
-          y: calloutStartY,
-          startY: calloutStartY,
-          title: '⚠️ BLOCO CAIU!',
-          subtitle: 'SEGURE A TORRE!',
-          tone: 'PIECE_DROP',
-          ageMs: 0,
-          maxAgeMs: 1350,
-        })
       }
       return
     }
@@ -5154,16 +5190,6 @@ export class TowerInstance {
       if (this.elapsedTimeMs - this.lastFallFeedbackAtMs >= 520) {
         this.lastFallFeedbackAtMs = this.elapsedTimeMs
         this.spawnColoredBurst(calloutStartX, dropLocalY, '#38BDF8', 8)
-        this.fallFeedbackCallouts.push({
-          x: calloutStartX,
-          y: calloutStartY,
-          startY: calloutStartY,
-          title: '🛡️ PROTEGIDO!',
-          subtitle: `INVULNERÁVEL ${(this.invulnerableRemainingMs / 1000).toFixed(1)}s`,
-          tone: 'SHIELD_PROTECTED',
-          ageMs: 0,
-          maxAgeMs: 1150,
-        })
       }
       return
     }
@@ -5179,17 +5205,6 @@ export class TowerInstance {
     this.shakeTimerMs = 250
     this.spawnColoredBurst(calloutStartX, dropLocalY, '#FFFFFF', 14)
     this.spawnColoredBurst(calloutStartX, dropLocalY, '#F43F5E', 10)
-    this.fallFeedbackCallouts.push({
-      x: calloutStartX,
-      y: calloutStartY,
-      startY: calloutStartY,
-      title: '💔 -1 VIDA!',
-      subtitle:
-        this.lives > 0 ? '🛡️ 3.0s INVULNERÁVEL!' : '💀 FIM DE JOGO!',
-      tone: 'LIFE_LOSS',
-      ageMs: 0,
-      maxAgeMs: 1750,
-    })
     this.onLifeLost?.()
 
     if (this.lives <= 0) {
@@ -5197,19 +5212,6 @@ export class TowerInstance {
       return
     }
 
-    const heartsDisplay =
-      '❤️'.repeat(this.lives) +
-      '🖤'.repeat(Math.max(0, this.maxLives - this.lives))
-    const reasonText =
-      reason === 'ACTIVE_WATER'
-        ? 'Peça caiu na água!'
-        : reason === 'SETTLED_WATER'
-          ? 'Bloco da torre caiu na água!'
-          : 'Bloco da torre desintegrou na lateral!'
-    this.onEventBanner?.(
-      `💔 -1 VIDA! ${reasonText} 🛡️ Invulnerável por 3s para estabilizar! (${heartsDisplay})`,
-      'danger'
-    )
     this.emitSnapshotNow()
   }
 
@@ -5235,6 +5237,14 @@ export class TowerInstance {
     if (this.heldActivePiece) {
       World.remove(this.engine.world, this.heldActivePiece.body)
       this.heldActivePiece = null
+    }
+
+    // Trava todas as peças da torre como estáticas para não destruir a torre e permitir o zoom-out final!
+    for (const p of this.settledPieces) {
+      Body.setVelocity(p.body, { x: 0, y: 0 })
+      Body.setAngularVelocity(p.body, 0)
+      Body.setStatic(p.body, true)
+      p.snapped = true
     }
 
     this.pieceRecallAnim = null
@@ -5401,26 +5411,27 @@ export class TowerInstance {
           this.spawnColoredBurst(x, -cp * u, '#38BDF8', 4)
         }
 
-        // Advance checkpointLineY by +8m; in Singleplayer also advance petrifyLineY by +8m!
+        // Advance checkpointLineY by +12m; in Singleplayer also advance petrifyLineY by +12m!
         this.nextEndlessCheckpointUnits = cp + GAME_CONSTANTS.ENDLESS_STEP_UNITS
         if (!isMultiplayer) {
           this.targetPetrifyLineHeightUnits = Math.max(
             0,
-            this.nextEndlessCheckpointUnits - 9.5
+            this.nextEndlessCheckpointUnits - (GAME_CONSTANTS.ENDLESS_STEP_UNITS + 1.5)
           )
         }
 
-        // Grant 1 Positive Power in the mascot's bubble (BRICK_REMOVER, STATIC_BRICK, SUPER_GLUE, or SIDE_ISLAND)
+        // Grant 1 Positive Power in the mascot's bubble (and Chaos Power only in Multiplayer)
         const excludePositive: PowerId[] = ['EXTRA_LIFE']
         if (this.hasSpawnedSideIsland) excludePositive.push('SIDE_ISLAND')
         const rolled = rollCheckpointPowers(
-          !isMultiplayer,
+          isMultiplayer,
           () => this.randomizer.nextFloat(),
           excludePositive
         )
         this.inventoryPower = {
           selfPower: rolled.selfPower.id,
-          attackPower: rolled.attackPower ? rolled.attackPower.id : null,
+          attackPower:
+            isMultiplayer && rolled.attackPower ? rolled.attackPower.id : null,
           sourceCheckpoint: cp,
         }
 
@@ -5449,8 +5460,19 @@ export class TowerInstance {
           }
         }
 
+        const selfKeyLabel = formatKeyCodeLabel(
+          optionsStore.state.keybinds.selfPower?.[0] || 'KeyJ'
+        )
+        const attackKeyLabel = formatKeyCodeLabel(
+          optionsStore.state.keybinds.attackPower?.[0] || 'KeyK'
+        )
+        const powerSummary =
+          isMultiplayer && rolled.attackPower
+            ? `[${selfKeyLabel}] ${rolled.selfPower.icon} ${rolled.selfPower.shortName} (Bom) | [${attackKeyLabel}] ${rolled.attackPower.icon} ${rolled.attackPower.shortName} (Caos)`
+            : `[${selfKeyLabel}] ${rolled.selfPower.icon} ${rolled.selfPower.shortName}`
+
         this.onEventBanner?.(
-          `🚩 Checkpoint ${cp}m validado! Base petrificada (+8m) • Poder: [Espaço] ${rolled.selfPower.icon} ${rolled.selfPower.shortName}${weatherSuffix}`,
+          `🚩 Checkpoint ${cp}m validado! Base petrificada (+${GAME_CONSTANTS.ENDLESS_STEP_UNITS}m) • Poder: ${powerSummary}${weatherSuffix}`,
           'success'
         )
         this.emitSnapshotNow()
@@ -5463,7 +5485,7 @@ export class TowerInstance {
 
   /**
    * Transitions the instance into `GAME_OVER` when all 3 lives are lost in `SURVIVAL` mode.
-   * All active and settled pieces dissolve/disappear cleanly.
+   * Preserves all settled pieces intact as static blocks so the camera can zoom out and showcase the built tower!
    */
   public triggerSurvivalGameOver(): void {
     if (this.state === 'GAME_OVER' || this.state === 'VICTORY') return
@@ -5484,27 +5506,13 @@ export class TowerInstance {
       this.heldActivePiece = null
     }
 
-    this.glueWeldLinks = []
-    this.glueVines = []
-    for (let i = this.settledPieces.length - 1; i >= 0; i--) {
-      const piece = this.settledPieces[i]
-      const body = piece.body
-      const localX = body.position.x - this.offsetX
-      body.isSensor = true
-      World.remove(this.engine.world, body)
-      this.dissolvingBricks.push({
-        body,
-        piece,
-        progress: 0,
-        ageMs: 0,
-        durationMs: 360,
-        startX: localX,
-        startY: body.position.y,
-        angle: body.angle,
-        reason: 'LATERAL',
-      })
+    // Não destrói a torre: trava todas as peças empilhadas como estáticas para mostrar como a torre ficou!
+    for (const p of this.settledPieces) {
+      Body.setVelocity(p.body, { x: 0, y: 0 })
+      Body.setAngularVelocity(p.body, 0)
+      Body.setStatic(p.body, true)
+      p.snapped = true
     }
-    this.settledPieces = []
 
     this.pieceRecallAnim = null
     this.extraLifeBalloons = []
@@ -5522,6 +5530,56 @@ export class TowerInstance {
     this.onEventBanner?.(
       `💀 FIM DE JOGO! Suas vidas acabaram! Peças empilhadas: ${finalPieces}/${GAME_CONSTANTS.SURVIVAL_GOAL_PIECES} • Altura Máx: ${this.maxTowerHeight.toFixed(1)}m`,
       'danger'
+    )
+  }
+
+  /**
+   * Freezes the local tower in place when an online multiplayer match ends (e.g. an opponent won),
+   * so all towers remain intact for the end-of-game full-tower camera zoom-out.
+   */
+  public freezeTowerForMatchEnd(): void {
+    this.isExternalMatchEnded = true
+    if (this.activePiece) {
+      const lx = this.activePiece.body.position.x - this.offsetX
+      const ly = this.activePiece.body.position.y
+      this.spawnMagicSmokePoof(lx, ly)
+      World.remove(this.engine.world, this.activePiece.body)
+      this.activePiece = null
+    }
+    if (this.heldActivePiece) {
+      World.remove(this.engine.world, this.heldActivePiece.body)
+      this.heldActivePiece = null
+    }
+    for (const p of this.settledPieces) {
+      Body.setVelocity(p.body, { x: 0, y: 0 })
+      Body.setAngularVelocity(p.body, 0)
+      Body.setStatic(p.body, true)
+      p.snapped = true
+    }
+    this.pieceRecallAnim = null
+    this.extraLifeBalloons = []
+    this.isSoftDropping = false
+    this.pendingLandPiece = false
+    this.goalCountdownMs = null
+    this.updateSettledBlocksAndHeight()
+    this.emitSnapshotNow()
+  }
+
+  /**
+   * Returns true when the match has ended in any mode EXCEPT `PUZZLE`,
+   * activating the full-tower base-to-top camera zoom-out showcase.
+   */
+  public isMatchEndShowcaseActive(): boolean {
+    if (this.gameMode === 'PUZZLE') return false
+    const isMultiplayer =
+      !this.isSinglePlayer && this.remoteLanesToRender.length > 0
+    const hasAliveRemotes =
+      isMultiplayer &&
+      this.remoteLanesToRender.some((r) => !r.isEliminated && r.lives > 0)
+    return (
+      this.state === 'VICTORY' ||
+      this.isExternalMatchEnded ||
+      (this.state === 'GAME_OVER' && !hasAliveRemotes)
     )
   }
 
@@ -6359,16 +6417,16 @@ export class TowerInstance {
   }
 
   /**
-   * Checkpoint Trigger Rule (`8m, 16m, 24m` in RACE, extended + piece milestones in SURVIVAL):
+   * Checkpoint Trigger Rule (`12m, 24m` in RACE, extended + piece milestones in SURVIVAL):
    * - A settled piece must stabilize crossing the line for at least 0.5 second (`500ms`).
    * - Once triggered, the line glows, dissolves, and grants a rolled Power into the Single-Slot Inventory
    *   (overwriting any unspent power). Each checkpoint line only rewards once per match.
    */
   private updateCheckpoints(dtMs: number): void {
-    // In SURVIVAL mode, also grant a checkpoint power every 10 stabilized pieces (10, 20, 30, 40)
+    // In SURVIVAL mode, also grant a checkpoint power at 16 and 32 stabilized pieces
     // so wide/low survival towers receive helpful powers (including the Extra Life Balloon!) too!
     if (this.gameMode === 'SURVIVAL') {
-      const pieceMilestones = [10, 20, 30, 40]
+      const pieceMilestones = [16, 32]
       const currentCount = this.settledPieces.length
       const nextPieceCp = pieceMilestones.find(
         (m) =>
@@ -6387,18 +6445,28 @@ export class TowerInstance {
         ) {
           excludePositive.push('EXTRA_LIFE')
         }
+        const isMultiplayer = !this.isSinglePlayer
         const rolled = rollCheckpointPowers(
-          true,
+          isMultiplayer,
           () => this.randomizer.nextFloat(),
           excludePositive
         )
         this.inventoryPower = {
           selfPower: rolled.selfPower.id,
-          attackPower: rolled.attackPower ? rolled.attackPower.id : null,
+          attackPower:
+            isMultiplayer && rolled.attackPower ? rolled.attackPower.id : null,
           sourceCheckpoint: nextPieceCp,
         }
+        const selfKeyLabel = formatKeyCodeLabel(
+          optionsStore.state.keybinds.selfPower?.[0] || 'KeyJ'
+        )
+        const attackKeyLabel = formatKeyCodeLabel(
+          optionsStore.state.keybinds.attackPower?.[0] || 'KeyK'
+        )
         this.onEventBanner?.(
-          `★ Marco de ${nextPieceCp} Peças! [Espaço] ${rolled.selfPower.icon} ${rolled.selfPower.shortName} (Bom) | [C] ${rolled.attackPower?.icon} ${rolled.attackPower?.shortName} (Caos)`,
+          isMultiplayer && rolled.attackPower
+            ? `★ Marco de ${nextPieceCp} Peças! [${selfKeyLabel}] ${rolled.selfPower.icon} ${rolled.selfPower.shortName} (Bom) | [${attackKeyLabel}] ${rolled.attackPower.icon} ${rolled.attackPower.shortName} (Caos)`
+            : `★ Marco de ${nextPieceCp} Peças! [${selfKeyLabel}] ${rolled.selfPower.icon} ${rolled.selfPower.shortName}`,
           'success'
         )
         this.emitSnapshotNow()
@@ -6406,7 +6474,9 @@ export class TowerInstance {
     }
 
     const checkpoints =
-      this.gameMode === 'SURVIVAL' ? [8, 16, 24, 32, 40, 48, 56] : [8, 16, 24]
+      this.gameMode === 'SURVIVAL'
+        ? [12, 24, 36, 48, 60, 72]
+        : [12, 24]
     const nextUnreached = checkpoints.find(
       (cp) => !this.checkpointsReached.includes(cp)
     )
@@ -6441,7 +6511,7 @@ export class TowerInstance {
         this.spawnColoredBurst(x, -cp * u, '#FACC15', 3)
       }
 
-      // Roll Checkpoint Power(s): Good Power (light bubble) + Chaos Power (dark red bubble) on the mascot!
+      // Roll Checkpoint Power(s): Good Power (light bubble) + Chaos Power (dark red bubble, Multiplayer only) on the mascot!
       // Once the player has used SIDE_ISLAND (`hasSpawnedSideIsland === true`), remove SIDE_ISLAND from future Checkpoint rolls!
       const excludePositive: PowerId[] = []
       if (this.hasSpawnedSideIsland) excludePositive.push('SIDE_ISLAND')
@@ -6454,19 +6524,29 @@ export class TowerInstance {
       ) {
         excludePositive.push('EXTRA_LIFE')
       }
+      const isMultiplayer = !this.isSinglePlayer
       const rolled = rollCheckpointPowers(
-        true,
+        isMultiplayer,
         () => this.randomizer.nextFloat(),
         excludePositive
       )
       this.inventoryPower = {
         selfPower: rolled.selfPower.id,
-        attackPower: rolled.attackPower ? rolled.attackPower.id : null,
+        attackPower:
+          isMultiplayer && rolled.attackPower ? rolled.attackPower.id : null,
         sourceCheckpoint: cp,
       }
 
+      const selfKeyLabel = formatKeyCodeLabel(
+        optionsStore.state.keybinds.selfPower?.[0] || 'KeyJ'
+      )
+      const attackKeyLabel = formatKeyCodeLabel(
+        optionsStore.state.keybinds.attackPower?.[0] || 'KeyK'
+      )
       this.onEventBanner?.(
-        `★ Checkpoint ${cp}m! [Espaço] ${rolled.selfPower.icon} ${rolled.selfPower.shortName} (Bom) | [C] ${rolled.attackPower?.icon} ${rolled.attackPower?.shortName} (Caos)`,
+        isMultiplayer && rolled.attackPower
+          ? `★ Checkpoint ${cp}m! [${selfKeyLabel}] ${rolled.selfPower.icon} ${rolled.selfPower.shortName} (Bom) | [${attackKeyLabel}] ${rolled.attackPower.icon} ${rolled.attackPower.shortName} (Caos)`
+          : `★ Checkpoint ${cp}m! [${selfKeyLabel}] ${rolled.selfPower.icon} ${rolled.selfPower.shortName}`,
         'success'
       )
       this.emitSnapshotNow()
@@ -6655,6 +6735,7 @@ export class TowerInstance {
       this.state === 'GOAL_COUNTDOWN' || this.state === 'ROOF_DROP'
     const isMultiplayer =
       !this.isSinglePlayer && this.remoteLanesToRender.length > 0
+    const isEndShowcase = this.isMatchEndShowcaseActive()
 
     let lowestPlayerHeight = this.towerHeight
     let highestVisibleUnits = Math.max(
@@ -6691,30 +6772,33 @@ export class TowerInstance {
     const targetPanUnits =
       this.gameMode === 'PUZZLE'
         ? 1.8
-        : this.gameMode === 'ENDLESS'
-          ? Math.max(baseVerticalPan, this.petrifyLineHeightUnits + 3.2)
-          : !isMultiplayer && isClimax
-            ? Math.max(baseVerticalPan, this.towerHeight - 8.5)
-            : baseVerticalPan
+        : isEndShowcase
+          ? 0
+          : this.gameMode === 'ENDLESS'
+            ? Math.max(baseVerticalPan, this.petrifyLineHeightUnits + 3.2)
+            : !isMultiplayer && isClimax
+              ? Math.max(baseVerticalPan, this.towerHeight - 8.5)
+              : baseVerticalPan
 
     if (this.gameMode === 'PUZZLE') {
       // No Modo Quebra-Cabeça a tela fica SEMPRE fixa, sem nunca subir
       this.cameraCenterHeightUnits = 1.8
     } else {
-      const lerpFactor = Math.min(1, dtMs * 0.0055)
+      const lerpFactor = Math.min(1, dtMs * (isEndShowcase ? 0.0045 : 0.0055))
       this.cameraCenterHeightUnits +=
         (targetPanUnits - this.cameraCenterHeightUnits) * lerpFactor
     }
 
-    const targetParallaxX = this.activePiece
-      ? Math.max(
-          -56,
-          Math.min(
-            56,
-            -(this.activePiece.body.position.x - this.offsetX) * 0.45
+    const targetParallaxX =
+      isEndShowcase || !this.activePiece
+        ? 0
+        : Math.max(
+            -56,
+            Math.min(
+              56,
+              -(this.activePiece.body.position.x - this.offsetX) * 0.45
+            )
           )
-        )
-      : 0
     this.cameraParallaxX +=
       (targetParallaxX - this.cameraParallaxX) * Math.min(1, dtMs * 0.007)
 
@@ -6725,7 +6809,51 @@ export class TowerInstance {
           ? 1.1
           : 1.0
 
-    if (isMultiplayer) {
+    if (isEndShowcase) {
+      let highestEndTowerUnits = Math.max(
+        this.towerHeight,
+        this.maxTowerHeight,
+        8
+      )
+      if (isMultiplayer) {
+        for (const r of this.remoteLanesToRender) {
+          if (r.towerHeight > highestEndTowerUnits) {
+            highestEndTowerUnits = r.towerHeight
+          }
+          for (const blk of r.settledBlocks) {
+            if (blk.y + 1.5 > highestEndTowerUnits) {
+              highestEndTowerUnits = blk.y + 1.5
+            }
+          }
+        }
+      }
+      const showcaseSpanUnits = Math.max(15, highestEndTowerUnits + 4.8)
+      const availHeightPx = Math.max(240, this.lastCanvasHeight - 112 - 84)
+      const showcaseVerticalZoom = availHeightPx / (showcaseSpanUnits * u)
+
+      if (isMultiplayer) {
+        const totalLanes = 1 + this.remoteLanesToRender.length
+        const maxMultiLaneZoom =
+          totalLanes >= 4 ? 0.68 : totalLanes === 3 ? 0.78 : 0.85
+        const allOffsetsX = [
+          this.offsetX,
+          ...this.remoteLanesToRender.map((r) => r.laneOffsetX),
+        ]
+        const minLaneX = Math.min(...allOffsetsX)
+        const maxLaneX = Math.max(...allOffsetsX)
+        const totalHorizontalSpanPx = maxLaneX - minLaneX + 19.5 * u
+        const availWidthPx = Math.max(360, this.lastCanvasWidth - 32)
+        const horizontalFitZoom =
+          availWidthPx / Math.max(1, totalHorizontalSpanPx)
+
+        targetZoom = Math.max(
+          0.18,
+          Math.min(maxMultiLaneZoom, horizontalFitZoom, showcaseVerticalZoom)
+        )
+      } else {
+        targetZoom = Math.max(0.18, Math.min(0.84, showcaseVerticalZoom))
+      }
+    } else if (isMultiplayer) {
       const totalLanes = 1 + this.remoteLanesToRender.length
       const maxMultiLaneZoom =
         totalLanes >= 4 ? 0.68 : totalLanes === 3 ? 0.78 : 0.88
@@ -6755,7 +6883,9 @@ export class TowerInstance {
       )
     }
 
-    this.cameraZoom += (targetZoom - this.cameraZoom) * Math.min(1, dtMs * 0.006)
+    this.cameraZoom +=
+      (targetZoom - this.cameraZoom) *
+      Math.min(1, dtMs * (isEndShowcase ? 0.0045 : 0.006))
   }
 
   private tickSnapshots(dtMs: number): void {
@@ -6978,7 +7108,7 @@ export class TowerInstance {
 
     let shakeOffsetX = 0
     let shakeOffsetY = 0
-    if (this.shakeTimerMs > 0) {
+    if (this.screenShakeEnabled && this.shakeTimerMs > 0) {
       const decay = this.shakeTimerMs / this.shakeDurationMs
       const phase = (1 - decay) * Math.PI * 5
       shakeOffsetX = this.shakeDir * Math.cos(phase) * 3.5 * decay
@@ -6986,10 +7116,11 @@ export class TowerInstance {
     }
 
     const effectiveZoom = this.cameraZoom
+    const hasCustomZoom = isMultiplayer || Math.abs(effectiveZoom - 1.0) > 0.002
     const cameraOriginScreenX = canvasWidth / 2 + this.offsetX + shakeOffsetX
     const cameraOriginScreenY =
       canvasHeight - 112 + this.cameraCenterHeightUnits * u + shakeOffsetY
-    const effectiveSceneryOriginY = isMultiplayer
+    const effectiveSceneryOriginY = hasCustomZoom
       ? canvasHeight -
         112 +
         this.cameraCenterHeightUnits * u * effectiveZoom +
@@ -7027,12 +7158,10 @@ export class TowerInstance {
     ctx.save()
     ctx.translate(cameraOriginScreenX, cameraOriginScreenY)
 
-    // Smooth camera zoom (centered on screen X and anchored at lowest-player height in Multiplayer)
+    // Smooth camera zoom (centered on screen X and anchored at cameraCenterHeightUnits)
     if (Math.abs(effectiveZoom - 1.0) > 0.002) {
       const pivotX = isMultiplayer ? -this.offsetX : 0
-      const focusY = isMultiplayer
-        ? -this.cameraCenterHeightUnits * u
-        : -Math.max(0, this.towerHeight * 0.5) * u
+      const focusY = -this.cameraCenterHeightUnits * u
       ctx.translate(pivotX, focusY)
       ctx.scale(effectiveZoom, effectiveZoom)
       ctx.translate(-pivotX, -focusY)
@@ -7097,7 +7226,8 @@ export class TowerInstance {
     }
 
     // 6-endless. In Endless / Abyss Mode, render Zone 1 (Petrification Line, Dark Curtain & Clouds) and Zone 3 (Checkpoint Flags & Cyan Diamond Line)
-    if (this.gameMode === 'ENDLESS') {
+    // (Hidden during end-of-game showcase so the full tower is visible from the base to the top!)
+    if (this.gameMode === 'ENDLESS' && !this.isMatchEndShowcaseActive()) {
       this.renderEndlessZonesAndAbyss(ctx, canvasWidth, animTimeMs)
     }
 
@@ -7444,18 +7574,6 @@ export class TowerInstance {
 
     const fallVis = this.getPlayerFallVisualState()
 
-    spriteRegistry.drawFloatingMascot(ctx, cx, cy, t, {
-      scaleXFlip,
-      extraTiltRad,
-      selfPower: this.inventoryPower.selfPower,
-      attackPower: this.inventoryPower.attackPower,
-      whiteFlashAlpha: fallVis.whiteFlashAlpha,
-      blinkAlpha: fallVis.blinkAlpha,
-      fallReactionIntensity: fallVis.reactionIntensity,
-      isSurvivalLifeLoss: this.gameMode === 'SURVIVAL',
-      invulnerableRemainingMs: this.invulnerableRemainingMs,
-    })
-
     if (this.mascotCastAnimMs > 0 && this.mascotCastCategory) {
       this.drawMascotPowerCastAura(
         ctx,
@@ -7466,136 +7584,117 @@ export class TowerInstance {
       )
     }
 
+    spriteRegistry.drawFloatingMascot(ctx, cx, cy, t, {
+      scaleXFlip,
+      extraTiltRad,
+      selfPower: this.inventoryPower.selfPower,
+      attackPower: this.isSinglePlayer ? null : this.inventoryPower.attackPower,
+      whiteFlashAlpha: fallVis.whiteFlashAlpha,
+      blinkAlpha: fallVis.blinkAlpha,
+      fallReactionIntensity: fallVis.reactionIntensity,
+      isSurvivalLifeLoss: this.gameMode === 'SURVIVAL',
+      invulnerableRemainingMs: this.invulnerableRemainingMs,
+      castAnimRemainingMs: this.mascotCastAnimMs,
+      castAnimDurationMs: 950,
+    })
+
+    const localDebuffs: string[] = []
+    if (this.blindManualRemainingMs > 0) localDebuffs.push('BLIND_MANUAL')
     if (
-      this.rankBadge ||
-      this.gameMode === 'SURVIVAL' ||
-      this.gameMode === 'PUZZLE' ||
-      this.gameMode === 'ENDLESS'
+      this.slickBrickRemaining > 0 ||
+      this.activePiece?.powerEffect === 'SLICK_BRICK'
     ) {
-      const localDebuffs: string[] = []
-      if (this.blindManualRemainingMs > 0) localDebuffs.push('BLIND_MANUAL')
-      if (
-        this.slickBrickRemaining > 0 ||
-        this.activePiece?.powerEffect === 'SLICK_BRICK'
-      ) {
-        localDebuffs.push('SLICK_BRICK')
-      }
-      if (
-        this.lockRotateRemaining > 0 ||
-        this.activePiece?.powerEffect === 'LOCK_ROTATE'
-      ) {
-        localDebuffs.push('LOCK_ROTATE')
-      }
-      if (
-        this.turboDropRemaining > 0 ||
-        this.activePiece?.powerEffect === 'TURBO_DROP'
-      ) {
-        localDebuffs.push('TURBO_DROP')
-      }
-      if (
-        this.giantPieceRemaining > 0 ||
-        this.activePiece?.variant === 'GIANT'
-      ) {
-        localDebuffs.push('GIANT_PIECE')
-      }
-
-      const localPuzzlePieces =
-        this.state === 'PUZZLE_COUNTING' ? this.countedPieces : 0
-
-      this.drawRankBadgeBelowMascot(
-        ctx,
-        cx,
-        cy + 58,
-        this.rankBadge ?? '1ST',
-        this.playerNick || 'VOCÊ',
-        this.towerHeight,
-        true,
-        this.localSlotIndex,
-        localDebuffs,
-        this.lives,
-        this.state === 'GAME_OVER' || this.lives <= 0,
-        this.invulnerableRemainingMs,
-        fallVis.whiteFlashAlpha,
-        localPuzzlePieces,
-        this.isPetrified
-      )
+      localDebuffs.push('SLICK_BRICK')
     }
+    if (
+      this.lockRotateRemaining > 0 ||
+      this.activePiece?.powerEffect === 'LOCK_ROTATE'
+    ) {
+      localDebuffs.push('LOCK_ROTATE')
+    }
+    if (
+      this.turboDropRemaining > 0 ||
+      this.activePiece?.powerEffect === 'TURBO_DROP'
+    ) {
+      localDebuffs.push('TURBO_DROP')
+    }
+    if (
+      this.giantPieceRemaining > 0 ||
+      this.activePiece?.variant === 'GIANT'
+    ) {
+      localDebuffs.push('GIANT_PIECE')
+    }
+
+    const localPuzzlePieces =
+      this.state === 'PUZZLE_COUNTING' ? this.countedPieces : 0
+
+    this.drawRankBadgeBelowMascot(
+      ctx,
+      cx,
+      cy + 52,
+      this.rankBadge ?? '1ST',
+      this.playerNick || 'VOCÊ',
+      this.towerHeight,
+      true,
+      this.localSlotIndex,
+      localDebuffs,
+      this.lives,
+      this.state === 'GAME_OVER' || this.lives <= 0,
+      this.invulnerableRemainingMs,
+      fallVis.whiteFlashAlpha,
+      localPuzzlePieces,
+      this.isPetrified
+    )
   }
 
   /**
-   * Draws the real-time Rank Badge (`1ST`, `2ND`, `3RD`, `4TH`), Player Position (`P1`..`P4`),
-   * Nickname, Survival Mode Hearts (`❤️❤️❤️`), Puzzle Mode Petrified Stamp, and any active negative power debuff pills directly below each floating mascot's cloud.
+   * Draws floating Survival Mode Hearts (`❤️ ❤️ ❤️`), Puzzle Mode Petrified Stamp,
+   * and any active negative power debuff pills directly below each floating mascot's cloud.
    */
   private drawRankBadgeBelowMascot(
     ctx: CanvasRenderingContext2D,
     cx: number,
     topY: number,
-    rank: '1ST' | '2ND' | '3RD' | '4TH',
+    _rank: '1ST' | '2ND' | '3RD' | '4TH',
     nick: string,
-    heightUnits: number,
+    _heightUnits: number,
     isLocal: boolean,
-    slotIndex: number = 0,
+    _slotIndex: number = 0,
     activeDebuffs: string[] = [],
     lives: number = GAME_CONSTANTS.SURVIVAL_INITIAL_LIVES,
     isEliminated: boolean = false,
-    invulnerableRemainingMs: number = 0,
+    _invulnerableRemainingMs: number = 0,
     whiteFlashAlpha: number = 0,
-    puzzlePiecesCount: number = 0,
+    _puzzlePiecesCount: number = 0,
     isPetrified: boolean = false
   ): void {
-    const theme =
-      rank === '1ST'
-        ? { bg: '#FACC15', border: '#713F12', text: '#1E1B4B' }
-        : rank === '2ND'
-          ? { bg: '#E2E8F0', border: '#334155', text: '#0F172A' }
-          : rank === '3RD'
-            ? { bg: '#FB923C', border: '#7C2D12', text: '#1E1B4B' }
-            : { bg: '#94A3B8', border: '#1E293B', text: '#0F172A' }
-
     ctx.save()
     ctx.translate(cx, topY)
-
-    // Rank pill (1ST / 2ND / 3RD / 4TH)
-    ctx.fillStyle = theme.bg
-    ctx.strokeStyle = theme.border
-    ctx.lineWidth = 2.6
-    ctx.beginPath()
-    ctx.roundRect(-28, 0, 56, 22, 6)
-    ctx.fill()
-    ctx.stroke()
-
-    ctx.font = '900 12px "Fredoka", Inter, system-ui, sans-serif'
-    ctx.fillStyle = theme.text
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
-    ctx.fillText(rank, 0, 11.5)
 
-    // Player Slot Position (P1 / P2 / P3 / P4) + Nickname (& Height tag outside Puzzle Mode)
-    const playerNumberTag = `P${Math.max(1, slotIndex + 1)}`
     const isPuzzleEndCount =
       this.state === 'PUZZLE_COUNTING' || this.state === 'VICTORY'
-    const label =
-      this.gameMode === 'PUZZLE'
-        ? isPuzzleEndCount
-          ? `${playerNumberTag} • ${nick.slice(0, 11)} • ${puzzlePiecesCount}`
-          : `${playerNumberTag} • ${nick.slice(0, 11)}`
-        : `${playerNumberTag} • ${nick.slice(0, 11)} • ${heightUnits.toFixed(1)}m`
-    ctx.font = '800 10px Inter, system-ui, sans-serif'
-    const textW = Math.max(82, ctx.measureText(label).width + 14)
-    ctx.fillStyle = isLocal
-      ? 'rgba(15, 23, 42, 0.88)'
-      : 'rgba(30, 41, 59, 0.82)'
-    ctx.strokeStyle = isLocal ? '#38BDF8' : '#475569'
-    ctx.lineWidth = 1.6
-    ctx.beginPath()
-    ctx.roundRect(-textW / 2, 25, textW, 18, 5)
-    ctx.fill()
-    ctx.stroke()
 
-    ctx.fillStyle = isLocal ? '#FEF08A' : '#F8FAFC'
-    ctx.fillText(label, 0, 34.5)
+    let offsetY = 0
 
-    let offsetY = 47
+    // Display player nickname (apelido, never @handle) when "Mostrar Apelido" is active
+    const displayNick = (nick || '').trim()
+    if (this.showPlayerNicks && displayNick) {
+      ctx.save()
+      ctx.font = '900 13px Inter, system-ui, sans-serif'
+      ctx.lineJoin = 'round'
+      ctx.strokeStyle = '#181425'
+      ctx.lineWidth = 3.5
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.45)'
+      ctx.shadowBlur = 4
+      ctx.shadowOffsetY = 1.5
+      ctx.strokeText(displayNick, 0, offsetY + 8)
+      ctx.fillStyle = isLocal ? '#FDE047' : '#FFFFFF'
+      ctx.fillText(displayNick, 0, offsetY + 8)
+      ctx.restore()
+      offsetY += 20
+    }
 
     // In Endless Mode, show elimination status or consecutive falls warning
     if (this.gameMode === 'ENDLESS') {
@@ -7656,79 +7755,49 @@ export class TowerInstance {
       offsetY += 21
     }
 
-    // In Survival Mode (3 Vidas), display the player's remaining hearts (or ELIMINADO) below their name tag!
+    // In Survival Mode (3 Vidas), display the player's hearts floating freely outside any box!
     if (this.gameMode === 'SURVIVAL') {
       const maxHeartSlots = Math.max(
         GAME_CONSTANTS.SURVIVAL_INITIAL_LIVES,
         isLocal ? this.maxLives : GAME_CONSTANTS.SURVIVAL_INITIAL_LIVES,
         Math.min(5, lives)
       )
-      const clampedLives = Math.max(0, Math.min(maxHeartSlots, lives))
-      const heartsText =
-        isEliminated || clampedLives <= 0
-          ? '💀 ELIMINADO'
-          : '❤️'.repeat(clampedLives) +
-            '🖤'.repeat(Math.max(0, maxHeartSlots - clampedLives))
-      ctx.font = '800 10px Inter, system-ui, sans-serif'
-      const heartsW = Math.max(76, ctx.measureText(heartsText).width + 16)
+      const clampedLives = isEliminated
+        ? 0
+        : Math.max(0, Math.min(maxHeartSlots, lives))
       const isFlashingWhite = whiteFlashAlpha > 0.35
-      ctx.fillStyle = isFlashingWhite
-        ? 'rgba(255, 255, 255, 0.96)'
-        : isEliminated || clampedLives <= 0
-          ? 'rgba(127, 29, 29, 0.94)'
-          : 'rgba(15, 23, 42, 0.9)'
-      ctx.strokeStyle = isFlashingWhite
-        ? '#FFFFFF'
-        : isEliminated || clampedLives <= 0
-          ? '#EF4444'
-          : '#F43F5E'
-      ctx.lineWidth = isFlashingWhite ? 2.2 : 1.5
-      ctx.beginPath()
-      ctx.roundRect(-heartsW / 2, offsetY, heartsW, 18, 5)
-      ctx.fill()
-      ctx.stroke()
+      const spacing = 22
+      const startX = -((maxHeartSlots - 1) * spacing) / 2
 
-      ctx.fillStyle = isFlashingWhite
-        ? '#0F172A'
-        : isEliminated || clampedLives <= 0
-          ? '#FCA5A5'
-          : '#FFFFFF'
-      ctx.fillText(heartsText, 0, offsetY + 9.5)
-      offsetY += 21
+      for (let i = 0; i < maxHeartSlots; i++) {
+        const isAlive = i < clampedLives
+        const floatY = Math.sin(this.elapsedTimeMs * 0.0048 + i * 1.25) * 3.8
+        const floatX = Math.cos(this.elapsedTimeMs * 0.0032 + i * 1.5) * 1.4
+        const tilt = Math.sin(this.elapsedTimeMs * 0.0036 + i * 1.1) * 0.09
+        const pulseScale = isFlashingWhite
+          ? 1.25
+          : isAlive
+            ? 1 + Math.sin(this.elapsedTimeMs * 0.0065 + i * 0.95) * 0.07
+            : 0.9
 
-      // Blinking 3-second Invulnerability Stabilization Pill below hearts
-      if (invulnerableRemainingMs > 0 && !isEliminated && clampedLives > 0) {
-        const invText = `🛡️ INVULNERÁVEL ${(invulnerableRemainingMs / 1000).toFixed(1)}s`
-        ctx.font = '900 9px Inter, system-ui, sans-serif'
-        const invW = Math.max(106, ctx.measureText(invText).width + 14)
-        const ratio = Math.max(
-          0,
-          Math.min(
-            1,
-            invulnerableRemainingMs /
-              GAME_CONSTANTS.SURVIVAL_LIFE_LOSS_COOLDOWN_MS
-          )
-        )
-        const blinkBright = Math.sin(this.elapsedTimeMs * 0.056) < 0
-
-        ctx.fillStyle = blinkBright
-          ? 'rgba(224, 242, 254, 0.95)'
-          : 'rgba(12, 74, 110, 0.92)'
-        ctx.strokeStyle = blinkBright ? '#FFFFFF' : '#38BDF8'
-        ctx.lineWidth = 1.6
-        ctx.beginPath()
-        ctx.roundRect(-invW / 2, offsetY, invW, 19, 5)
-        ctx.fill()
-        ctx.stroke()
-
-        // Progress bar at bottom of the pill
-        ctx.fillStyle = blinkBright ? '#0284C7' : '#FEF08A'
-        ctx.fillRect(-invW / 2 + 3, offsetY + 15, (invW - 6) * ratio, 2.5)
-
-        ctx.fillStyle = blinkBright ? '#0F172A' : '#FFFFFF'
-        ctx.fillText(invText, 0, offsetY + 8.5)
-        offsetY += 22
+        ctx.save()
+        ctx.translate(startX + i * spacing + floatX, offsetY + 10 + floatY)
+        ctx.rotate(tilt)
+        ctx.scale(pulseScale, pulseScale)
+        ctx.shadowColor = isFlashingWhite
+          ? 'rgba(255, 255, 255, 0.95)'
+          : isAlive
+            ? 'rgba(244, 63, 94, 0.55)'
+            : 'rgba(0, 0, 0, 0.65)'
+        ctx.shadowBlur = isFlashingWhite ? 12 : 7
+        ctx.shadowOffsetY = 2
+        ctx.font = '16px Inter, system-ui, sans-serif'
+        ctx.globalAlpha = isAlive ? 1 : 0.72
+        ctx.fillText(isAlive ? '❤️' : '🖤', 0, 0)
+        ctx.restore()
       }
+
+      offsetY += 26
     }
 
     // Render active curse / negative power badges affecting this player
@@ -7795,58 +7864,48 @@ export class TowerInstance {
     category: 'POSITIVE' | 'NEGATIVE',
     lifeRatio: number
   ): void {
-    const alpha = Math.min(1, Math.sin(lifeRatio * Math.PI) * 1.35)
+    const alpha = Math.min(1, Math.sin(lifeRatio * Math.PI) * 1.25)
     ctx.save()
     ctx.translate(cx, cy)
 
     if (category === 'POSITIVE') {
-      const r = 46 + (1 - lifeRatio) * 28
-      const grad = ctx.createRadialGradient(0, -10, 6, 0, -10, r)
-      grad.addColorStop(0, `rgba(254, 240, 138, ${(0.85 * alpha).toFixed(3)})`)
-      grad.addColorStop(0.55, `rgba(56, 189, 248, ${(0.55 * alpha).toFixed(3)})`)
+      const r = 48 + (1 - lifeRatio) * 24
+      const grad = ctx.createRadialGradient(0, -14, 6, 0, -14, r)
+      grad.addColorStop(0, `rgba(254, 240, 138, ${(0.42 * alpha).toFixed(3)})`)
+      grad.addColorStop(0.55, `rgba(56, 189, 248, ${(0.28 * alpha).toFixed(3)})`)
       grad.addColorStop(1, 'rgba(56, 189, 248, 0)')
       ctx.fillStyle = grad
       ctx.beginPath()
-      ctx.arc(0, -10, r, 0, Math.PI * 2)
+      ctx.arc(0, -14, r, 0, Math.PI * 2)
       ctx.fill()
-
-      // Raised hand golden/cyan energy orb
-      ctx.fillStyle = '#FEF08A'
-      ctx.strokeStyle = '#0284C7'
-      ctx.lineWidth = 2.5
-      ctx.globalAlpha = alpha
-      ctx.beginPath()
-      ctx.arc(-18, -48 - (1 - lifeRatio) * 12, 11, 0, Math.PI * 2)
-      ctx.fill()
-      ctx.stroke()
     } else {
-      // NEGATIVE: Purple chaos aura + jagged purple lightning bolt shooting to the sky!
-      const r = 52 + (1 - lifeRatio) * 24
-      const grad = ctx.createRadialGradient(0, -12, 6, 0, -12, r)
-      grad.addColorStop(0, `rgba(216, 180, 254, ${(0.9 * alpha).toFixed(3)})`)
-      grad.addColorStop(0.55, `rgba(147, 51, 234, ${(0.65 * alpha).toFixed(3)})`)
+      // NEGATIVE: Purple chaos aura behind character + jagged purple lightning bolt shooting to the sky from raised wand!
+      const r = 52 + (1 - lifeRatio) * 22
+      const grad = ctx.createRadialGradient(0, -16, 6, 0, -16, r)
+      grad.addColorStop(0, `rgba(216, 180, 254, ${(0.48 * alpha).toFixed(3)})`)
+      grad.addColorStop(0.55, `rgba(147, 51, 234, ${(0.32 * alpha).toFixed(3)})`)
       grad.addColorStop(1, 'rgba(88, 28, 135, 0)')
       ctx.fillStyle = grad
       ctx.beginPath()
-      ctx.arc(0, -12, r, 0, Math.PI * 2)
+      ctx.arc(0, -16, r, 0, Math.PI * 2)
       ctx.fill()
 
-      // Jagged purple lightning bolt shooting from raised hand (-16, -46) into the sky (-540)
+      // Jagged purple lightning bolt shooting from raised wand tip (-24, -64) into the sky (-560)
       ctx.save()
       ctx.globalAlpha = alpha
       ctx.strokeStyle = '#A855F7'
       ctx.shadowColor = '#C084FC'
       ctx.shadowBlur = 18
-      ctx.lineWidth = 7
+      ctx.lineWidth = 6.5
       ctx.lineCap = 'round'
       ctx.lineJoin = 'round'
 
       const segments = [
-        { x: -16, y: -46 },
-        { x: -34, y: -115 },
-        { x: -4, y: -185 },
-        { x: -28, y: -265 },
-        { x: 8, y: -350 },
+        { x: -24, y: -64 },
+        { x: -34, y: -125 },
+        { x: -4, y: -195 },
+        { x: -28, y: -275 },
+        { x: 8, y: -355 },
         { x: -20, y: -445 },
         { x: 0, y: -560 },
       ]
@@ -7861,7 +7920,7 @@ export class TowerInstance {
 
       // Bright white-lavender inner lightning core
       ctx.strokeStyle = '#F3E8FF'
-      ctx.lineWidth = 2.6
+      ctx.lineWidth = 2.4
       ctx.stroke()
       ctx.restore()
     }
@@ -7915,6 +7974,16 @@ export class TowerInstance {
       const mascotX = 6.2 * u + swayX
       const mascotY = -Math.max(3.5, lane.towerHeight + 1.2) * u + bobY
 
+      if (lane.mascotCastAnimMs > 0 && lane.mascotCastCategory) {
+        this.drawMascotPowerCastAura(
+          ctx,
+          mascotX,
+          mascotY,
+          lane.mascotCastCategory,
+          Math.min(1, lane.mascotCastAnimMs / 950)
+        )
+      }
+
       spriteRegistry.drawMenuMascotBySkinId(
         ctx,
         lane.skinSpriteId,
@@ -7929,18 +7998,10 @@ export class TowerInstance {
           fallReactionIntensity: remFallVis.reactionIntensity,
           isSurvivalLifeLoss: this.gameMode === 'SURVIVAL',
           invulnerableRemainingMs: remInvulnMs,
+          castAnimRemainingMs: lane.mascotCastAnimMs,
+          castAnimDurationMs: 950,
         }
       )
-
-      if (lane.mascotCastAnimMs > 0 && lane.mascotCastCategory) {
-        this.drawMascotPowerCastAura(
-          ctx,
-          mascotX,
-          mascotY,
-          lane.mascotCastCategory,
-          Math.min(1, lane.mascotCastAnimMs / 950)
-        )
-      }
 
       const laneDebuffs = [...(lane.activeDebuffs || [])]
       if (
@@ -8047,13 +8108,20 @@ export class TowerInstance {
           ctx,
           blk,
           false,
-          Boolean(lane.isPetrified)
+          Boolean(lane.isPetrified),
+          lane.blockSkinId
         )
       }
 
       // 4. Remote Friend's Interpolated Active Falling Piece
       if (lane.activePiece && !lane.isEliminated && !lane.isPetrified) {
-        this.renderSnapshotPieceOnLane(ctx, lane.activePiece, true, false)
+        this.renderSnapshotPieceOnLane(
+          ctx,
+          lane.activePiece,
+          true,
+          false,
+          lane.blockSkinId
+        )
       }
 
       // 4-puzzle. Remote Friend's Giant Piece Counter / Visual Podium (ONLY at end of match) & "FINALIZADO" Stamp in Puzzle Mode
@@ -8095,7 +8163,8 @@ export class TowerInstance {
     ctx: CanvasRenderingContext2D,
     snap: ActivePieceSnapshot | SettledBlockSnapshot,
     isActive: boolean,
-    forceLanePetrified: boolean = false
+    forceLanePetrified: boolean = false,
+    blockSkinId?: string
   ): void {
     const u = GAME_CONSTANTS.UNIT_PX
     const def = PIECE_CATALOG[snap.type] || PIECE_CATALOG.I
@@ -8152,6 +8221,7 @@ export class TowerInstance {
             isGhost: true,
             powerEffect: snap.powerEffect,
             colorPaletteIndex: snap.colorPaletteIndex ?? 0,
+            blockSkinId,
           }
         )
         ctx.restore()
@@ -8182,6 +8252,7 @@ export class TowerInstance {
         isStaticAnchor: 'isStaticAnchor' in snap ? snap.isStaticAnchor : false,
         isGlued: 'isGlued' in snap ? snap.isGlued : false,
         colorPaletteIndex: snap.colorPaletteIndex ?? 0,
+        blockSkinId,
         isPetrified:
           !isActive &&
           (forceLanePetrified ||
@@ -8764,22 +8835,21 @@ export class TowerInstance {
 
     const markerHeights =
       this.gameMode === 'SURVIVAL'
-        ? [5, 8, 10, 15, 16, 20, 24, 25, 30, 32, 35, 40, 48, 56]
-        : [5, 8, 10, 15, 16, 20, 24, 25, 30, 35]
+        ? [5, 10, 12, 15, 20, 24, 25, 30, 35, 36, 40, 48, 60, 72]
+        : [5, 10, 12, 15, 20, 24, 25, 30, 35]
     for (const h of markerHeights) {
       const y = -h * u
       const isGoal =
         this.gameMode === 'RACE' && h === GAME_CONSTANTS.GOAL_HEIGHT_UNITS
       const isCheckpoint =
         this.gameMode === 'SURVIVAL'
-          ? h === 8 ||
-            h === 16 ||
+          ? h === 12 ||
             h === 24 ||
-            h === 32 ||
-            h === 40 ||
+            h === 36 ||
             h === 48 ||
-            h === 56
-          : h === 8 || h === 16 || h === 24
+            h === 60 ||
+            h === 72
+          : h === 12 || h === 24
       const isWindLine = h === GAME_CONSTANTS.WIND_START_HEIGHT_UNITS
 
       if (isGoal) {
@@ -9021,18 +9091,6 @@ export class TowerInstance {
     }
     drawEmitter(minLineX, 1)
     drawEmitter(maxLineX, -1)
-
-    // 5. Etiqueta indicativa da barreira de laser (9m)
-    ctx.shadowBlur = 0
-    ctx.font = '900 12px Inter, system-ui, sans-serif'
-    const labelText = anyOverload
-      ? '⚠️ SOBRECARGA DO LASER! QUEIMANDO PEÇAS ACIMA DE 9m!'
-      : `⚡ BARREIRA DE LASER (${GAME_CONSTANTS.PUZZLE_LASER_HEIGHT_UNITS}m — ABAIXO DO LASER)`
-    ctx.strokeStyle = '#450A0A'
-    ctx.lineWidth = 3.5
-    ctx.strokeText(labelText, baseHalfW + 18, laserY - 9)
-    ctx.fillStyle = anyOverload ? '#FEF08A' : '#FCA5A5'
-    ctx.fillText(labelText, baseHalfW + 18, laserY - 9)
 
     ctx.restore()
   }

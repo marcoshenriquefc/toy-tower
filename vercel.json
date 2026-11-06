@@ -9,6 +9,10 @@
   },
   "rewrites": [
     {
+      "source": "/api/shop/:route*",
+      "destination": "/api/auth?route=shop/:route*"
+    },
+    {
       "source": "/api/auth/:route*",
       "destination": "/api/auth?route=:route*"
     },

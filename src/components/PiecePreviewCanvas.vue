@@ -42,7 +42,9 @@ function drawPreview() {
     y: c.y - centerY,
   }))
 
-  const previewScale = props.variant === 'GIANT' ? 0.44 : 0.38
+  const baseScale = props.variant === 'GIANT' ? 0.44 : 0.38
+  const sizeFactor = props.size && props.size > 64 ? props.size / 54 : 1
+  const previewScale = baseScale * sizeFactor
   const cellPx = GAME_CONSTANTS.UNIT_PX * previewScale
 
   ctx.save()
@@ -50,7 +52,7 @@ function drawPreview() {
 
   // Outer dark contour around the piece silhouette so it pops inside the light banner box
   ctx.fillStyle = '#0F172A'
-  const pad = 2.2
+  const pad = 2.2 * Math.max(1, sizeFactor * 0.85)
   for (const c of centeredCells) {
     ctx.beginPath()
     ctx.roundRect(
@@ -58,7 +60,7 @@ function drawPreview() {
       c.y * cellPx - cellPx / 2 - pad,
       cellPx + pad * 2,
       cellPx + pad * 2,
-      3
+      3 * Math.max(1, sizeFactor * 0.8)
     )
     ctx.fill()
   }
@@ -77,23 +79,62 @@ function drawPreview() {
   ctx.restore()
 }
 
+let animFrameId: number | null = null
+let lastFrameMs = 0
+
+function syncGoldPreviewLoop() {
+  if (spriteRegistry.getActiveBlockSkinId() === 'gold') {
+    if (animFrameId === null) {
+      const tick = (now: number) => {
+        if (spriteRegistry.getActiveBlockSkinId() !== 'gold') {
+          animFrameId = null
+          return
+        }
+        if (now - lastFrameMs >= 33) {
+          lastFrameMs = now
+          drawPreview()
+        }
+        animFrameId = requestAnimationFrame(tick)
+      }
+      animFrameId = requestAnimationFrame(tick)
+    }
+  } else if (animFrameId !== null) {
+    cancelAnimationFrame(animFrameId)
+    animFrameId = null
+  }
+}
+
 onMounted(() => {
   drawPreview()
-  unsubscribe = spriteRegistry.onChange(drawPreview)
+  syncGoldPreviewLoop()
+  unsubscribe = spriteRegistry.onChange(() => {
+    drawPreview()
+    syncGoldPreviewLoop()
+  })
 })
 
 onUnmounted(() => {
   if (unsubscribe) unsubscribe()
+  if (animFrameId !== null) {
+    cancelAnimationFrame(animFrameId)
+    animFrameId = null
+  }
 })
 
-watch(() => [props.type, props.variant, props.colorPaletteIndex], drawPreview)
+watch(
+  () => [props.type, props.variant, props.colorPaletteIndex, props.size],
+  () => {
+    drawPreview()
+    syncGoldPreviewLoop()
+  }
+)
 </script>
 
 <template>
   <canvas
     ref="canvasRef"
     :width="size || 58"
-    :height="size || 48"
+    :height="size ? Math.round(size * 0.82) : 48"
     class="piece-preview-canvas"
   />
 </template>

@@ -121,6 +121,9 @@ export interface IUser {
   avatarUrl: string
   equippedSkin: string
   unlockedSkins: string[]
+  equippedBlockSkin: string
+  unlockedBlockSkins: string[]
+  coins: number
   friends: IFriendEntry[]
   friendRequestsSent: IFriendRequestEntry[]
   friendRequestsReceived: IFriendRequestEntry[]
@@ -178,6 +181,9 @@ const UserSchema = new Schema<IUserDocument>(
     avatarUrl: { type: String, default: '' },
     equippedSkin: { type: String, default: 'WIZARD' },
     unlockedSkins: { type: [String], default: ['WIZARD'] },
+    equippedBlockSkin: { type: String, default: 'PLASTIC' },
+    unlockedBlockSkins: { type: [String], default: ['PLASTIC'] },
+    coins: { type: Number, default: 2500 },
     friends: { type: [FriendEntrySchema], default: [] },
     friendRequestsSent: { type: [FriendRequestEntrySchema], default: [] },
     friendRequestsReceived: { type: [FriendRequestEntrySchema], default: [] },
@@ -360,6 +366,7 @@ interface RoomSlotPlayerDTO {
   customNick: string
   avatarUrl: string
   equippedSkin: string
+  equippedBlockSkin?: string
   isHost: boolean
   isReady: boolean
   slotIndex: number
@@ -422,6 +429,7 @@ interface ConnectedSession {
   handle: string
   customNick: string
   equippedSkin: string
+  equippedBlockSkin: string
   avatarUrl: string
   roomId: string | null
 }
@@ -1062,6 +1070,7 @@ io.on('connection', async (socket) => {
     handle: myHandle,
     customNick: user.customNick,
     equippedSkin: user.equippedSkin,
+    equippedBlockSkin: user.equippedBlockSkin || 'PLASTIC',
     avatarUrl: user.avatarUrl || '',
     roomId: null,
   }
@@ -1326,17 +1335,22 @@ io.on('connection', async (socket) => {
 
   socket.on(
     'profile:update_skin',
-    async (payload: { equippedSkin?: string }) => {
+    async (payload: { equippedSkin?: string; equippedBlockSkin?: string }) => {
       const skin = String(payload?.equippedSkin || '').trim()
-      if (!skin) return
+      const blockSkin = String(payload?.equippedBlockSkin || '').trim()
+      if (!skin && !blockSkin) return
       await connectMongoDB()
+      const updateFields: Record<string, string> = {}
+      if (skin) updateFields.equippedSkin = skin
+      if (blockSkin) updateFields.equippedBlockSkin = blockSkin
       const updated = await UserModel.findOneAndUpdate(
         { googleId: session.googleId },
-        { $set: { equippedSkin: skin } },
+        { $set: updateFields },
         { new: true }
       ).lean<IUser>()
       if (!updated) return
       session.equippedSkin = updated.equippedSkin
+      session.equippedBlockSkin = updated.equippedBlockSkin || 'PLASTIC'
       emitToHandle(io, session.handle, 'auth:user_updated', updated)
       if (session.roomId) {
         const room = roomsById.get(session.roomId)
@@ -1344,6 +1358,7 @@ io.on('connection', async (socket) => {
           const slot = room.slots.find((s) => s?.handle === session.handle)
           if (slot) {
             slot.equippedSkin = updated.equippedSkin
+            slot.equippedBlockSkin = updated.equippedBlockSkin || 'PLASTIC'
             broadcastRoomState(io, room)
           }
         }
