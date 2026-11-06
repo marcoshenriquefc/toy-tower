@@ -478,6 +478,7 @@ export class SpriteRegistry {
     string,
     Partial<Record<PieceType, HTMLImageElement>>
   > = new Map()
+  private loadedOrLoadingBlockSkins: Set<string> = new Set()
   private perBlockSkinCanvases: Map<
     string,
     Partial<Record<PieceType, HTMLCanvasElement[]>>
@@ -485,6 +486,7 @@ export class SpriteRegistry {
   private collisionUrlByType: Map<PieceType, string> = new Map()
   private collisionImageByType: Map<PieceType, HTMLImageElement> = new Map()
   private listeners: Array<() => void> = []
+  private notifyScheduled: boolean = false
   private survivorSprites: {
     background: HTMLImageElement | null
     estalagmite: HTMLImageElement | null
@@ -513,8 +515,18 @@ export class SpriteRegistry {
   }
 
   private notifyListeners(): void {
-    for (const l of this.listeners) {
-      l()
+    if (this.notifyScheduled) return
+    this.notifyScheduled = true
+    const flush = () => {
+      this.notifyScheduled = false
+      for (const l of this.listeners) {
+        l()
+      }
+    }
+    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+      window.requestAnimationFrame(flush)
+    } else {
+      setTimeout(flush, 16)
     }
   }
 
@@ -869,7 +881,116 @@ export class SpriteRegistry {
       },
     }
 
-    // 1a. Discover 5-Frame Power-Casting ("Levantando a Varinha") Sprites in assets/sprites/player/cast/*.png
+    // 1. Discover Menu & Shop Sprites first (instant URL catalog for Title Screen & Menus)
+    for (const [path, url] of Object.entries(menuSpriteAssets)) {
+      const fileName = path.split('/').pop() || path
+      const key = fileName.replace(/\.png$/i, '').toLowerCase()
+      this.menuSprites[key] = url
+    }
+
+    for (const [path, url] of Object.entries(menuShopSpriteAssets)) {
+      const fileName = path.split('/').pop() || path
+      const key = fileName.replace(/\.png$/i, '').toLowerCase()
+      this.menuSprites[key] = url
+      if (!key.startsWith('shop_')) {
+        this.menuSprites[`shop_${key}`] = url
+      }
+    }
+
+    if (this.menuSprites.button_clean) {
+      this.menuSprites.button_clean_green = this.menuSprites.button_clean
+      this.menuSprites.button_clean_orange = this.menuSprites.button_clean
+      this.menuSprites.button_clean_yellow = this.menuSprites.button_clean
+      this.menuSprites.button_clean_purple = this.menuSprites.button_clean
+      this.menuSprites.button_clean_blue = this.menuSprites.button_clean
+
+      const btnImg = new Image()
+      btnImg.crossOrigin = 'anonymous'
+      btnImg.onload = () => {
+        const greenCanvas = this.createTintedBlockCanvas(btnImg, {
+          fill: '#55A838',
+          border: '#1B2230',
+          highlight: '#92E870',
+          label: 'Botão Verde',
+        })
+        const orangeCanvas = this.createTintedBlockCanvas(btnImg, {
+          fill: '#F97316',
+          border: '#1B2230',
+          highlight: '#FDBA74',
+          label: 'Botão Laranja',
+        })
+        const yellowCanvas = this.createTintedBlockCanvas(btnImg, {
+          fill: '#F59E0B',
+          border: '#1B2230',
+          highlight: '#FDE047',
+          label: 'Botão Amarelo',
+        })
+        const purpleCanvas = this.createTintedBlockCanvas(btnImg, {
+          fill: '#9333EA',
+          border: '#1B2230',
+          highlight: '#D8B4FE',
+          label: 'Botão Roxo',
+        })
+        const blueCanvas = this.createTintedBlockCanvas(btnImg, {
+          fill: '#0095FF',
+          border: '#1B2230',
+          highlight: '#80CAFF',
+          label: 'Botão Azul',
+        })
+        if (greenCanvas) {
+          this.menuSprites.button_clean_green = greenCanvas.toDataURL('image/png')
+        }
+        if (orangeCanvas) {
+          this.menuSprites.button_clean_orange = orangeCanvas.toDataURL('image/png')
+        }
+        if (yellowCanvas) {
+          this.menuSprites.button_clean_yellow = yellowCanvas.toDataURL('image/png')
+        }
+        if (purpleCanvas) {
+          this.menuSprites.button_clean_purple = purpleCanvas.toDataURL('image/png')
+        }
+        if (blueCanvas) {
+          this.menuSprites.button_clean_blue = blueCanvas.toDataURL('image/png')
+        }
+        this.notifyListeners()
+      }
+      btnImg.src = this.menuSprites.button_clean
+    }
+
+    // 2. Priority Scenery & Background Sprites (bg_1.png, bg_left_2.png, bg_right_2.png, base.png, castle_roof.png, side_island.png)
+    for (const [path, url] of Object.entries(backgroundSpriteAssets)) {
+      const fileName = (path.split('/').pop() || '').toLowerCase()
+      if (fileName === 'bg_1.png') {
+        this.registerSprite('bg_main', url)
+      } else if (fileName.startsWith('bg_left')) {
+        this.registerSprite('bg_left', url)
+      } else if (fileName.startsWith('bg_right')) {
+        this.registerSprite('bg_right', url)
+      }
+    }
+
+    for (const [path, url] of Object.entries(otherSpriteAssets)) {
+      const fileName = (path.split('/').pop() || '').toLowerCase()
+      if (fileName === 'base.png') {
+        const pedestalSlot = this.getSlot('scenery_pedestal')
+        pedestalSlot.spriteUrl = url
+        this.registerSprite('base_plate', url).then(() => {
+          const baseSlot = this.getSlot('base_plate')
+          if (baseSlot.image) {
+            pedestalSlot.image = baseSlot.image
+            pedestalSlot.loaded = true
+            this.notifyListeners()
+          }
+        })
+      } else if (fileName === 'castle_roof.png') {
+        this.registerSprite('piece_CASTLE_ROOF', url)
+      } else if (fileName === 'side_island.png') {
+        this.registerSprite('side_island', url)
+      }
+    }
+
+    // 3. Catalog 5-Frame Power-Casting URLs (actual Image downloads deferred until after Title Screen renders)
+    const deferredCastEntries: Array<{ skinId: string; frameIdx: number; url: string }> = []
     for (const [path, url] of Object.entries(playerCastAnimAssets)) {
       const fileName = path.split('/').pop() || path
       const match = fileName.match(/^(.+)_cast_(\d+)\.png$/i)
@@ -886,19 +1007,10 @@ export class SpriteRegistry {
         this.playerCastFrameImages.set(skinId, [null, null, null, null, null])
       }
       this.playerCastFrameUrls.get(skinId)![frameIdx] = url
-
-      const castImg = new Image()
-      castImg.crossOrigin = 'anonymous'
-      castImg.onload = () => {
-        const arr = this.playerCastFrameImages.get(skinId)
-        if (arr) {
-          arr[frameIdx] = castImg
-        }
-        this.notifyListeners()
-      }
-      castImg.src = url
+      deferredCastEntries.push({ skinId, frameIdx, url })
     }
 
+    // 4. Discover & Preload Player Idle Skins (4 sprites)
     const discoveredSkins: Array<PlayerSkinInfo & { order: number }> = []
 
     for (const [path, url] of Object.entries(playerSkinAssets)) {
@@ -929,13 +1041,14 @@ export class SpriteRegistry {
         order: meta ? meta.order : 99,
       })
 
-      // Preload HTMLImageElement for instant zero-flicker skin switching
+      // Store HTMLImageElement immediately so setActivePlayerSkin never spawns duplicate Image downloads
       const preloadImg = new Image()
       preloadImg.crossOrigin = 'anonymous'
+      this.playerSkinImages.set(id, preloadImg)
       preloadImg.onload = () => {
-        this.playerSkinImages.set(id, preloadImg)
         if (this.activePlayerSkinId === id) {
           const mascotSlot = this.getSlot('mascot_floating')
+          mascotSlot.spriteUrl = url
           mascotSlot.image = preloadImg
           mascotSlot.loaded = true
           this.notifyListeners()
@@ -964,7 +1077,7 @@ export class SpriteRegistry {
       this.setActivePlayerSkin(initialSkin.id)
     }
 
-    // 2. Discover Block Sprites, Block Skins & Collision Masks in assets/sprites/block
+    // 5. Discover Block Sprites, Block Skins & Collision Masks in assets/sprites/block
     const defaultBlockUrls: Partial<Record<PieceType, string>> = {}
     for (const [path, url] of Object.entries(blockSpriteAssets)) {
       const fileName = path.split('/').pop() || ''
@@ -985,6 +1098,13 @@ export class SpriteRegistry {
           colImg.crossOrigin = 'anonymous'
           colImg.onload = () => {
             this.collisionImageByType.set(typeKey, colImg)
+            const slot = this.slots.get(`piece_${typeKey}` as SpriteKey)
+            if (slot && slot.image && !slot.hasCollisionMask) {
+              slot.collisionImage = colImg
+              slot.collisionBox = this.analyzeCollisionMask(colImg, slot.image)
+              slot.hasCollisionMask = true
+              this.notifyListeners()
+            }
           }
           colImg.src = url
         }
@@ -1114,7 +1234,117 @@ export class SpriteRegistry {
       ({ order: _order, ...skin }) => skin
     )
 
-    // Preload images for all block skins (and auto-generate horizontal mirror for L from J if L is omitted)
+    for (const bSkin of this.blockSkins) {
+      this.blockSkinImages.set(bSkin.id, {})
+    }
+
+    // Restore persisted block skin or default to 'default'
+    let savedBlockSkinId: string | null = null
+    try {
+      savedBlockSkinId = window.localStorage.getItem('toy_tower_block_skin')
+    } catch {
+      savedBlockSkinId = null
+    }
+    const initialBlockSkin =
+      (savedBlockSkinId &&
+        this.blockSkins.find((s) => s.id === savedBlockSkinId)) ||
+      this.blockSkins[0]
+    this.activeBlockSkinId = initialBlockSkin ? initialBlockSkin.id : 'default'
+
+    // Load active block skin (and 'default' fallback) immediately; defer secondary block skins, cast frames & Survivor Mode assets
+    this.ensureBlockSkinLoaded('default')
+    if (this.activeBlockSkinId !== 'default') {
+      this.ensureBlockSkinLoaded(this.activeBlockSkinId)
+    }
+
+    const loadDeferredAssets = () => {
+      for (const bSkin of this.blockSkins) {
+        this.ensureBlockSkinLoaded(bSkin.id)
+      }
+
+      for (const { skinId, frameIdx, url } of deferredCastEntries) {
+        const castImg = new Image()
+        castImg.crossOrigin = 'anonymous'
+        castImg.onload = () => {
+          const arr = this.playerCastFrameImages.get(skinId)
+          if (arr) {
+            arr[frameIdx] = castImg
+          }
+          this.notifyListeners()
+        }
+        castImg.src = url
+      }
+
+      const loadSurvivorImg = (
+        url: string,
+        onReady: (img: HTMLImageElement) => void
+      ) => {
+        const img = new Image()
+        img.crossOrigin = 'anonymous'
+        img.onload = () => {
+          onReady(img)
+          this.notifyListeners()
+        }
+        img.src = url
+      }
+
+      for (const [path, url] of Object.entries(survivorMapAssets)) {
+        const fileName = (path.split('/').pop() || '').toLowerCase()
+        if (fileName === 'background.jpg' || fileName === 'background.png') {
+          loadSurvivorImg(url, (img) => {
+            this.survivorSprites.background = img
+          })
+        } else if (fileName === 'estalagmite.png') {
+          loadSurvivorImg(url, (img) => {
+            this.survivorSprites.estalagmite = img
+          })
+        } else if (fileName === 'nuvem.png') {
+          loadSurvivorImg(url, (img) => {
+            this.survivorSprites.nuvem = img
+          })
+        } else if (fileName === 'smoke.png') {
+          loadSurvivorImg(url, (img) => {
+            this.survivorSprites.smoke = img
+          })
+        } else if (fileName === 'raio 1.png' || fileName === 'raio1.png') {
+          loadSurvivorImg(url, (img) => {
+            this.survivorSprites.raios[0] = img
+          })
+        } else if (fileName === 'raio 2.png' || fileName === 'raio2.png') {
+          loadSurvivorImg(url, (img) => {
+            this.survivorSprites.raios[1] = img
+          })
+        } else if (fileName === 'raio 3.png' || fileName === 'raio3.png') {
+          loadSurvivorImg(url, (img) => {
+            this.survivorSprites.raios[2] = img
+          })
+        } else if (fileName === 'raio 4.png' || fileName === 'raio4.png') {
+          loadSurvivorImg(url, (img) => {
+            this.survivorSprites.raios[3] = img
+          })
+        }
+      }
+    }
+
+    if (typeof window !== 'undefined') {
+      setTimeout(loadDeferredAssets, 650)
+    } else {
+      loadDeferredAssets()
+    }
+  }
+
+  private ensureBlockSkinLoaded(skinId: string): void {
+    if (this.loadedOrLoadingBlockSkins.has(skinId)) return
+    const bSkin = this.blockSkins.find((s) => s.id === skinId)
+    if (!bSkin) return
+    this.loadedOrLoadingBlockSkins.add(skinId)
+
+    let imgMap = this.blockSkinImages.get(bSkin.id)
+    if (!imgMap) {
+      imgMap = {}
+      this.blockSkinImages.set(bSkin.id, imgMap)
+    }
+
     const createMirroredImage = (
       srcImg: HTMLImageElement,
       onReady: (mirrored: HTMLImageElement) => void
@@ -1137,249 +1367,62 @@ export class SpriteRegistry {
     }
 
     const allTypes: PieceType[] = ['I', 'O', 'T', 'L', 'J', 'S', 'Z']
-    for (const bSkin of this.blockSkins) {
-      const imgMap: Partial<Record<PieceType, HTMLImageElement>> = {}
-      this.blockSkinImages.set(bSkin.id, imgMap)
-
-      for (const t of allTypes) {
-        const url = bSkin.pieceUrls[t]
-        if (!url) continue
-        const img = new Image()
-        img.crossOrigin = 'anonymous'
-        img.onload = () => {
-          imgMap[t] = img
-          if (t === 'T') {
-            const previewCanvas =
-              bSkin.id === 'diy'
-                ? this.createDiyTintedBlockCanvas(img, 0)
-                : bSkin.id === 'gold'
-                  ? this.createGoldBlockCanvas(img, 0)
-                  : this.createTintedBlockCanvas(
-                      img,
-                      bSkin.palette[0] || PIECE_COLOR_PALETTE[0]
-                    )
-            if (previewCanvas) {
-              bSkin.previewUrl = previewCanvas.toDataURL('image/png')
-              this.notifyListeners()
-            }
-          } else if (t === 'O') {
-            const squareCanvas =
-              bSkin.id === 'diy'
-                ? this.createDiyTintedBlockCanvas(img, 0)
-                : bSkin.id === 'gold'
-                  ? this.createGoldBlockCanvas(img, 0)
-                  : this.createTintedBlockCanvas(
-                      img,
-                      bSkin.palette[0] || PIECE_COLOR_PALETTE[0]
-                    )
-            if (squareCanvas) {
-              bSkin.squarePreviewUrl = squareCanvas.toDataURL('image/png')
-              this.notifyListeners()
-            }
-          }
-          if (t === 'J' && !bSkin.pieceUrls.L) {
-            createMirroredImage(img, (mirroredL) => {
-              imgMap.L = mirroredL
-              if (this.activeBlockSkinId === bSkin.id) {
-                this.applyBlockSkinPieceImage('L', mirroredL, url)
-              }
-            })
-          } else if (t === 'L' && !bSkin.pieceUrls.J) {
-            createMirroredImage(img, (mirroredJ) => {
-              imgMap.J = mirroredJ
-              if (this.activeBlockSkinId === bSkin.id) {
-                this.applyBlockSkinPieceImage('J', mirroredJ, url)
-              }
-            })
-          }
-          if (this.activeBlockSkinId === bSkin.id) {
-            this.applyBlockSkinPieceImage(t, img, url)
-          }
-        }
-        img.src = url
-      }
-    }
-
-    // Restore persisted block skin or default to 'default'
-    let savedBlockSkinId: string | null = null
-    try {
-      savedBlockSkinId = window.localStorage.getItem('toy_tower_block_skin')
-    } catch {
-      savedBlockSkinId = null
-    }
-    const initialBlockSkin =
-      (savedBlockSkinId &&
-        this.blockSkins.find((s) => s.id === savedBlockSkinId)) ||
-      this.blockSkins[0]
-    this.activeBlockSkinId = initialBlockSkin ? initialBlockSkin.id : 'default'
-
     for (const t of allTypes) {
-      const activeSkin = this.getActiveBlockSkin()
-      const spriteUrl =
-        activeSkin?.pieceUrls[t] ||
-        (t === 'L' ? activeSkin?.pieceUrls.J : undefined) ||
-        defaultBlockUrls[t]
-      const colUrl = this.collisionUrlByType.get(t) || null
-      if (spriteUrl) {
-        this.registerBlockWithCollision(
-          `piece_${t}` as SpriteKey,
-          spriteUrl,
-          colUrl
-        )
-      }
-    }
-
-    // 3. Discover Special Sprites in assets/sprites/other (e.g. base.png, castle_roof.png, side_island.png)
-    for (const [path, url] of Object.entries(otherSpriteAssets)) {
-      const fileName = (path.split('/').pop() || '').toLowerCase()
-      if (fileName === 'base.png') {
-        this.registerSprite('base_plate', url)
-        this.registerSprite('scenery_pedestal', url)
-      } else if (fileName === 'castle_roof.png') {
-        this.registerSprite('piece_CASTLE_ROOF', url)
-      } else if (fileName === 'side_island.png') {
-        this.registerSprite('side_island', url)
-      }
-    }
-
-    // 4. Discover Parallax Background Sprites in assets/sprites/other/background (bg_1.png, bg_left_2.png, bg_right_2.png)
-    for (const [path, url] of Object.entries(backgroundSpriteAssets)) {
-      const fileName = (path.split('/').pop() || '').toLowerCase()
-      if (fileName === 'bg_1.png') {
-        this.registerSprite('bg_main', url)
-      } else if (fileName.startsWith('bg_left')) {
-        this.registerSprite('bg_left', url)
-      } else if (fileName.startsWith('bg_right')) {
-        this.registerSprite('bg_right', url)
-      }
-    }
-
-    // 4b. Discover Survivor Mode Map Sprites in assets/sprites/other/map/survivor
-    const loadSurvivorImg = (
-      url: string,
-      onReady: (img: HTMLImageElement) => void
-    ) => {
+      const url = bSkin.pieceUrls[t]
+      if (!url) continue
       const img = new Image()
       img.crossOrigin = 'anonymous'
       img.onload = () => {
-        onReady(img)
-        this.notifyListeners()
+        imgMap![t] = img
+        if (t === 'T') {
+          const previewCanvas =
+            bSkin.id === 'diy'
+              ? this.createDiyTintedBlockCanvas(img, 0)
+              : bSkin.id === 'gold'
+                ? this.createGoldBlockCanvas(img, 0)
+                : this.createTintedBlockCanvas(
+                    img,
+                    bSkin.palette[0] || PIECE_COLOR_PALETTE[0]
+                  )
+          if (previewCanvas) {
+            bSkin.previewUrl = previewCanvas.toDataURL('image/png')
+            this.notifyListeners()
+          }
+        } else if (t === 'O') {
+          const squareCanvas =
+            bSkin.id === 'diy'
+              ? this.createDiyTintedBlockCanvas(img, 0)
+              : bSkin.id === 'gold'
+                ? this.createGoldBlockCanvas(img, 0)
+                : this.createTintedBlockCanvas(
+                    img,
+                    bSkin.palette[0] || PIECE_COLOR_PALETTE[0]
+                  )
+          if (squareCanvas) {
+            bSkin.squarePreviewUrl = squareCanvas.toDataURL('image/png')
+            this.notifyListeners()
+          }
+        }
+        if (t === 'J' && !bSkin.pieceUrls.L) {
+          createMirroredImage(img, (mirroredL) => {
+            imgMap!.L = mirroredL
+            if (this.activeBlockSkinId === bSkin.id) {
+              this.applyBlockSkinPieceImage('L', mirroredL, url)
+            }
+          })
+        } else if (t === 'L' && !bSkin.pieceUrls.J) {
+          createMirroredImage(img, (mirroredJ) => {
+            imgMap!.J = mirroredJ
+            if (this.activeBlockSkinId === bSkin.id) {
+              this.applyBlockSkinPieceImage('J', mirroredJ, url)
+            }
+          })
+        }
+        if (this.activeBlockSkinId === bSkin.id) {
+          this.applyBlockSkinPieceImage(t, img, url)
+        }
       }
       img.src = url
-    }
-
-    for (const [path, url] of Object.entries(survivorMapAssets)) {
-      const fileName = (path.split('/').pop() || '').toLowerCase()
-      if (fileName === 'background.jpg' || fileName === 'background.png') {
-        loadSurvivorImg(url, (img) => {
-          this.survivorSprites.background = img
-        })
-      } else if (fileName === 'estalagmite.png') {
-        loadSurvivorImg(url, (img) => {
-          this.survivorSprites.estalagmite = img
-        })
-      } else if (fileName === 'nuvem.png') {
-        loadSurvivorImg(url, (img) => {
-          this.survivorSprites.nuvem = img
-        })
-      } else if (fileName === 'smoke.png') {
-        loadSurvivorImg(url, (img) => {
-          this.survivorSprites.smoke = img
-        })
-      } else if (fileName === 'raio 1.png' || fileName === 'raio1.png') {
-        loadSurvivorImg(url, (img) => {
-          this.survivorSprites.raios[0] = img
-        })
-      } else if (fileName === 'raio 2.png' || fileName === 'raio2.png') {
-        loadSurvivorImg(url, (img) => {
-          this.survivorSprites.raios[1] = img
-        })
-      } else if (fileName === 'raio 3.png' || fileName === 'raio3.png') {
-        loadSurvivorImg(url, (img) => {
-          this.survivorSprites.raios[2] = img
-        })
-      } else if (fileName === 'raio 4.png' || fileName === 'raio4.png') {
-        loadSurvivorImg(url, (img) => {
-          this.survivorSprites.raios[3] = img
-        })
-      }
-    }
-
-    // 5. Discover Menu Sprites in assets/sprites/menu (logo.png, screen_local.png, screen_multiplayer.png, screen_skins.png, screen_option.png, button_clean.png, etc.)
-    for (const [path, url] of Object.entries(menuSpriteAssets)) {
-      const fileName = path.split('/').pop() || path
-      const key = fileName.replace(/\.png$/i, '').toLowerCase()
-      this.menuSprites[key] = url
-    }
-
-    // 5b. Discover Shop Sprites in assets/sprites/menu/shop (shelf.png, table.png, shop_dino.png, shop_shadow.png)
-    for (const [path, url] of Object.entries(menuShopSpriteAssets)) {
-      const fileName = path.split('/').pop() || path
-      const key = fileName.replace(/\.png$/i, '').toLowerCase()
-      this.menuSprites[key] = url
-      if (!key.startsWith('shop_')) {
-        this.menuSprites[`shop_${key}`] = url
-      }
-    }
-
-    if (this.menuSprites.button_clean) {
-      this.menuSprites.button_clean_green = this.menuSprites.button_clean
-      this.menuSprites.button_clean_orange = this.menuSprites.button_clean
-      this.menuSprites.button_clean_yellow = this.menuSprites.button_clean
-      this.menuSprites.button_clean_purple = this.menuSprites.button_clean
-      this.menuSprites.button_clean_blue = this.menuSprites.button_clean
-
-      const btnImg = new Image()
-      btnImg.crossOrigin = 'anonymous'
-      btnImg.onload = () => {
-        const greenCanvas = this.createTintedBlockCanvas(btnImg, {
-          fill: '#55A838',
-          border: '#1B2230',
-          highlight: '#92E870',
-          label: 'Botão Verde',
-        })
-        const orangeCanvas = this.createTintedBlockCanvas(btnImg, {
-          fill: '#F97316',
-          border: '#1B2230',
-          highlight: '#FDBA74',
-          label: 'Botão Laranja',
-        })
-        const yellowCanvas = this.createTintedBlockCanvas(btnImg, {
-          fill: '#F59E0B',
-          border: '#1B2230',
-          highlight: '#FDE047',
-          label: 'Botão Amarelo',
-        })
-        const purpleCanvas = this.createTintedBlockCanvas(btnImg, {
-          fill: '#9333EA',
-          border: '#1B2230',
-          highlight: '#D8B4FE',
-          label: 'Botão Roxo',
-        })
-        const blueCanvas = this.createTintedBlockCanvas(btnImg, {
-          fill: '#0095FF',
-          border: '#1B2230',
-          highlight: '#80CAFF',
-          label: 'Botão Azul',
-        })
-        if (greenCanvas) {
-          this.menuSprites.button_clean_green = greenCanvas.toDataURL('image/png')
-        }
-        if (orangeCanvas) {
-          this.menuSprites.button_clean_orange = orangeCanvas.toDataURL('image/png')
-        }
-        if (yellowCanvas) {
-          this.menuSprites.button_clean_yellow = yellowCanvas.toDataURL('image/png')
-        }
-        if (purpleCanvas) {
-          this.menuSprites.button_clean_purple = purpleCanvas.toDataURL('image/png')
-        }
-        if (blueCanvas) {
-          this.menuSprites.button_clean_blue = blueCanvas.toDataURL('image/png')
-        }
-        this.notifyListeners()
-      }
-      btnImg.src = this.menuSprites.button_clean
     }
   }
 
@@ -1425,6 +1468,14 @@ export class SpriteRegistry {
   public setActivePlayerSkin(skinId: string): void {
     const skin = this.playerSkins.find((s) => s.id === skinId)
     if (!skin) return
+    const mascotSlot = this.getSlot('mascot_floating')
+    if (
+      this.activePlayerSkinId === skin.id &&
+      mascotSlot.spriteUrl === skin.url &&
+      mascotSlot.loaded
+    ) {
+      return
+    }
     this.activePlayerSkinId = skin.id
     try {
       window.localStorage.setItem('toy_tower_player_skin', skin.id)
@@ -1432,18 +1483,22 @@ export class SpriteRegistry {
       // Ignore storage errors
     }
 
-    const mascotSlot = this.getSlot('mascot_floating')
     mascotSlot.placeholder.label = skin.name
     mascotSlot.placeholder.fill = skin.accentColor
+    mascotSlot.spriteUrl = skin.url
 
     const cachedImg = this.playerSkinImages.get(skin.id)
-    if (cachedImg && cachedImg.complete && cachedImg.naturalWidth > 0) {
-      mascotSlot.image = cachedImg
-      mascotSlot.loaded = true
-      this.notifyListeners()
-    } else {
-      this.registerSprite('mascot_floating', skin.url)
+    if (cachedImg) {
+      if (cachedImg.complete && cachedImg.naturalWidth > 0) {
+        mascotSlot.image = cachedImg
+        mascotSlot.loaded = true
+        this.notifyListeners()
+      }
+      // If cachedImg is still downloading, its onload handler in initBundledAssets will populate mascotSlot automatically
+      return
     }
+
+    this.registerSprite('mascot_floating', skin.url)
   }
 
   public cycleNextPlayerSkin(delta: number = 1): PlayerSkinInfo | null {
@@ -1489,6 +1544,7 @@ export class SpriteRegistry {
     pieceType: PieceType
   ): HTMLCanvasElement[] | undefined {
     const normalizedId = (skinId || '').trim().toLowerCase() || 'default'
+    this.ensureBlockSkinLoaded(normalizedId)
     if (normalizedId === this.activeBlockSkinId) {
       const slot = this.slots.get(`piece_${pieceType}` as SpriteKey)
       if (slot?.multiColorCanvases && slot.multiColorCanvases.length > 0) {
@@ -1616,11 +1672,20 @@ export class SpriteRegistry {
   public setActiveBlockSkin(skinId: string): void {
     const skin = this.blockSkins.find((s) => s.id === skinId)
     if (!skin) return
+
+    const wasAlreadyActive = this.activeBlockSkinId === skin.id
     this.activeBlockSkinId = skin.id
     try {
       window.localStorage.setItem('toy_tower_block_skin', skin.id)
     } catch {
       // Ignore storage errors
+    }
+
+    this.ensureBlockSkinLoaded(skin.id)
+
+    if (wasAlreadyActive) {
+      // Already active and loading/loaded via ensureBlockSkinLoaded — avoid redundant canvas rebuilds
+      return
     }
 
     const cachedMap = this.blockSkinImages.get(skin.id)
@@ -1636,16 +1701,9 @@ export class SpriteRegistry {
         ''
       if (img && img.complete && (img.naturalWidth > 0 || img.width > 0)) {
         this.applyBlockSkinPieceImage(t, img, url)
-      } else if (url) {
-        this.registerBlockWithCollision(
-          `piece_${t}` as SpriteKey,
-          url,
-          this.collisionUrlByType.get(t) || null
-        )
       }
     }
 
-    this.rebuildAllTintedCanvases()
     this.notifyListeners()
   }
 
@@ -1664,6 +1722,7 @@ export class SpriteRegistry {
   }
 
   public setDynamicTintEnabled(enabled: boolean): void {
+    if (this.dynamicTintEnabled === enabled) return
     this.dynamicTintEnabled = enabled
     this.perBlockSkinCanvases.clear()
     this.rebuildAllTintedCanvases()

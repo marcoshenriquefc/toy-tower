@@ -33,6 +33,10 @@ function toyTowerAuthApiPlugin(): Plugin {
       res.end(JSON.stringify({ status: 'ok', uptime: process.uptime() }))
       return
     }
+    if (!url.startsWith('/api/')) {
+      next()
+      return
+    }
     const handled = await handleAuthApiRequest(req, res)
     if (!handled) {
       next()
